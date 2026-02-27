@@ -769,14 +769,20 @@ button { cursor: pointer; }
 ═══════════════════════════════════════════════ */
 
 /* Task card grab cursor */
-.task-card[draggable="true"] {
+.task-card {
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-user-drag: element;
 }
 
-.task-card[draggable="true"]:active {
+.task-card:active {
   cursor: grabbing;
+}
+
+.task-card * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Card being dragged */
@@ -801,6 +807,17 @@ button { cursor: pointer; }
   border-style: dashed;
   box-shadow: none;
   pointer-events: none;
+}
+
+.task-card--pointer-ghost {
+  position: fixed !important;
+  left: 0;
+  top: 0;
+  z-index: 2000;
+  pointer-events: none;
+  opacity: 0.95;
+  margin: 0 !important;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
 }
 
 .is-task-reordering .task-card {

@@ -8,7 +8,11 @@ const dragState = {
   sourceIndex: null
 };
 let taskDropPlaceholder = null;
+let taskDragClassRaf = null;
+let taskDragClassToken = 0;
 const TASK_REORDER_HYSTERESIS_PX = 6;
+const TASK_POINTER_DRAG_THRESHOLD_PX = 5;
+let taskPointerDrag = null;
 
 const SNAP_STEPS_PER_HOUR = 12; // 5-minute snapping
 let calZCounter = 1;
@@ -332,6 +336,15 @@ function clearTaskDragState() {
   dragState.taskId = dragState.sourceColId = dragState.sourceIndex = null;
 }
 
+function clearTaskDraggingClass() {
+  if (taskDragClassRaf !== null) {
+    cancelAnimationFrame(taskDragClassRaf);
+    taskDragClassRaf = null;
+  }
+  taskDragClassToken += 1;
+  document.querySelectorAll('.task-card--dragging').forEach(el => el.classList.remove('task-card--dragging'));
+}
+
 function clearCalendarDragState() {
   calDragEventId     = null;
   calDragSrc         = null;
@@ -443,7 +456,7 @@ function renderTaskCard(task) {
   const card = document.createElement('div');
   card.className = 'task-card' + (task.complete ? ' task-card--complete' : '');
   card.dataset.taskId = task.id;
-  card.draggable = true;
+  card.draggable = false;
 
   const scheduledPill = task.scheduledTime
     ? `<span class="task-card__scheduled-pill">${escapeHtml(task.scheduledTime)}</span>`
@@ -618,84 +631,53 @@ function commitAddTask(colEl) {
 
 function attachEvents() {
   const container = document.getElementById('day-columns');
+  const timeGrid = document.getElementById('time-grid');
+  const calGhost = document.getElementById('cal-event-ghost');
+  const calDragLine = document.getElementById('cal-drag-line');
+
+  function closestFromTarget(target, selector) {
+    if (target instanceof Element) return target.closest(selector);
+    if (target instanceof Node && target.parentElement) return target.parentElement.closest(selector);
+    return null;
+  }
 
   function resolveTaskListFromTarget(target) {
-    const direct = target.closest('.task-list');
+    const direct = closestFromTarget(target, '.task-list');
     if (direct) return direct;
-    const colEl = target.closest('.day-column');
+    const colEl = closestFromTarget(target, '.day-column');
     return colEl ? colEl.querySelector('.task-list') : null;
   }
 
-  // Safari fallback: remember intended source before native dragstart fires.
-  // Capture phase ensures this runs even when dragstart is flaky on dynamic nodes.
-  document.addEventListener('mousedown', e => {
-    if (e.target.closest('.cal-event__resize-handle')) {
-      clearPendingDrag();
-      return;
-    }
-    const card = e.target.closest('.task-card');
-    if (card) {
-      setPendingDrag('task', card.dataset.taskId);
-      return;
-    }
-    clearPendingDrag();
-  }, true);
+  function scheduleTaskDragClass(card) {
+    const localToken = taskDragClassToken + 1;
+    taskDragClassToken = localToken;
+    if (taskDragClassRaf !== null) cancelAnimationFrame(taskDragClassRaf);
+    taskDragClassRaf = requestAnimationFrame(() => {
+      taskDragClassRaf = null;
+      if (taskDragClassToken !== localToken) return;
+      if (activeDragType !== 'task') return;
+      if (dragState.taskId !== card.dataset.taskId) return;
+      if (!card.isConnected) return;
+      card.classList.add('task-card--dragging');
+    });
+  }
 
-  // ── Complete task toggle ────────────────────
-  container.addEventListener('click', e => {
-    const btn = e.target.closest('.task-card__complete-btn');
-    if (!btn) return;
-    const card   = btn.closest('.task-card');
-    const taskId = card.dataset.taskId;
-    for (const col of state.columns) {
-      const task = col.tasks.find(t => t.id === taskId);
-      if (task) { task.complete = !task.complete; renderColumn(col); break; }
-    }
-  });
+  function beginTaskDragFromCard(card) {
+    if (!card) return false;
+    const colEl = card.closest('.day-column');
+    if (!colEl) return false;
 
-  // ── Show add-task input ─────────────────────
-  container.addEventListener('click', e => {
-    const btn = e.target.closest('.add-task-btn');
-    if (!btn) return;
-    showAddTaskInput(btn.closest('.day-column'));
-  });
-
-  // ── Confirm add task ────────────────────────
-  container.addEventListener('click', e => {
-    if (!e.target.closest('.add-task-confirm')) return;
-    commitAddTask(e.target.closest('.day-column'));
-  });
-
-  // ── Cancel add task ─────────────────────────
-  container.addEventListener('click', e => {
-    if (!e.target.closest('.add-task-cancel')) return;
-    hideAddTaskInput(e.target.closest('.day-column'));
-  });
-
-  // ── Enter / Escape in input ─────────────────
-  container.addEventListener('keydown', e => {
-    const input = e.target.closest('.add-task-input');
-    if (!input) return;
-    const colEl = input.closest('.day-column');
-    if (e.key === 'Enter')  { e.preventDefault(); commitAddTask(colEl); }
-    if (e.key === 'Escape') { hideAddTaskInput(colEl); }
-  });
-
-  // ════ DRAG AND DROP — COLUMNS ════════════════
-
-  // ── dragstart: pick up a task card ──────────
-  container.addEventListener('dragstart', e => {
-    const card = e.target.closest('.task-card');
-    if (!card) return;
+    // Recover from any prior interrupted drag that left a card hidden.
+    clearTaskDraggingClass();
 
     // Forcibly clear any stale cal-event drag state before task drag begins.
     clearCalendarDragState();
 
-    const colEl = card.closest('.day-column');
     dragState.taskId      = card.dataset.taskId;
     dragState.sourceColId = colEl.dataset.colId;
 
     const col = state.columns.find(c => c.id === dragState.sourceColId);
+    if (!col) return false;
     dragState.sourceIndex = col.tasks.findIndex(t => t.id === dragState.taskId);
 
     if (taskDropPlaceholder && taskDropPlaceholder.parentElement) {
@@ -716,23 +698,24 @@ function attachEvents() {
       sourceTaskList.dataset.dropIndex = String(Math.max(0, dragState.sourceIndex));
     }
 
-    e.dataTransfer.effectAllowed = 'move';
-    // setData is required in Firefox/Safari for a drag to be recognized as valid
-    e.dataTransfer.setData('text/plain', dragState.taskId);
     setActiveDrag('task', dragState.taskId);
     clearPendingDrag();
     document.body.classList.add('is-task-reordering');
+    scheduleTaskDragClass(card);
+    return true;
+  }
 
-    // Delay so browser snapshots the full-opacity card as the drag image
-    requestAnimationFrame(() => card.classList.add('task-card--dragging'));
-  });
+  function ensureTaskDragStateFromEvent(e) {
+    if (dragState.taskId) return true;
+    const taskId = resolveTaskDragTaskId(e);
+    if (!taskId) return false;
+    const sourceCard = container.querySelector(`.task-card[data-task-id="${taskId}"]`);
+    if (!sourceCard) return false;
+    return beginTaskDragFromCard(sourceCard);
+  }
 
-  // ── dragend: clean up ───────────────────────
-  container.addEventListener('dragend', () => {
-    // Sweep all cards — more reliable than e.target when DOM has been re-rendered
-    container.querySelectorAll('.task-card--dragging').forEach(el => el.classList.remove('task-card--dragging'));
-
-    // Clean up any lingering indicators / highlights
+  function cleanupTaskDropVisuals() {
+    clearTaskDraggingClass();
     if (taskDropPlaceholder && taskDropPlaceholder.parentElement) taskDropPlaceholder.remove();
     taskDropPlaceholder = null;
     document.querySelectorAll('.task-list.drag-over').forEach(el => {
@@ -742,32 +725,17 @@ function attachEvents() {
     document.querySelectorAll('.task-list').forEach(el => {
       delete el.dataset.dropIndex;
     });
+  }
 
-    // Delay reset for Firefox (dragend fires before drop in FF)
-    setTimeout(() => {
-      clearTaskDragState();
-      if (activeDragType === 'task') clearActiveDrag();
-      clearPendingDrag();
-      document.body.classList.remove('is-task-reordering');
-    }, 0);
-  });
+  function finalizeTaskDragState() {
+    clearTaskDragState();
+    if (activeDragType === 'task') clearActiveDrag();
+    clearPendingDrag();
+    document.body.classList.remove('is-task-reordering');
+  }
 
-  // ── dragenter: highlight task list ──────────
-  container.addEventListener('dragenter', e => {
-    if (!dragState.taskId) return;
-    const taskList = resolveTaskListFromTarget(e.target);
+  function updateTaskPlaceholderForList(taskList, clientY) {
     if (!taskList) return;
-    taskList.classList.add('drag-over');
-  });
-
-  // ── dragover: show drop indicator ───────────
-  container.addEventListener('dragover', e => {
-    if (!dragState.taskId) return;
-    const taskList = resolveTaskListFromTarget(e.target);
-    if (!taskList) return;
-
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
     taskList.classList.add('drag-over');
 
     let placeholder = taskDropPlaceholder;
@@ -784,7 +752,7 @@ function attachEvents() {
       if (Number.isFinite(parsed)) previousIndex = parsed;
     }
 
-    const { index: insertIndex, cards } = getInsertIndexFromPointer(taskList, e.clientY, previousIndex);
+    const { index: insertIndex, cards } = getInsertIndexFromPointer(taskList, clientY, previousIndex);
     if (previousIndex !== insertIndex) {
       taskList.dataset.dropIndex = String(insertIndex);
       const beforeCard = cards[insertIndex] || null;
@@ -794,6 +762,302 @@ function attachEvents() {
       const beforeCard = cards[insertIndex] || null;
       taskList.insertBefore(placeholder, beforeCard);
     }
+  }
+
+  function showCalendarGhostForTask(taskId, clientY) {
+    if (!timeGrid || !calGhost) return;
+    const task = findTaskById(taskId);
+    if (!task) return;
+
+    const offset = yToOffset(clientY, timeGrid);
+    const durationHours = task.timeEstimateMinutes > 0
+      ? task.timeEstimateMinutes / 60
+      : 0.5;
+    const channelStyle = getChannelStyle(task.tag);
+    const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
+
+    calGhost.hidden = false;
+    if (calDragLine) calDragLine.hidden = true;
+    calGhost.style.backgroundColor = hexToRgba(ghostColor, 0.28);
+    calGhost.style.borderColor = hexToRgba(ghostColor, 0.95);
+    calGhost.style.borderStyle = 'dashed';
+    calGhost.style.borderWidth = '2px';
+    calGhost.style.setProperty('--offset', offset);
+    calGhost.style.setProperty('--duration', durationHours);
+    calGhost.querySelector('.cal-event__title').textContent = task.title;
+    calGhost.querySelector('.cal-event__time').textContent = formatTimeRange(offset, durationHours);
+  }
+
+  function hideCalendarGhost() {
+    if (calGhost) calGhost.hidden = true;
+    if (calDragLine) calDragLine.hidden = true;
+  }
+
+  function dropTaskOnTimeline(taskId, clientY) {
+    if (!timeGrid) return false;
+    const task = findTaskById(taskId);
+    if (!task) return false;
+
+    const offset = yToOffset(clientY, timeGrid);
+    const duration = task.timeEstimateMinutes > 0
+      ? task.timeEstimateMinutes / 60
+      : 0.5;
+
+    task.scheduledTime = offsetToScheduledTime(offset);
+
+    const existing = state.calendarEvents.find(ev => ev.taskId === task.id);
+    if (existing) {
+      existing.offset = offset;
+      existing.duration = duration;
+      existing.title = task.title;
+      existing.colorClass = getTaskEventColorClass(task, existing.colorClass);
+      existing.zOrder = ++calZCounter;
+    } else {
+      state.calendarEvents.push({
+        id: 'evt-' + uid(),
+        title: task.title,
+        colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+        offset,
+        duration,
+        taskId: task.id,
+        zOrder: ++calZCounter
+      });
+    }
+
+    const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+    if (col) renderColumn(col);
+    renderCalendarEvents();
+    return true;
+  }
+
+  function dropTaskIntoList(taskList) {
+    if (!taskList || !dragState.taskId) return false;
+    const targetColEl = taskList.closest('.day-column');
+    if (!targetColEl) return false;
+    const targetColId = targetColEl.dataset.colId;
+
+    const cards = [...taskList.querySelectorAll('.task-card:not(.task-card--dragging):not(.task-card--placeholder)')];
+    let insertIndex = cards.length;
+    if (taskList.dataset.dropIndex !== undefined) {
+      const parsed = Number.parseInt(taskList.dataset.dropIndex, 10);
+      if (Number.isFinite(parsed)) insertIndex = Math.max(0, Math.min(parsed, cards.length));
+    }
+
+    const sourceCol = state.columns.find(c => c.id === dragState.sourceColId);
+    const targetCol = state.columns.find(c => c.id === targetColId);
+    if (!sourceCol || !targetCol) return false;
+    const taskIndex = sourceCol.tasks.findIndex(t => t.id === dragState.taskId);
+    if (taskIndex === -1) return false;
+
+    const [task] = sourceCol.tasks.splice(taskIndex, 1);
+    targetCol.tasks.splice(insertIndex, 0, task);
+
+    cleanupTaskDropVisuals();
+    renderColumn(sourceCol);
+    if (sourceCol !== targetCol) renderColumn(targetCol);
+    setTimeout(finalizeTaskDragState, 0);
+    return true;
+  }
+
+  // Safari fallback: remember intended source before native dragstart fires.
+  // Capture phase ensures this runs even when dragstart is flaky on dynamic nodes.
+  document.addEventListener('mousedown', e => {
+    if (closestFromTarget(e.target, '.cal-event__resize-handle')) {
+      clearPendingDrag();
+      return;
+    }
+    const card = closestFromTarget(e.target, '.task-card');
+    if (card) {
+      setPendingDrag('task', card.dataset.taskId);
+      return;
+    }
+    clearPendingDrag();
+  }, true);
+
+  // ── Complete task toggle ────────────────────
+  container.addEventListener('click', e => {
+    const btn = closestFromTarget(e.target, '.task-card__complete-btn');
+    if (!btn) return;
+    const card   = btn.closest('.task-card');
+    const taskId = card.dataset.taskId;
+    for (const col of state.columns) {
+      const task = col.tasks.find(t => t.id === taskId);
+      if (task) { task.complete = !task.complete; renderColumn(col); break; }
+    }
+  });
+
+  // ── Show add-task input ─────────────────────
+  container.addEventListener('click', e => {
+    const btn = closestFromTarget(e.target, '.add-task-btn');
+    if (!btn) return;
+    showAddTaskInput(btn.closest('.day-column'));
+  });
+
+  // ── Confirm add task ────────────────────────
+  container.addEventListener('click', e => {
+    if (!closestFromTarget(e.target, '.add-task-confirm')) return;
+    commitAddTask(closestFromTarget(e.target, '.day-column'));
+  });
+
+  // ── Cancel add task ─────────────────────────
+  container.addEventListener('click', e => {
+    if (!closestFromTarget(e.target, '.add-task-cancel')) return;
+    hideAddTaskInput(closestFromTarget(e.target, '.day-column'));
+  });
+
+  // ── Enter / Escape in input ─────────────────
+  container.addEventListener('keydown', e => {
+    const input = closestFromTarget(e.target, '.add-task-input');
+    if (!input) return;
+    const colEl = input.closest('.day-column');
+    if (e.key === 'Enter')  { e.preventDefault(); commitAddTask(colEl); }
+    if (e.key === 'Escape') { hideAddTaskInput(colEl); }
+  });
+
+  // ════ DRAG AND DROP — COLUMNS ════════════════
+
+  // Pointer fallback: reorder and timeline drop without relying on native HTML5 drag.
+  container.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    const card = closestFromTarget(e.target, '.task-card');
+    if (!card) return;
+    e.preventDefault();
+    taskPointerDrag = {
+      taskId: card.dataset.taskId,
+      startX: e.clientX,
+      startY: e.clientY,
+      started: false,
+      sourceCard: card,
+      ghostEl: null
+    };
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!taskPointerDrag) return;
+
+    if (!taskPointerDrag.started) {
+      const dx = e.clientX - taskPointerDrag.startX;
+      const dy = e.clientY - taskPointerDrag.startY;
+      if (Math.hypot(dx, dy) < TASK_POINTER_DRAG_THRESHOLD_PX) return;
+      if (!beginTaskDragFromCard(taskPointerDrag.sourceCard)) {
+        taskPointerDrag = null;
+        return;
+      }
+
+      const ghost = taskPointerDrag.sourceCard.cloneNode(true);
+      ghost.classList.remove('task-card--dragging', 'task-card--placeholder');
+      ghost.classList.add('task-card--pointer-ghost');
+      ghost.removeAttribute('draggable');
+      ghost.style.width = `${taskPointerDrag.sourceCard.offsetWidth}px`;
+      document.body.appendChild(ghost);
+
+      taskPointerDrag.ghostEl = ghost;
+      taskPointerDrag.started = true;
+    }
+
+    e.preventDefault();
+    const ghost = taskPointerDrag.ghostEl;
+    if (ghost) {
+      ghost.style.left = `${e.clientX + 12}px`;
+      ghost.style.top = `${e.clientY + 12}px`;
+    }
+
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const taskList = resolveTaskListFromTarget(target);
+    if (taskList) {
+      updateTaskPlaceholderForList(taskList, e.clientY);
+    } else {
+      document.querySelectorAll('.task-list.drag-over').forEach(el => {
+        el.classList.remove('drag-over');
+        delete el.dataset.dropIndex;
+      });
+      document.querySelectorAll('.task-list').forEach(el => {
+        delete el.dataset.dropIndex;
+      });
+      if (taskDropPlaceholder && taskDropPlaceholder.parentElement) {
+        taskDropPlaceholder.remove();
+      }
+    }
+
+    const overTimeline = !!(target && closestFromTarget(target, '#time-grid'));
+    if (overTimeline) {
+      showCalendarGhostForTask(taskPointerDrag.taskId, e.clientY);
+    } else {
+      hideCalendarGhost();
+    }
+  });
+
+  document.addEventListener('mouseup', e => {
+    if (!taskPointerDrag) return;
+    const { started, taskId, ghostEl } = taskPointerDrag;
+    taskPointerDrag = null;
+
+    if (ghostEl && ghostEl.parentElement) ghostEl.remove();
+    if (!started) return;
+
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const taskList = resolveTaskListFromTarget(target);
+    if (taskList && dragState.taskId) {
+      dropTaskIntoList(taskList);
+      hideCalendarGhost();
+      return;
+    }
+
+    const overTimeline = !!(target && closestFromTarget(target, '#time-grid'));
+    if (overTimeline) {
+      dropTaskOnTimeline(taskId, e.clientY);
+    }
+
+    hideCalendarGhost();
+    cleanupTaskDropVisuals();
+    finalizeTaskDragState();
+  });
+
+  // ── dragstart: pick up a task card ──────────
+  container.addEventListener('dragstart', e => {
+    const card = closestFromTarget(e.target, '.task-card');
+    if (!card) return;
+    if (!beginTaskDragFromCard(card)) return;
+    if (!e.dataTransfer) return;
+    e.dataTransfer.effectAllowed = 'move';
+    // setData is required in Firefox/Safari for a drag to be recognized as valid
+    e.dataTransfer.setData('text/plain', dragState.taskId);
+  });
+
+  // ── dragend: clean up ───────────────────────
+  container.addEventListener('dragend', () => {
+    cleanupTaskDropVisuals();
+
+    // Delay reset for Firefox (dragend fires before drop in FF)
+    setTimeout(finalizeTaskDragState, 0);
+  });
+
+  // Safety net: Safari can miss source-scoped cleanup after some aborted drops.
+  document.addEventListener('drop', () => {
+    setTimeout(clearTaskDraggingClass, 0);
+  }, true);
+  document.addEventListener('dragend', () => {
+    setTimeout(clearTaskDraggingClass, 0);
+  }, true);
+
+  // ── dragenter: highlight task list ──────────
+  container.addEventListener('dragenter', e => {
+    if (!dragState.taskId && !ensureTaskDragStateFromEvent(e)) return;
+    const taskList = resolveTaskListFromTarget(e.target);
+    if (!taskList) return;
+    taskList.classList.add('drag-over');
+  });
+
+  // ── dragover: show drop indicator ───────────
+  container.addEventListener('dragover', e => {
+    if (!dragState.taskId && !ensureTaskDragStateFromEvent(e)) return;
+    const taskList = resolveTaskListFromTarget(e.target);
+    if (!taskList) return;
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    updateTaskPlaceholderForList(taskList, e.clientY);
   });
 
   // ── dragleave: un-highlight ──────────────────
@@ -804,47 +1068,19 @@ function attachEvents() {
     const nextTarget = e.relatedTarget || document.elementFromPoint(e.clientX, e.clientY);
     const colEl = taskList.closest('.day-column');
     if (nextTarget && taskList.contains(nextTarget)) return;
-    if (nextTarget && nextTarget.closest('.task-list') === taskList) return;
+    if (nextTarget && closestFromTarget(nextTarget, '.task-list') === taskList) return;
     if (colEl && nextTarget && colEl.contains(nextTarget)) return;
     taskList.classList.remove('drag-over');
     delete taskList.dataset.dropIndex;
-    if (taskDropPlaceholder && taskDropPlaceholder.parentElement === taskList) {
-      taskDropPlaceholder.remove();
-    }
   });
 
   // ── drop: move task in state ─────────────────
   container.addEventListener('drop', e => {
+    if (!dragState.taskId && !ensureTaskDragStateFromEvent(e)) return;
     const taskList = resolveTaskListFromTarget(e.target);
     if (!taskList || !dragState.taskId) return;
     e.preventDefault();
-
-    const targetColEl = taskList.closest('.day-column');
-    const targetColId = targetColEl.dataset.colId;
-
-    // Determine insert index from dragover-computed target.
-    const cards = [...taskList.querySelectorAll('.task-card:not(.task-card--dragging):not(.task-card--placeholder)')];
-    let insertIndex = cards.length; // default: append
-    if (taskList.dataset.dropIndex !== undefined) {
-      const parsed = Number.parseInt(taskList.dataset.dropIndex, 10);
-      if (Number.isFinite(parsed)) insertIndex = Math.max(0, Math.min(parsed, cards.length));
-    }
-
-    const sourceCol = state.columns.find(c => c.id === dragState.sourceColId);
-    const targetCol = state.columns.find(c => c.id === targetColId);
-    const taskIndex = sourceCol.tasks.findIndex(t => t.id === dragState.taskId);
-    const [task]    = sourceCol.tasks.splice(taskIndex, 1);
-
-    targetCol.tasks.splice(insertIndex, 0, task);
-
-    // Clean up visual state
-    taskList.classList.remove('drag-over');
-    delete taskList.dataset.dropIndex;
-    if (taskDropPlaceholder && taskDropPlaceholder.parentElement) taskDropPlaceholder.remove();
-    taskDropPlaceholder = null;
-
-    renderColumn(sourceCol);
-    if (sourceCol !== targetCol) renderColumn(targetCol);
+    dropTaskIntoList(taskList);
   });
 }
 
