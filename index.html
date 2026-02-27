@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Planner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=20260227-20">
+</head>
+<body>
+  <div class="app-shell">
+
+    <!-- ═══ LEFT SIDEBAR ═══ -->
+    <aside class="sidebar">
+      <div class="sidebar__logo">
+        <span class="logo-text">Sunsama</span>
+        <i data-lucide="chevron-down" class="logo-caret"></i>
+      </div>
+
+      <nav class="sidebar__nav">
+        <a href="#" class="nav-item nav-item--active">
+          <i data-lucide="home" class="nav-icon"></i>
+          <span class="nav-label">Home</span>
+        </a>
+        <a href="#" class="nav-item">
+          <i data-lucide="list" class="nav-icon"></i>
+          <span class="nav-label">Today</span>
+        </a>
+        <a href="#" class="nav-item">
+          <i data-lucide="coffee" class="nav-icon"></i>
+          <span class="nav-label">Focus</span>
+        </a>
+      </nav>
+
+      <div class="sidebar__section">
+        <span class="section-label">DAY</span>
+        <a href="#" class="nav-item">
+          <i data-lucide="book-open" class="nav-icon"></i>
+          <span class="nav-label">Daily planning</span>
+        </a>
+        <a href="#" class="nav-item">
+          <i data-lucide="moon" class="nav-icon"></i>
+          <span class="nav-label">Daily shutdown</span>
+        </a>
+        <a href="#" class="nav-item">
+          <i data-lucide="pencil" class="nav-icon"></i>
+          <span class="nav-label">Daily highlights</span>
+        </a>
+      </div>
+
+      <div class="sidebar__section">
+        <span class="section-label">WEEK</span>
+        <a href="#" class="nav-item">
+          <i data-lucide="calendar" class="nav-icon"></i>
+          <span class="nav-label">Weekly planning</span>
+        </a>
+        <a href="#" class="nav-item">
+          <i data-lucide="clipboard-list" class="nav-icon"></i>
+          <span class="nav-label">Weekly review</span>
+        </a>
+      </div>
+    </aside>
+
+    <!-- ═══ MAIN BOARD ═══ -->
+    <main class="board">
+      <div class="board__topbar">
+        <div class="topbar__views">
+          <button class="view-btn view-btn--active" data-view="today">
+            <i data-lucide="calendar-days" class="view-icon"></i>
+            Today
+          </button>
+          <button class="view-btn" data-view="board">
+            <i data-lucide="layout-grid" class="view-icon"></i>
+            Board
+          </button>
+        </div>
+      </div>
+
+      <div class="board__columns" id="day-columns">
+        <!-- Day columns are rendered by app.js -->
+      </div>
+    </main>
+
+    <!-- ═══ CALENDAR PANEL ═══ -->
+    <aside class="calendar-panel">
+      <div class="calendar-panel__header">
+        <i data-lucide="align-justify" class="cal-header-icon"></i>
+        <span class="cal-header-label">Calendars</span>
+      </div>
+
+      <div class="calendar-day-badge">
+        <div class="calendar-day-info">
+          <span class="calendar-day-name">MON</span>
+          <span class="calendar-day-number">10</span>
+        </div>
+      </div>
+
+      <div class="time-grid-wrapper">
+        <div class="time-grid" id="time-grid">
+          <!-- Hour rows 12 AM – 11 PM -->
+          <div class="time-grid__row"><span class="time-grid__label">12 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">1 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">2 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">3 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">4 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">5 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">6 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">7 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">8 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">9 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">10 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">11 AM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">12 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">1 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">2 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">3 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">4 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">5 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">6 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">7 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">8 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">9 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">10 PM</span><div class="time-grid__track"></div></div>
+          <div class="time-grid__row"><span class="time-grid__label">11 PM</span><div class="time-grid__track"></div></div>
+
+          <!-- Calendar events rendered by renderCalendarEvents() in app.js -->
+
+          <!-- Drop line indicator for calendar event repositioning -->
+          <div id="cal-drag-line" hidden></div>
+
+          <!-- Drag ghost preview — positioned dynamically during dragover -->
+          <div class="cal-event cal-event-ghost" id="cal-event-ghost" hidden>
+            <span class="cal-event__title"></span>
+            <span class="cal-event__time"></span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="app.js?v=20260227-27"></script>
+</body>
+</html>
