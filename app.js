@@ -13,8 +13,18 @@ let taskDragClassToken = 0;
 const TASK_REORDER_HYSTERESIS_PX = 6;
 const TASK_POINTER_DRAG_THRESHOLD_PX = 5;
 let taskPointerDrag = null;
+let suppressTaskCardClick = false;
 
 const SNAP_STEPS_PER_HOUR = 12; // 5-minute snapping
+const CALENDAR_START_HOUR = 0;
+const DEFAULT_CALENDAR_TOTAL_HOURS = 24;
+const DEFAULT_HOUR_HEIGHT_PX = 60;
+const DEFAULT_WORKDAY_START_HOUR = 8;
+const DEFAULT_WORKDAY_END_HOUR = 17;
+const WORKDAY_SCROLL_LEAD_HOURS = 1;
+const MIN_CALENDAR_ZOOM = 1;
+const MAX_CALENDAR_ZOOM = 3;
+const DEFAULT_CALENDAR_ZOOM = 1;
 let calZCounter = 1;
 
 // Set to true while a resize is in progress so dragstart can cancel itself
@@ -30,6 +40,7 @@ let activeDragType     = null;  // 'task' | 'calendar'
 let activeDragId       = null;
 let pendingDragType    = null;  // Safari fallback when dragstart is skipped
 let pendingDragId      = null;
+let workdayMarkerDrag  = null;  // { type: 'start' | 'end' }
 
 /* ═══════════════════════════════════════════════
    DATA MODEL
@@ -154,11 +165,18 @@ const state = {
   ],
 
   calendarEvents: [
-    { id: 'evt-1', title: 'Morning routine',                colorClass: 'cal-event--blue',   offset: 1,  duration: 0.5, taskId: null },
-    { id: 'evt-2', title: 'Product demo with Jenn',         colorClass: 'cal-event--orange', offset: 4,  duration: 1.5, taskId: 'task-4' },
-    { id: 'evt-3', title: 'Lunch',                          colorClass: 'cal-event--blue',   offset: 6,  duration: 1,   taskId: null },
-    { id: 'evt-4', title: 'Review prototype of new feature',colorClass: 'cal-event--purple', offset: 7,  duration: 2,   taskId: null }
-  ]
+    { id: 'evt-1', title: 'Morning routine',                colorClass: 'cal-event--blue',   offset: 7,  duration: 0.5, taskId: null },
+    { id: 'evt-2', title: 'Product demo with Jenn',         colorClass: 'cal-event--orange', offset: 10, duration: 1.5, taskId: 'task-4' },
+    { id: 'evt-3', title: 'Lunch',                          colorClass: 'cal-event--blue',   offset: 12, duration: 1,   taskId: null },
+    { id: 'evt-4', title: 'Review prototype of new feature',colorClass: 'cal-event--purple', offset: 13, duration: 2,   taskId: null }
+  ],
+
+  workday: {
+    startOffset: DEFAULT_WORKDAY_START_HOUR,
+    endOffset: DEFAULT_WORKDAY_END_HOUR
+  },
+
+  calendarZoom: DEFAULT_CALENDAR_ZOOM
 };
 
 /* ═══════════════════════════════════════════════
@@ -179,6 +197,18 @@ function computeProgress(column) {
     .filter(t => t.complete)
     .reduce((s, t) => s + t.timeEstimateMinutes, 0);
   return Math.round((done / total) * 100);
+}
+
+function moveCompletedTasksToBottom(column) {
+  const activeTasks = [];
+  const completedTasks = [];
+
+  for (const task of column.tasks) {
+    if (task.complete) completedTasks.push(task);
+    else activeTasks.push(task);
+  }
+
+  column.tasks = activeTasks.concat(completedTasks);
 }
 
 function uid() {
@@ -227,36 +257,76 @@ function findTaskById(taskId) {
   return null;
 }
 
-// offset (float hours from 6 AM) → "HH:MM" 24-hour string  e.g. 4 → "10:00"
+function findTaskContext(taskId) {
+  for (const col of state.columns) {
+    const index = col.tasks.findIndex(t => t.id === taskId);
+    if (index !== -1) return { column: col, task: col.tasks[index], index };
+  }
+  return null;
+}
+
+function getHourHeightPx(timeGridEl = null) {
+  if (!timeGridEl) return DEFAULT_HOUR_HEIGHT_PX;
+  const raw = getComputedStyle(timeGridEl).getPropertyValue('--hour-height');
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_HOUR_HEIGHT_PX;
+}
+
+function getCalendarTotalHours(timeGridEl = null) {
+  if (!timeGridEl) return DEFAULT_CALENDAR_TOTAL_HOURS;
+  const rows = timeGridEl.querySelectorAll('.time-grid__row').length;
+  return rows > 0 ? rows : DEFAULT_CALENDAR_TOTAL_HOURS;
+}
+
+function clampCalendarOffset(offset, duration = 0, timeGridEl = null) {
+  const totalHours = getCalendarTotalHours(timeGridEl);
+  const maxOffset = Math.max(0, totalHours - duration);
+  return Math.max(0, Math.min(offset, maxOffset));
+}
+
+// offset (float hours from grid start) → "HH:MM" 24-hour string
 function offsetToScheduledTime(offset) {
   const totalMinutes = Math.round(offset * 60);
-  const hour   = 6 + Math.floor(totalMinutes / 60);
+  const hour   = CALENDAR_START_HOUR + Math.floor(totalMinutes / 60);
   const minute = totalMinutes % 60;
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
-// "HH:MM" → float hours from 6 AM  e.g. "10:00" → 4
+// "HH:MM" → float hours from grid start
 function scheduledTimeToOffset(scheduledTime) {
   const [h, m] = scheduledTime.split(':').map(Number);
-  return (h - 6) + m / 60;
+  return (h - CALENDAR_START_HOUR) + m / 60;
 }
 
-// Format a time range label: e.g. offset=4, duration=1 → "10 AM – 11 AM"
+function formatOffsetAsClock(totalHoursFromGridStart) {
+  const totalH = CALENDAR_START_HOUR + totalHoursFromGridStart;
+  const h = Math.floor(totalH);
+  const m = Math.round((totalHoursFromGridStart % 1) * 60);
+  // Handle fractional carry (e.g. 0.99 * 60 rounding)
+  const adjH = m === 60 ? h + 1 : h;
+  const adjM = m === 60 ? 0 : m;
+  const normalizedHour = ((adjH % 24) + 24) % 24;
+  const period = normalizedHour < 12 ? 'AM' : 'PM';
+  const h12    = normalizedHour % 12 || 12;
+  return adjM === 0
+    ? `${h12} ${period}`
+    : `${h12}:${String(adjM).padStart(2, '0')} ${period}`;
+}
+
+function formatOffsetAsClockNoPeriod(totalHoursFromGridStart) {
+  const totalH = CALENDAR_START_HOUR + totalHoursFromGridStart;
+  const h = Math.floor(totalH);
+  const m = Math.round((totalHoursFromGridStart % 1) * 60);
+  const adjH = m === 60 ? h + 1 : h;
+  const adjM = m === 60 ? 0 : m;
+  const normalizedHour = ((adjH % 24) + 24) % 24;
+  const h12 = normalizedHour % 12 || 12;
+  return `${h12}:${String(adjM).padStart(2, '0')}`;
+}
+
+// Format a time range label from grid offsets.
 function formatTimeRange(offset, duration) {
-  function fmt(totalHoursFromMidnight) {
-    const totalH = 6 + totalHoursFromMidnight;
-    const h = Math.floor(totalH);
-    const m = Math.round((totalHoursFromMidnight % 1) * 60);
-    // Handle fractional carry (e.g. 0.99 * 60 rounding)
-    const adjH = m === 60 ? h + 1 : h;
-    const adjM = m === 60 ? 0 : m;
-    const period = adjH < 12 ? 'AM' : 'PM';
-    const h12    = adjH > 12 ? adjH - 12 : (adjH === 0 ? 12 : adjH);
-    return adjM === 0
-      ? `${h12} ${period}`
-      : `${h12}:${String(adjM).padStart(2, '0')} ${period}`;
-  }
-  return `${fmt(offset)} – ${fmt(offset + duration)}`;
+  return `${formatOffsetAsClock(offset)} – ${formatOffsetAsClock(offset + duration)}`;
 }
 
 function buildCalendarLaneLayout(events) {
@@ -302,11 +372,13 @@ function buildCalendarLaneLayout(events) {
   return layout;
 }
 
-// Convert clientY to grid offset in hours (snapped to 5-min increments, clamped)
-function yToOffset(clientY, timeGridEl) {
+// Convert clientY to grid offset in hours (snapped and clamped to visible rows)
+function yToOffset(clientY, timeGridEl, duration = 0) {
   const rect = timeGridEl.getBoundingClientRect();
-  const raw  = (clientY - rect.top) / 60; // 60px = --hour-height
-  return Math.max(0, Math.min(Math.round(raw * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR, 11));
+  const hourHeight = getHourHeightPx(timeGridEl);
+  const raw  = (clientY - rect.top) / hourHeight;
+  const snapped = Math.round(raw * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR;
+  return clampCalendarOffset(snapped, duration, timeGridEl);
 }
 
 // For column reorder: compute stable insert index using midpoint thresholds + hysteresis.
@@ -452,6 +524,128 @@ function renderTaskTag(tag) {
   return `<span class="task-card__tag">${hash}<span class="task-card__tag-word">${escapeHtml(word)}</span></span>`;
 }
 
+function renderTaskDetailModal(task, column) {
+  const rawTag = task.tag ? String(task.tag).trim() : '';
+  const hasHash = rawTag.startsWith('#');
+  const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'general';
+  const channelStyle = getChannelStyle(rawTag);
+  const hashColor = channelStyle ? channelStyle.hashColor : '#7da2ff';
+  const startLabel = task.scheduledTime ? task.scheduledTime : 'Today';
+  const actualTime = '--:--';
+  const actualValueClass = actualTime === '--:--'
+    ? 'task-modal__metric-value task-modal__metric-value--placeholder'
+    : 'task-modal__metric-value task-modal__metric-value--set';
+  const plannedTime = formatMinutes(task.timeEstimateMinutes);
+  const timelineEntries = [
+    `${column.dayName} list task created`,
+    task.complete ? 'Marked complete' : 'Marked incomplete',
+    task.scheduledTime ? `Scheduled for ${task.scheduledTime}` : 'No scheduled time yet'
+  ];
+  const timelineHtml = timelineEntries
+    .map(entry => `<li class="task-modal__timeline-item">${escapeHtml(entry)}</li>`)
+    .join('');
+
+  return `
+    <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+      <div class="task-modal__header">
+        <div class="task-modal__meta-group">
+          <span class="task-modal__meta-label">CHANNEL</span>
+          <span class="task-modal__channel">
+            ${hasHash ? `<span class="task-modal__channel-hash" style="color:${escapeHtml(hashColor)};">#</span>` : ''}
+            <span class="task-modal__channel-word">${escapeHtml(channelWord)}</span>
+          </span>
+        </div>
+        <div class="task-modal__meta-right">
+          <div class="task-modal__meta-group">
+            <span class="task-modal__meta-label">START</span>
+            <button class="task-modal__meta-start-btn" type="button">${escapeHtml(startLabel)}</button>
+          </div>
+          <div class="task-modal__top-actions">
+            <button class="task-modal__top-action" type="button"><i data-lucide="calendar"></i><span>Due</span></button>
+            <button class="task-modal__top-action" type="button"><i data-lucide="plus"></i><span>Subtasks</span></button>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More"><i data-lucide="ellipsis"></i></button>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand"><i data-lucide="maximize-2"></i></button>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close details" data-task-modal-close><i data-lucide="x"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="task-modal__body">
+        <div class="task-modal__hero">
+          <div class="task-modal__title-wrap">
+            <span class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}">${CHECK_SVG}</span>
+            <h2 class="task-modal__title" id="task-modal-title">${escapeHtml(task.title)}</h2>
+          </div>
+          <div class="task-modal__hero-right">
+            <button class="task-modal__start-btn" type="button">
+              <i data-lucide="play"></i>
+              <span>START</span>
+            </button>
+            <div class="task-modal__metric">
+              <span class="task-modal__metric-label">ACTUAL</span>
+              <span class="${actualValueClass}">${actualTime}</span>
+            </div>
+            <div class="task-modal__metric">
+              <span class="task-modal__metric-label">PLANNED</span>
+              <span class="task-modal__metric-value task-modal__metric-value--set">${escapeHtml(plannedTime)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="task-modal__notes" contenteditable="true" data-placeholder="Notes..." aria-label="Task notes">${task.notes ? escapeHtml(task.notes) : ''}</div>
+
+        <div class="task-modal__divider"></div>
+
+        <div class="task-modal__timeline">
+          <ul class="task-modal__timeline-list">
+            ${timelineHtml}
+          </ul>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+let openModalTaskId = null;
+
+function openTaskDetailModal(taskId) {
+  const context = findTaskContext(taskId);
+  if (!context) return;
+
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return;
+
+  openModalTaskId = taskId;
+  overlay.innerHTML = renderTaskDetailModal(context.task, context.column);
+  overlay.hidden = false;
+  document.body.classList.add('modal-open');
+
+  if (typeof lucide !== 'undefined') {
+    lucide.createIcons();
+  }
+}
+
+function closeTaskDetailModal() {
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return;
+
+  // Save notes before closing
+  if (openModalTaskId) {
+    const notesEl = overlay.querySelector('.task-modal__notes');
+    if (notesEl) {
+      const ctx = findTaskContext(openModalTaskId);
+      if (ctx) {
+        ctx.task.notes = notesEl.textContent.trim() || '';
+      }
+    }
+    openModalTaskId = null;
+  }
+
+  overlay.hidden = true;
+  overlay.innerHTML = '';
+  document.body.classList.remove('modal-open');
+}
+
 function renderTaskCard(task) {
   const card = document.createElement('div');
   card.className = 'task-card' + (task.complete ? ' task-card--complete' : '');
@@ -490,6 +684,8 @@ function renderTaskCard(task) {
 function renderColumn(column) {
   const colEl = document.querySelector(`.day-column[data-col-id="${column.id}"]`);
   if (!colEl) return;
+
+  moveCompletedTasksToBottom(column);
 
   const progress = computeProgress(column);
   colEl.querySelector('.progress-bar__fill').style.width = progress + '%';
@@ -539,6 +735,166 @@ function renderCalendarEvents() {
 
     // Insert before ghost so ghost stays on top in DOM/z-order
     timeGrid.insertBefore(el, ghost);
+  });
+}
+
+function normalizeWorkdayBounds(timeGridEl = null) {
+  const totalHours = getCalendarTotalHours(timeGridEl);
+  const minGapHours = 1 / SNAP_STEPS_PER_HOUR;
+
+  let start = clampCalendarOffset(state.workday.startOffset, 0, timeGridEl);
+  let end = clampCalendarOffset(state.workday.endOffset, 0, timeGridEl);
+
+  if (end - start < minGapHours) {
+    if (start + minGapHours <= totalHours) {
+      end = start + minGapHours;
+    } else {
+      end = totalHours;
+      start = Math.max(0, end - minGapHours);
+    }
+  }
+
+  state.workday.startOffset = start;
+  state.workday.endOffset = end;
+}
+
+function renderWorkdayMarkers() {
+  const timeGrid = document.getElementById('time-grid');
+  const startMarker = document.getElementById('workday-start-marker');
+  const endMarker = document.getElementById('workday-end-marker');
+  const startBadge = startMarker ? startMarker.querySelector('.workday-marker__badge') : null;
+  const endBadge = endMarker ? endMarker.querySelector('.workday-marker__badge') : null;
+  if (!timeGrid || !startMarker || !endMarker) return;
+
+  normalizeWorkdayBounds(timeGrid);
+
+  const draggingStart = !!(workdayMarkerDrag && workdayMarkerDrag.type === 'start');
+  const draggingEnd = !!(workdayMarkerDrag && workdayMarkerDrag.type === 'end');
+
+  startMarker.style.setProperty('--offset', String(state.workday.startOffset));
+  endMarker.style.setProperty('--offset', String(state.workday.endOffset));
+  startMarker.classList.toggle('workday-marker--active', draggingStart);
+  endMarker.classList.toggle('workday-marker--active', draggingEnd);
+
+  if (startBadge) {
+    startBadge.textContent = draggingStart ? formatOffsetAsClockNoPeriod(state.workday.startOffset) : 'START';
+  }
+  if (endBadge) {
+    endBadge.textContent = draggingEnd ? formatOffsetAsClockNoPeriod(state.workday.endOffset) : 'END';
+  }
+
+  startMarker.title = `Workday start (${formatOffsetAsClock(state.workday.startOffset)})`;
+  endMarker.title = `Workday end (${formatOffsetAsClock(state.workday.endOffset)})`;
+}
+
+function scrollTimelineToWorkdayStart() {
+  const wrapper = document.querySelector('.time-grid-wrapper');
+  const timeGrid = document.getElementById('time-grid');
+  if (!wrapper || !timeGrid) return;
+
+  normalizeWorkdayBounds(timeGrid);
+  const targetOffset = Math.max(0, state.workday.startOffset - WORKDAY_SCROLL_LEAD_HOURS);
+  wrapper.scrollTop = targetOffset * getHourHeightPx(timeGrid);
+}
+
+function applyCalendarZoom(zoomLevel, options = {}) {
+  const { preserveViewport = true } = options;
+  const wrapper = document.querySelector('.time-grid-wrapper');
+  const timeGrid = document.getElementById('time-grid');
+  const zoomInBtn = document.getElementById('calendar-zoom-in');
+  const zoomOutBtn = document.getElementById('calendar-zoom-out');
+  const zoomValue = document.getElementById('calendar-zoom-value');
+
+  const nextZoom = Math.max(MIN_CALENDAR_ZOOM, Math.min(MAX_CALENDAR_ZOOM, Math.round(zoomLevel)));
+  let centerHour = null;
+
+  if (wrapper && timeGrid && preserveViewport) {
+    const hourHeightBefore = getHourHeightPx(timeGrid);
+    centerHour = (wrapper.scrollTop + wrapper.clientHeight / 2) / hourHeightBefore;
+  }
+
+  state.calendarZoom = nextZoom;
+
+  if (timeGrid) {
+    timeGrid.style.setProperty('--hour-height', `${DEFAULT_HOUR_HEIGHT_PX * nextZoom}px`);
+  }
+
+  if (wrapper && timeGrid && centerHour !== null) {
+    const hourHeightAfter = getHourHeightPx(timeGrid);
+    wrapper.scrollTop = Math.max(0, centerHour * hourHeightAfter - wrapper.clientHeight / 2);
+  }
+
+  const isAtMin = nextZoom <= MIN_CALENDAR_ZOOM;
+  const isAtMax = nextZoom >= MAX_CALENDAR_ZOOM;
+
+  if (zoomOutBtn) {
+    zoomOutBtn.disabled = isAtMin;
+    zoomOutBtn.setAttribute('aria-disabled', String(isAtMin));
+  }
+  if (zoomInBtn) {
+    zoomInBtn.disabled = isAtMax;
+    zoomInBtn.setAttribute('aria-disabled', String(isAtMax));
+  }
+  if (zoomValue) {
+    zoomValue.textContent = `${nextZoom}x`;
+  }
+}
+
+function attachCalendarZoomEvents() {
+  const zoomInBtn = document.getElementById('calendar-zoom-in');
+  const zoomOutBtn = document.getElementById('calendar-zoom-out');
+  if (!zoomInBtn || !zoomOutBtn) return;
+
+  zoomInBtn.addEventListener('click', () => {
+    applyCalendarZoom(state.calendarZoom + 1);
+  });
+
+  zoomOutBtn.addEventListener('click', () => {
+    applyCalendarZoom(state.calendarZoom - 1);
+  });
+
+  applyCalendarZoom(state.calendarZoom, { preserveViewport: false });
+}
+
+function attachWorkdayMarkerEvents() {
+  const timeGrid = document.getElementById('time-grid');
+  const startMarker = document.getElementById('workday-start-marker');
+  const endMarker = document.getElementById('workday-end-marker');
+  if (!timeGrid || !startMarker || !endMarker) return;
+
+  function beginMarkerDrag(e, type) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    workdayMarkerDrag = { type };
+    document.body.classList.add('is-workday-marker-dragging');
+    renderWorkdayMarkers();
+  }
+
+  startMarker.addEventListener('mousedown', e => beginMarkerDrag(e, 'start'));
+  endMarker.addEventListener('mousedown', e => beginMarkerDrag(e, 'end'));
+
+  document.addEventListener('mousemove', e => {
+    if (!workdayMarkerDrag) return;
+    e.preventDefault();
+
+    const minGapHours = 1 / SNAP_STEPS_PER_HOUR;
+    const totalHours = getCalendarTotalHours(timeGrid);
+    const snapped = yToOffset(e.clientY, timeGrid, 0);
+
+    if (workdayMarkerDrag.type === 'start') {
+      state.workday.startOffset = Math.max(0, Math.min(snapped, state.workday.endOffset - minGapHours));
+    } else {
+      state.workday.endOffset = Math.max(state.workday.startOffset + minGapHours, Math.min(snapped, totalHours));
+    }
+
+    renderWorkdayMarkers();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!workdayMarkerDrag) return;
+    workdayMarkerDrag = null;
+    document.body.classList.remove('is-workday-marker-dragging');
+    renderWorkdayMarkers();
   });
 }
 
@@ -769,10 +1125,10 @@ function attachEvents() {
     const task = findTaskById(taskId);
     if (!task) return;
 
-    const offset = yToOffset(clientY, timeGrid);
     const durationHours = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
       : 0.5;
+    const offset = yToOffset(clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
     const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
 
@@ -798,10 +1154,10 @@ function attachEvents() {
     const task = findTaskById(taskId);
     if (!task) return false;
 
-    const offset = yToOffset(clientY, timeGrid);
     const duration = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
       : 0.5;
+    const offset = yToOffset(clientY, timeGrid, duration);
 
     task.scheduledTime = offsetToScheduledTime(offset);
 
@@ -882,7 +1238,33 @@ function attachEvents() {
     const taskId = card.dataset.taskId;
     for (const col of state.columns) {
       const task = col.tasks.find(t => t.id === taskId);
-      if (task) { task.complete = !task.complete; renderColumn(col); break; }
+      if (task) {
+        if (!task.complete) {
+          const incompleteTasks = col.tasks.filter(t => !t.complete);
+          task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
+          task.complete = true;
+          moveCompletedTasksToBottom(col);
+        } else {
+          const taskIndex = col.tasks.findIndex(t => t.id === task.id);
+          if (taskIndex === -1) break;
+
+          task.complete = false;
+          const [uncompletedTask] = col.tasks.splice(taskIndex, 1);
+
+          const firstCompletedIndex = col.tasks.findIndex(t => t.complete);
+          const incompleteCount = firstCompletedIndex === -1 ? col.tasks.length : firstCompletedIndex;
+          const requestedIndex = Number.isInteger(uncompletedTask.previousIncompleteIndex)
+            ? uncompletedTask.previousIncompleteIndex
+            : incompleteCount;
+          const insertionIndex = Math.max(0, Math.min(requestedIndex, incompleteCount));
+
+          col.tasks.splice(insertionIndex, 0, uncompletedTask);
+          delete uncompletedTask.previousIncompleteIndex;
+        }
+
+        renderColumn(col);
+        break;
+      }
     }
   });
 
@@ -912,6 +1294,18 @@ function attachEvents() {
     const colEl = input.closest('.day-column');
     if (e.key === 'Enter')  { e.preventDefault(); commitAddTask(colEl); }
     if (e.key === 'Escape') { hideAddTaskInput(colEl); }
+  });
+
+  // ── Open task detail modal ──────────────────
+  container.addEventListener('click', e => {
+    if (suppressTaskCardClick) {
+      suppressTaskCardClick = false;
+      return;
+    }
+    if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    const card = closestFromTarget(e.target, '.task-card');
+    if (!card) return;
+    openTaskDetailModal(card.dataset.taskId);
   });
 
   // ════ DRAG AND DROP — COLUMNS ════════════════
@@ -995,6 +1389,10 @@ function attachEvents() {
 
     if (ghostEl && ghostEl.parentElement) ghostEl.remove();
     if (!started) return;
+    suppressTaskCardClick = true;
+    setTimeout(() => {
+      suppressTaskCardClick = false;
+    }, 0);
 
     const target = document.elementFromPoint(e.clientX, e.clientY);
     const taskList = resolveTaskListFromTarget(target);
@@ -1084,6 +1482,29 @@ function attachEvents() {
   });
 }
 
+function attachTaskModalEvents() {
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return;
+
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) {
+      closeTaskDetailModal();
+      return;
+    }
+    if (!(e.target instanceof Element)) return;
+    if (e.target.closest('[data-task-modal-close]')) {
+      closeTaskDetailModal();
+    }
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (overlay.hidden) return;
+    e.preventDefault();
+    closeTaskDetailModal();
+  });
+}
+
 /* ═══════════════════════════════════════════════
    CALENDAR DRAG-AND-DROP
 ═══════════════════════════════════════════════ */
@@ -1108,9 +1529,10 @@ function attachCalendarEvents() {
 
   function eventOffsetFromPointer(clientY, duration, grabOffsetHours) {
     const gridTop = timeGrid.getBoundingClientRect().top;
-    const rawTop  = (clientY - gridTop) / 60 - grabOffsetHours;
+    const hourHeight = getHourHeightPx(timeGrid);
+    const rawTop  = (clientY - gridTop) / hourHeight - grabOffsetHours;
     const snapped = Math.round(rawTop * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR;
-    return Math.max(0, Math.min(snapped, 12 - duration));
+    return clampCalendarOffset(snapped, duration, timeGrid);
   }
 
   // Pointer-based move for existing timeline events (Safari-safe).
@@ -1125,7 +1547,8 @@ function attachCalendarEvents() {
 
     e.preventDefault();
     const gridTop = timeGrid.getBoundingClientRect().top;
-    const grabOffsetHours = (e.clientY - gridTop) / 60 - evt.offset;
+    const hourHeight = getHourHeightPx(timeGrid);
+    const grabOffsetHours = (e.clientY - gridTop) / hourHeight - evt.offset;
 
     calPointerDrag = {
       eventId: evt.id,
@@ -1202,13 +1625,13 @@ function attachCalendarEvents() {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
 
-    const offset = yToOffset(e.clientY, timeGrid);
     const task   = findTaskById(taskDragId);
     if (!task) return;
 
     const durationHours = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
       : 0.5;
+    const offset = yToOffset(e.clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
     const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
 
@@ -1240,10 +1663,10 @@ function attachCalendarEvents() {
     const task = findTaskById(taskDragId);
     if (!task) return;
 
-    const offset   = yToOffset(e.clientY, timeGrid);
     const duration = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
       : 0.5;
+    const offset   = yToOffset(e.clientY, timeGrid, duration);
 
     task.scheduledTime = offsetToScheduledTime(offset);
 
@@ -1301,10 +1724,12 @@ function attachCalendarResizeEvents() {
     eventEl.classList.add('cal-event--resizing');
 
     function onMouseMove(e) {
-      const deltaHours = (e.clientY - startY) / 60;
+      const hourHeight = getHourHeightPx(timeGrid);
+      const totalHours = getCalendarTotalHours(timeGrid);
+      const deltaHours = (e.clientY - startY) / hourHeight;
       const rawHandle   = startEnd + deltaHours;
       const snapped     = Math.round(rawHandle * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR;
-      const handleAt    = Math.max(0, Math.min(snapped, 12));
+      const handleAt    = Math.max(0, Math.min(snapped, totalHours));
 
       let nextOffset;
       let nextDuration;
@@ -1312,7 +1737,7 @@ function attachCalendarResizeEvents() {
       if (handleAt >= startOffset) {
         // Normal downward/within-block resize: keep start fixed.
         nextOffset = startOffset;
-        nextDuration = Math.min(Math.max(minDuration, handleAt - startOffset), 12 - startOffset);
+        nextDuration = Math.min(Math.max(minDuration, handleAt - startOffset), totalHours - startOffset);
       } else {
         // Crossed above original start: original start becomes new end.
         const maxUpOffset = Math.max(0, startOffset - minDuration);
@@ -1359,9 +1784,14 @@ function attachCalendarResizeEvents() {
 document.addEventListener('DOMContentLoaded', () => {
   renderAllColumns();
   renderCalendarEvents();
+  renderWorkdayMarkers();
+  attachCalendarZoomEvents();
   attachEvents();
+  attachTaskModalEvents();
   attachCalendarEvents();
   attachCalendarResizeEvents();
+  attachWorkdayMarkerEvents();
+  requestAnimationFrame(scrollTimelineToWorkdayStart);
 
   if (typeof lucide !== 'undefined') {
     lucide.createIcons();

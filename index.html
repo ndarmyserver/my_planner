@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260227-23">
+  <link rel="stylesheet" href="styles.css?v=20260302-04">
 </head>
 <body>
   <div class="app-shell">
@@ -63,85 +63,104 @@
       </div>
     </aside>
 
-    <!-- ═══ MAIN BOARD ═══ -->
-    <main class="board">
-      <div class="board__topbar">
-        <div class="topbar__views">
-          <button class="view-btn view-btn--active" data-view="today">
-            <i data-lucide="calendar-days" class="view-icon"></i>
-            Today
-          </button>
-          <button class="view-btn" data-view="board">
-            <i data-lucide="layout-grid" class="view-icon"></i>
-            Board
-          </button>
-        </div>
-      </div>
-
-      <div class="board__columns" id="day-columns">
-        <!-- Day columns are rendered by app.js -->
-      </div>
-    </main>
-
-    <!-- ═══ CALENDAR PANEL ═══ -->
-    <aside class="calendar-panel">
-      <div class="calendar-panel__header">
-        <i data-lucide="align-justify" class="cal-header-icon"></i>
-        <span class="cal-header-label">Calendars</span>
-      </div>
-
-      <div class="calendar-day-badge">
-        <div class="calendar-day-info">
-          <span class="calendar-day-name">MON</span>
-          <span class="calendar-day-number">10</span>
-        </div>
-      </div>
-
-      <div class="time-grid-wrapper">
-        <div class="time-grid" id="time-grid">
-          <!-- Hour rows 12 AM – 11 PM -->
-          <div class="time-grid__row"><span class="time-grid__label">12 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">1 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">2 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">3 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">4 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">5 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">6 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">7 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">8 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">9 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">10 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">11 AM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">12 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">1 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">2 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">3 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">4 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">5 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">6 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">7 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">8 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">9 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">10 PM</span><div class="time-grid__track"></div></div>
-          <div class="time-grid__row"><span class="time-grid__label">11 PM</span><div class="time-grid__track"></div></div>
-
-          <!-- Calendar events rendered by renderCalendarEvents() in app.js -->
-
-          <!-- Drop line indicator for calendar event repositioning -->
-          <div id="cal-drag-line" hidden></div>
-
-          <!-- Drag ghost preview — positioned dynamically during dragover -->
-          <div class="cal-event cal-event-ghost" id="cal-event-ghost" hidden>
-            <span class="cal-event__title"></span>
-            <span class="cal-event__time"></span>
+    <div class="main-card">
+      <!-- ═══ MAIN BOARD ═══ -->
+      <main class="board">
+        <div class="board__topbar">
+          <div class="topbar__views">
+            <button class="view-btn view-btn--active" data-view="today">
+              <i data-lucide="calendar-days" class="view-icon"></i>
+              Today
+            </button>
+            <button class="view-btn" data-view="board">
+              <i data-lucide="layout-grid" class="view-icon"></i>
+              Board
+            </button>
           </div>
         </div>
-      </div>
-    </aside>
+
+        <div class="board__columns" id="day-columns">
+          <!-- Day columns are rendered by app.js -->
+        </div>
+      </main>
+
+      <!-- ═══ CALENDAR PANEL ═══ -->
+      <aside class="calendar-panel">
+        <div class="calendar-panel__header">
+          <i data-lucide="align-justify" class="cal-header-icon"></i>
+          <span class="cal-header-label">Calendars</span>
+        </div>
+
+        <div class="calendar-day-badge">
+          <div class="calendar-zoom" aria-label="Timeline zoom controls">
+            <button class="calendar-zoom__btn" id="calendar-zoom-in" type="button" aria-label="Zoom in timeline">+</button>
+            <span class="calendar-zoom__value" id="calendar-zoom-value">1x</span>
+            <button class="calendar-zoom__btn" id="calendar-zoom-out" type="button" aria-label="Zoom out timeline">−</button>
+          </div>
+          <div class="calendar-day-info">
+            <span class="calendar-day-name">MON</span>
+            <span class="calendar-day-number">10</span>
+          </div>
+        </div>
+
+        <div class="time-grid-wrapper">
+          <div class="time-grid" id="time-grid">
+            <!-- Hour rows 12 AM – 11 PM -->
+            <div class="time-grid__row"><span class="time-grid__label">12 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">1 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">2 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">3 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">4 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">5 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">6 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">7 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">8 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">9 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">10 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">11 AM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">12 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">1 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">2 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">3 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">4 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">5 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">6 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">7 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">8 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">9 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">10 PM</span><div class="time-grid__track"></div></div>
+            <div class="time-grid__row"><span class="time-grid__label">11 PM</span><div class="time-grid__track"></div></div>
+
+            <!-- Calendar events rendered by renderCalendarEvents() in app.js -->
+
+            <!-- Workday start/end markers -->
+            <div class="workday-marker" id="workday-start-marker" data-marker="start" aria-label="Workday start marker">
+              <span class="workday-marker__badge" aria-hidden="true">START</span>
+              <span class="workday-marker__curve" aria-hidden="true"></span>
+            </div>
+            <div class="workday-marker" id="workday-end-marker" data-marker="end" aria-label="Workday end marker">
+              <span class="workday-marker__badge" aria-hidden="true">END</span>
+              <span class="workday-marker__curve" aria-hidden="true"></span>
+            </div>
+
+            <!-- Drop line indicator for calendar event repositioning -->
+            <div id="cal-drag-line" hidden></div>
+
+            <!-- Drag ghost preview — positioned dynamically during dragover -->
+            <div class="cal-event cal-event-ghost" id="cal-event-ghost" hidden>
+              <span class="cal-event__title"></span>
+              <span class="cal-event__time"></span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
 
   </div>
 
+  <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
+
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-  <script src="app.js?v=20260227-36"></script>
+  <script src="app.js?v=20260302-04"></script>
 </body>
 </html>
