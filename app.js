@@ -64,7 +64,8 @@ const state = {
     {
       id: 'col-mon',
       dayName: 'Monday',
-      date: 'January 10',
+      date: 'March 2',
+      isoDate: '2026-03-02',
       tasks: [
         {
           id: 'task-1',
@@ -118,7 +119,8 @@ const state = {
     {
       id: 'col-tue',
       dayName: 'Tuesday',
-      date: 'January 11',
+      date: 'March 3',
+      isoDate: '2026-03-03',
       tasks: [
         {
           id: 'task-5',
@@ -182,6 +184,42 @@ const state = {
 /* ═══════════════════════════════════════════════
    UTILITIES
 ═══════════════════════════════════════════════ */
+
+function getTodayISO() {
+  const d = new Date();
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+
+function parseISO(isoStr) {
+  const [y, m, d] = isoStr.split('-').map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+function toISO(date) {
+  return date.getFullYear() + '-' +
+    String(date.getMonth() + 1).padStart(2, '0') + '-' +
+    String(date.getDate()).padStart(2, '0');
+}
+
+function formatDateDisplay(isoStr) {
+  const d = parseISO(isoStr);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun',
+                  'Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[d.getMonth()] + ' ' + d.getDate();
+}
+
+function getDayName(isoStr) {
+  const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  return days[parseISO(isoStr).getDay()];
+}
+
+function addDays(isoStr, n) {
+  const d = parseISO(isoStr);
+  d.setDate(d.getDate() + n);
+  return toISO(d);
+}
 
 function formatMinutes(mins) {
   if (!mins) return '0:00';
@@ -530,7 +568,25 @@ function renderTaskDetailModal(task, column) {
   const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'general';
   const channelStyle = getChannelStyle(rawTag);
   const hashColor = channelStyle ? channelStyle.hashColor : '#7da2ff';
-  const startLabel = task.scheduledTime ? task.scheduledTime : 'Today';
+  const todayISO = getTodayISO();
+  const colDate = column.isoDate || todayISO;
+  let startLabel;
+  if (colDate === todayISO) startLabel = 'Today';
+  else if (colDate === addDays(todayISO, 1)) startLabel = 'Tomorrow';
+  else startLabel = formatDateDisplay(colDate);
+
+  // Due button content
+  let dueBtnContent;
+  let dueBtnClasses = 'task-modal__top-action';
+  if (task.dueDate) {
+    const dueLabel = task.dueDate === todayISO ? 'Today' : formatDateDisplay(task.dueDate);
+    dueBtnContent = `<span>${escapeHtml(dueLabel)}</span>`;
+    dueBtnClasses += ' task-modal__top-action--has-due';
+    if (task.dueDate < todayISO) dueBtnClasses += ' task-modal__top-action--overdue';
+  } else {
+    dueBtnContent = '<i data-lucide="calendar"></i><span>Due</span>';
+  }
+
   const actualTime = '--:--';
   const actualValueClass = actualTime === '--:--'
     ? 'task-modal__metric-value task-modal__metric-value--placeholder'
@@ -556,12 +612,12 @@ function renderTaskDetailModal(task, column) {
           </span>
         </div>
         <div class="task-modal__meta-right">
-          <div class="task-modal__meta-group">
+          <div class="task-modal__meta-group task-modal__meta-group--start">
             <span class="task-modal__meta-label">START</span>
             <button class="task-modal__meta-start-btn" type="button">${escapeHtml(startLabel)}</button>
           </div>
           <div class="task-modal__top-actions">
-            <button class="task-modal__top-action" type="button"><i data-lucide="calendar"></i><span>Due</span></button>
+            <div class="task-modal__due-wrap"><button class="${dueBtnClasses}" type="button" data-due-btn>${dueBtnContent}</button></div>
             <button class="task-modal__top-action" type="button"><i data-lucide="plus"></i><span>Subtasks</span></button>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More"><i data-lucide="ellipsis"></i></button>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand"><i data-lucide="maximize-2"></i></button>
@@ -606,6 +662,282 @@ function renderTaskDetailModal(task, column) {
   `;
 }
 
+/* ── Shared Calendar Grid ──────────────────── */
+
+function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth) {
+  const todayISO = getTodayISO();
+  const monthNames = ['January','February','March','April','May','June',
+                      'July','August','September','October','November','December'];
+
+  const firstOfMonth = new Date(viewYear, viewMonth, 1);
+  const mondayOffset = (firstOfMonth.getDay() + 6) % 7;
+  const gridStart = new Date(viewYear, viewMonth, 1 - mondayOffset, 12);
+
+  const calendarRows = [];
+  for (let row = 0; row < 6; row++) {
+    const tds = [];
+    let allOutside = true;
+    for (let col = 0; col < 7; col++) {
+      const d = new Date(gridStart);
+      d.setDate(gridStart.getDate() + row * 7 + col);
+      const iso = toISO(d);
+      const inMonth = d.getMonth() === viewMonth;
+      if (inMonth) allOutside = false;
+      let cls = 'sdp-cal__day';
+      if (!inMonth) cls += ' sdp-cal__day--outside';
+      if (iso === todayISO) cls += ' sdp-cal__day--today';
+      if (iso === selectedIsoDate) cls += ' sdp-cal__day--selected';
+      tds.push(`<td><button class="${cls}" type="button" data-date="${iso}">${d.getDate()}</button></td>`);
+    }
+    if (row > 4 && allOutside) break;
+    calendarRows.push(`<tr>${tds.join('')}</tr>`);
+  }
+
+  return `
+    <div class="sdp-cal">
+      <div class="sdp-cal__nav">
+        <button class="sdp-cal__nav-btn" data-cal-prev type="button">
+          <i data-lucide="chevron-left"></i>
+        </button>
+        <span class="sdp-cal__month-label">${monthNames[viewMonth]} ${viewYear}</span>
+        <button class="sdp-cal__nav-btn" data-cal-next type="button">
+          <i data-lucide="chevron-right"></i>
+        </button>
+      </div>
+      <table class="sdp-cal__grid">
+        <thead>
+          <tr><th>M</th><th>T</th><th>W</th><th>T</th><th>F</th><th>S</th><th>S</th></tr>
+        </thead>
+        <tbody>${calendarRows.join('')}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+/* ── Start Date Picker Dropdown ─────────────── */
+
+function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth) {
+  return `
+    <div class="start-date-picker" data-sdp>
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Move:</span>
+        <button class="sdp__menu-item" data-action="snooze-day" type="button">
+          <span>Snooze one day</span><kbd class="sdp__shortcut">D</kbd>
+        </button>
+        <button class="sdp__menu-item" data-action="snooze-week" type="button">
+          <span>Snooze one week</span>
+        </button>
+        <button class="sdp__menu-item" data-action="move-backlog" type="button">
+          <span>Move to backlog</span><kbd class="sdp__shortcut">Z</kbd>
+        </button>
+        <button class="sdp__menu-item" data-action="move-top-backlog" type="button">
+          <span>Move to top of backlog</span>
+          <span class="sdp__shortcut-group"><kbd class="sdp__shortcut">\u21E7</kbd><kbd class="sdp__shortcut">Z</kbd></span>
+        </button>
+      </div>
+      <div class="sdp__divider"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Start date:</span>
+        ${renderCalendarGrid(currentIsoDate, viewYear, viewMonth)}
+      </div>
+    </div>
+  `;
+}
+
+/* ── Due Date Picker Dropdown ─────────────── */
+
+function renderDueDateDropdown(currentDueDate, viewYear, viewMonth) {
+  return `
+    <div class="due-date-picker" data-ddp>
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Due date:</span>
+        ${renderCalendarGrid(currentDueDate, viewYear, viewMonth)}
+      </div>
+    </div>
+  `;
+}
+
+let startDatePickerState = null;
+
+function openStartDatePicker(taskId) {
+  closeDueDatePicker();
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+  const today = new Date();
+  startDatePickerState = {
+    taskId,
+    viewYear: today.getFullYear(),
+    viewMonth: today.getMonth()
+  };
+  renderStartDatePickerInModal();
+}
+
+function closeStartDatePicker() {
+  startDatePickerState = null;
+  const existing = document.querySelector('[data-sdp]');
+  if (existing) existing.remove();
+}
+
+function renderStartDatePickerInModal() {
+  if (!startDatePickerState) return;
+  const ctx = findTaskContext(startDatePickerState.taskId);
+  if (!ctx) return;
+
+  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+
+  const existing = document.querySelector('[data-sdp]');
+  if (existing) existing.remove();
+
+  const overlay = document.getElementById('task-modal-overlay');
+  const startBtn = overlay.querySelector('.task-modal__meta-start-btn');
+  if (!startBtn) return;
+
+  const metaGroup = startBtn.closest('.task-modal__meta-group');
+  if (!metaGroup) return;
+  metaGroup.classList.add('task-modal__meta-group--start');
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderStartDateDropdown(
+    currentIsoDate,
+    startDatePickerState.viewYear,
+    startDatePickerState.viewMonth
+  );
+  const dropdown = wrapper.firstElementChild;
+  metaGroup.appendChild(dropdown);
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function handleStartDateAction(action, data) {
+  if (!startDatePickerState) return;
+  const taskId = startDatePickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  let targetDate = null;
+
+  switch (action) {
+    case 'snooze-day':
+      targetDate = addDays(currentIsoDate, 1);
+      break;
+    case 'snooze-week':
+      targetDate = addDays(currentIsoDate, 7);
+      break;
+    case 'select-date':
+      targetDate = data;
+      break;
+    default:
+      break;
+  }
+
+  if (targetDate) {
+    moveTaskToDate(taskId, targetDate);
+
+    const overlay = document.getElementById('task-modal-overlay');
+    const startBtn = overlay.querySelector('.task-modal__meta-start-btn');
+    if (startBtn) {
+      const todayISO = getTodayISO();
+      if (targetDate === todayISO) {
+        startBtn.textContent = 'Today';
+      } else if (targetDate === addDays(todayISO, 1)) {
+        startBtn.textContent = 'Tomorrow';
+      } else {
+        startBtn.textContent = formatDateDisplay(targetDate);
+      }
+    }
+  }
+
+  closeStartDatePicker();
+}
+
+/* ── Due Date Picker Toggle ────────────────── */
+
+let dueDatePickerState = null;
+
+function openDueDatePicker(taskId) {
+  closeStartDatePicker();
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+  const today = new Date();
+  dueDatePickerState = {
+    taskId,
+    viewYear: today.getFullYear(),
+    viewMonth: today.getMonth()
+  };
+  renderDueDatePickerInModal();
+}
+
+function closeDueDatePicker() {
+  dueDatePickerState = null;
+  const existing = document.querySelector('[data-ddp]');
+  if (existing) existing.remove();
+}
+
+function renderDueDatePickerInModal() {
+  if (!dueDatePickerState) return;
+  const ctx = findTaskContext(dueDatePickerState.taskId);
+  if (!ctx) return;
+
+  const currentDueDate = ctx.task.dueDate || null;
+
+  const existing = document.querySelector('[data-ddp]');
+  if (existing) existing.remove();
+
+  const overlay = document.getElementById('task-modal-overlay');
+  const dueBtn = overlay.querySelector('[data-due-btn]');
+  if (!dueBtn) return;
+
+  const dueWrap = dueBtn.closest('.task-modal__due-wrap');
+  if (!dueWrap) return;
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderDueDateDropdown(
+    currentDueDate,
+    dueDatePickerState.viewYear,
+    dueDatePickerState.viewMonth
+  );
+  const dropdown = wrapper.firstElementChild;
+  dueWrap.appendChild(dropdown);
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function handleDueDateAction(isoDate) {
+  if (!dueDatePickerState) return;
+  const taskId = dueDatePickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  ctx.task.dueDate = isoDate;
+
+  // Update the button in the modal
+  const overlay = document.getElementById('task-modal-overlay');
+  const dueBtn = overlay.querySelector('[data-due-btn]');
+  if (dueBtn) {
+    const todayISO = getTodayISO();
+    let label;
+    let overdue = false;
+    if (isoDate === todayISO) {
+      label = 'Today';
+    } else {
+      label = formatDateDisplay(isoDate);
+      if (isoDate < todayISO) overdue = true;
+    }
+    dueBtn.innerHTML = `<span>${escapeHtml(label)}</span>`;
+    dueBtn.classList.add('task-modal__top-action--has-due');
+    if (overdue) {
+      dueBtn.classList.add('task-modal__top-action--overdue');
+    } else {
+      dueBtn.classList.remove('task-modal__top-action--overdue');
+    }
+  }
+
+  closeDueDatePicker();
+}
+
 let openModalTaskId = null;
 
 function openTaskDetailModal(taskId) {
@@ -626,6 +958,8 @@ function openTaskDetailModal(taskId) {
 }
 
 function closeTaskDetailModal() {
+  closeStartDatePicker();
+  closeDueDatePicker();
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
@@ -937,6 +1271,54 @@ function renderAllColumns() {
     container.appendChild(colEl);
     renderColumn(col);
   });
+}
+
+/* ═══════════════════════════════════════════════
+   COLUMN LOOKUP / TASK MOVEMENT
+═══════════════════════════════════════════════ */
+
+function findOrCreateColumn(isoDate) {
+  let col = state.columns.find(c => c.isoDate === isoDate);
+  if (col) return col;
+
+  const newCol = {
+    id: 'col-' + isoDate,
+    dayName: getDayName(isoDate),
+    date: formatDateDisplay(isoDate),
+    isoDate: isoDate,
+    tasks: []
+  };
+
+  let insertIdx = state.columns.findIndex(c => c.isoDate > isoDate);
+  if (insertIdx === -1) insertIdx = state.columns.length;
+  state.columns.splice(insertIdx, 0, newCol);
+
+  const container = document.getElementById('day-columns');
+  const colEl = createColumnElement(newCol);
+  const existingCols = container.querySelectorAll('.day-column');
+  if (insertIdx < existingCols.length) {
+    container.insertBefore(colEl, existingCols[insertIdx]);
+  } else {
+    container.appendChild(colEl);
+  }
+  renderColumn(newCol);
+  return newCol;
+}
+
+function moveTaskToDate(taskId, targetIsoDate) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const sourceCol = ctx.column;
+  const targetCol = findOrCreateColumn(targetIsoDate);
+
+  if (sourceCol.id === targetCol.id) return;
+
+  sourceCol.tasks.splice(ctx.index, 1);
+  targetCol.tasks.push(ctx.task);
+
+  renderColumn(sourceCol);
+  renderColumn(targetCol);
 }
 
 /* ═══════════════════════════════════════════════
@@ -1482,26 +1864,102 @@ function attachEvents() {
   });
 }
 
+function closeAnyPicker() {
+  if (startDatePickerState) { closeStartDatePicker(); return true; }
+  if (dueDatePickerState) { closeDueDatePicker(); return true; }
+  return false;
+}
+
+function navigatePicker(dir) {
+  const st = startDatePickerState || dueDatePickerState;
+  if (!st) return;
+  st.viewMonth += dir;
+  if (st.viewMonth < 0) { st.viewMonth = 11; st.viewYear--; }
+  if (st.viewMonth > 11) { st.viewMonth = 0; st.viewYear++; }
+  if (startDatePickerState) renderStartDatePickerInModal();
+  else renderDueDatePickerInModal();
+}
+
 function attachTaskModalEvents() {
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
   overlay.addEventListener('click', e => {
+    // Click on overlay background
     if (e.target === overlay) {
-      closeTaskDetailModal();
+      if (!closeAnyPicker()) closeTaskDetailModal();
       return;
     }
     if (!(e.target instanceof Element)) return;
+
+    // Close modal button
     if (e.target.closest('[data-task-modal-close]')) {
       closeTaskDetailModal();
+      return;
     }
+
+    // Start date picker toggle
+    if (e.target.closest('.task-modal__meta-start-btn')) {
+      closeDueDatePicker();
+      if (startDatePickerState) {
+        closeStartDatePicker();
+      } else if (openModalTaskId) {
+        openStartDatePicker(openModalTaskId);
+      }
+      return;
+    }
+
+    // Due date picker toggle
+    if (e.target.closest('[data-due-btn]')) {
+      closeStartDatePicker();
+      if (dueDatePickerState) {
+        closeDueDatePicker();
+      } else if (openModalTaskId) {
+        openDueDatePicker(openModalTaskId);
+      }
+      return;
+    }
+
+    // Inside start date dropdown
+    const sdp = e.target.closest('[data-sdp]');
+    if (sdp) {
+      const dayBtn = e.target.closest('.sdp-cal__day');
+      if (dayBtn && dayBtn.dataset.date) {
+        handleStartDateAction('select-date', dayBtn.dataset.date);
+        return;
+      }
+      const menuItem = e.target.closest('.sdp__menu-item');
+      if (menuItem && menuItem.dataset.action) {
+        handleStartDateAction(menuItem.dataset.action);
+        return;
+      }
+      if (e.target.closest('[data-cal-prev]')) { navigatePicker(-1); return; }
+      if (e.target.closest('[data-cal-next]')) { navigatePicker(1); return; }
+      return;
+    }
+
+    // Inside due date dropdown
+    const ddp = e.target.closest('[data-ddp]');
+    if (ddp) {
+      const dayBtn = e.target.closest('.sdp-cal__day');
+      if (dayBtn && dayBtn.dataset.date) {
+        handleDueDateAction(dayBtn.dataset.date);
+        return;
+      }
+      if (e.target.closest('[data-cal-prev]')) { navigatePicker(-1); return; }
+      if (e.target.closest('[data-cal-next]')) { navigatePicker(1); return; }
+      return;
+    }
+
+    // Click inside modal but outside any dropdown — close picker
+    closeAnyPicker();
   });
 
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     if (overlay.hidden) return;
     e.preventDefault();
-    closeTaskDetailModal();
+    if (!closeAnyPicker()) closeTaskDetailModal();
   });
 }
 
