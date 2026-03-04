@@ -515,6 +515,81 @@ button { cursor: pointer; }
   flex: 0 0 auto;
   margin-top: 1px;
   font-weight: 600;
+  cursor: pointer;
+}
+
+.task-card__time-badge--running {
+  background-color: #4dcd7d;
+  color: #fff;
+}
+
+/* Card timer dropdown */
+.task-card__timer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 0;
+  margin: 0 -12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.task-card__timer-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #a7a7a7;
+  padding: 0;
+  display: flex;
+  align-items: center;
+}
+
+.task-card__timer-btn:hover {
+  color: #787878;
+}
+
+.task-card__timer-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.task-card__timer-metrics {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.task-card__timer-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.task-card__timer-label {
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: #787878;
+}
+
+.task-card__timer-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-card__timer-value--running {
+  color: #4dcd7d;
+}
+
+.task-card__timer-metric--clickable {
+  cursor: pointer;
+}
+
+.task-card__timer-metric--clickable:hover .task-card__timer-value {
+  color: #B4B4B4;
 }
 
 /* Subtasks */
@@ -523,6 +598,8 @@ button { cursor: pointer; }
   display: flex;
   flex-direction: column;
   gap: 5px;
+  margin: 0;
+  padding: 0;
 }
 
 .subtask {
@@ -531,35 +608,55 @@ button { cursor: pointer; }
   gap: 7px;
   font-size: 12px;
   color: var(--color-text-muted);
+  margin: 0;
 }
 
 .subtask__check {
-  width: 15px;
-  height: 15px;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  border: 1.5px solid var(--color-border);
+  border: 1.5px solid #b4b4b4;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
+  color: #b4b4b4;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 1px;
+  outline: none;
+  transition: border-color 0.12s ease, background-color 0.12s ease, color 0.12s ease;
 }
 
 .subtask__check svg {
-  display: none;
+  display: block;
+  width: 9px;
+  height: 9px;
+  color: currentColor;
+  stroke-width: 3;
+}
+
+.subtask__check:hover {
+  border-color: var(--color-complete-fill);
+  color: var(--color-complete-fill);
 }
 
 .subtask--done .subtask__check {
   background: var(--color-complete-fill);
   border-color: var(--color-complete-fill);
+  color: #ffffff;
 }
 
 .subtask--done .subtask__check svg {
-  display: block;
-  width: 9px;
-  height: 9px;
-  color: white;
-  stroke-width: 3;
+  color: #ffffff;
+}
+
+.subtask--done .subtask__check:hover {
+  border-color: var(--color-complete-fill);
+  color: #ffffff;
 }
 
 .subtask--done .subtask__label {
@@ -620,6 +717,45 @@ button { cursor: pointer; }
 
 .task-card--complete .task-card__complete-btn .complete-circle svg {
   color: #ffffff;
+}
+
+/* Hover action icons (calendar, clock) */
+.task-card__hover-icon {
+  display: none;
+  background: none;
+  border: none;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #d1d5db;
+  cursor: pointer;
+  position: relative;
+}
+
+.task-card__hover-icon i,
+.task-card__hover-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.task-card:hover .task-card__hover-icon {
+  display: inline-flex;
+}
+
+.task-card__hover-icon:hover {
+  color: var(--color-text-secondary);
+}
+
+/* Card-level start date picker */
+.card-date-picker-wrap {
+  position: relative;
+}
+
+.card-date-picker-wrap .start-date-picker {
+  top: calc(100% + 6px);
+  left: -8px;
 }
 
 /* Integration icon */
@@ -1035,7 +1171,37 @@ body.is-workday-marker-dragging {
   z-index: 4000;
 }
 
+.task-modal-overlay--suppress-subtask-hover .task-modal__subtask-row:hover {
+  background: transparent;
+}
+
+.task-modal-overlay--suppress-subtask-hover .task-modal__subtask-row:hover .task-modal__subtask-grab,
+.task-modal-overlay--suppress-subtask-hover .task-modal__subtask-row:hover .task-modal__subtask-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.task-modal-overlay--subtask-dragging {
+  cursor: grabbing;
+}
+
+.task-modal-overlay--subtask-dragging .task-modal__subtask-row {
+  user-select: none;
+}
+
+.task-modal-overlay--subtask-dragging .task-modal__subtask-row:hover {
+  background: transparent;
+}
+
+.task-modal-overlay--subtask-dragging .task-modal__subtask-row:hover .task-modal__subtask-grab,
+.task-modal-overlay--subtask-dragging .task-modal__subtask-row:hover .task-modal__subtask-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .task-modal {
+  --task-modal-time-prefix-width: 96px;
+  --task-modal-time-col-width: 66px;
   height: calc(100vh - 72px);
   max-height: calc(100vh - 72px);
   max-width: 670px;
@@ -1191,6 +1357,17 @@ body.is-workday-marker-dragging {
   justify-content: center;
   flex: 0 0 auto;
   margin-top: 3px;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.task-modal__check:hover {
+  border-color: var(--color-complete-fill);
+}
+
+.task-modal__check:hover svg {
+  color: var(--color-complete-fill);
 }
 
 .task-modal__check svg {
@@ -1204,6 +1381,14 @@ body.is-workday-marker-dragging {
   background: var(--color-complete-fill);
 }
 
+.task-modal__check--complete:hover {
+  border-color: var(--color-complete-fill);
+}
+
+.task-modal__check--complete:hover svg {
+  color: #ffffff;
+}
+
 .task-modal__title {
   font-size: 24px;
   line-height: 1.14;
@@ -1211,22 +1396,24 @@ body.is-workday-marker-dragging {
   color: #3d3d3d;
   letter-spacing: -0.3px;
   overflow-wrap: anywhere;
+  outline: none;
 }
 
 .task-modal__hero-right {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: var(--task-modal-time-prefix-width) var(--task-modal-time-col-width) var(--task-modal-time-col-width);
+  align-items: start;
+  column-gap: 16px;
   flex: 0 0 auto;
   padding-top: 6px;
 }
 
 .task-modal__start-btn {
-  border: 1.5px solid #e5e5e5;
+  border: 1.5px solid #f0f0f0;
   border-radius: 4px;
   background: transparent;
-  color: #a7a7a7;
-  padding: 6px;
+  color: #b4b4b4;
+  padding: 6px 6px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1235,6 +1422,12 @@ body.is-workday-marker-dragging {
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  width: auto;
+  min-width: 0;
+  justify-self: end;
+  justify-content: center;
+  box-sizing: border-box;
+  line-height: 1;
 }
 
 .task-modal__start-btn svg {
@@ -1242,12 +1435,33 @@ body.is-workday-marker-dragging {
   height: 12px;
 }
 
+.task-modal__start-btn:hover {
+  border-color: #4dcd7d;
+  color: #4dcd7d;
+}
+
+.task-modal__start-btn--stop {
+  border-color: #f25a43;
+  color: #f25a43;
+}
+
+.task-modal__start-btn--stop:hover {
+  border-color: #f25a43;
+  color: #f25a43;
+}
+
+.task-modal__metric-value--running {
+  color: #4dcd7d !important;
+  min-width: 46px;
+  text-align: right;
+}
+
 .task-modal__metric {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 3px;
-  min-width: 42px;
+  min-width: var(--task-modal-time-col-width);
 }
 
 .task-modal__metric-label {
@@ -1262,6 +1476,7 @@ body.is-workday-marker-dragging {
   line-height: 1;
   color: #5b5b5b;
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .task-modal__metric-value--placeholder {
@@ -1270,6 +1485,227 @@ body.is-workday-marker-dragging {
 
 .task-modal__metric-value--set {
   color: #787878;
+}
+
+.task-modal__subtasks {
+  margin-top: 10px;
+  margin-left: -28px;
+  margin-right: -28px;
+}
+
+.task-modal__subtask-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-modal__subtask-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) var(--task-modal-time-prefix-width) var(--task-modal-time-col-width) var(--task-modal-time-col-width);
+  align-items: center;
+  gap: 16px;
+  min-height: 34px;
+  border-radius: 0;
+  margin-left: 0;
+  margin-right: 0;
+  padding: 2px 30px 2px 32px;
+}
+
+.task-modal__subtask-row:hover {
+  background: #f7f8fa;
+}
+
+.task-modal__subtask-row--dragging {
+  opacity: 0.5;
+}
+
+.task-modal__subtask-row--drop-before {
+  box-shadow: inset 0 1px 0 #d4d9e1;
+}
+
+.task-modal__subtask-row--drop-after {
+  box-shadow: inset 0 -1px 0 #d4d9e1;
+}
+
+.task-modal__subtask-grab {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: auto;
+  color: #b4b4b4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  cursor: grab;
+}
+
+.task-modal__subtask-grab svg {
+  width: 14px;
+  height: 14px;
+}
+
+.task-modal__subtask-row:hover .task-modal__subtask-grab {
+  opacity: 1;
+}
+
+.task-modal__subtask-grab:hover,
+.task-modal__subtask-grab:active {
+  opacity: 1;
+}
+
+.task-modal__subtask-check {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: 1px;
+  width: 16px;
+  height: 16px;
+  border-color: #b4b4b4;
+  color: #b4b4b4;
+  outline: none;
+}
+
+.task-modal__subtask-check svg {
+  width: 10px;
+  height: 10px;
+}
+
+.task-modal__subtask-check.task-modal__check--complete {
+  border-color: #4dcd7d;
+  background: #4dcd7d;
+  color: #ffffff;
+}
+
+.task-modal__subtask-check.task-modal__check--complete svg {
+  color: #ffffff;
+}
+
+.task-modal__subtask-text {
+  min-width: 0;
+  outline: none;
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 24px;
+  color: #b4b4b4;
+  min-height: 24px;
+}
+
+.task-modal__subtask-text--filled {
+  color: #3c3c3c;
+}
+
+.task-modal__subtask-text:empty::before {
+  content: attr(data-placeholder);
+  color: #b4b4b4;
+}
+
+.task-modal__subtask-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.task-modal__subtask-row:hover .task-modal__subtask-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.task-modal__subtask-action {
+  border: none;
+  background: transparent;
+  color: #b4b4b4;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.task-modal__subtask-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+.task-modal__subtask-action:hover {
+  color: #787878;
+}
+
+.task-modal__subtask-time {
+  border: none;
+  background: transparent;
+  text-align: right;
+  padding: 2px 0;
+  border-radius: 4px;
+  min-width: 0;
+}
+
+.task-modal__subtask-time-value {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-modal__subtask-time-value--placeholder {
+  color: #b4b4b4;
+}
+
+.task-modal__subtask-time-value--set {
+  color: #787878;
+}
+
+.task-modal__subtask-time-value--running {
+  color: #4dcd7d;
+}
+
+.task-modal__subtask-time:hover .task-modal__subtask-time-value--placeholder,
+.task-modal__subtask-time:hover .task-modal__subtask-time-value--set {
+  color: #9b9b9b;
+}
+
+.task-modal__add-subtask {
+  margin-top: 2px;
+  border: none;
+  background: transparent;
+  color: #b4b4b4;
+  display: grid;
+  grid-template-columns: 16px auto;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  font-size: 14px;
+  font-weight: 500;
+  min-height: 34px;
+  padding: 2px 30px 2px 32px;
+  justify-items: start;
+  text-align: left;
+}
+
+.task-modal__add-subtask-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.task-modal__add-subtask-icon svg {
+  width: 10px;
+  height: 10px;
+}
+
+.task-modal__add-subtask:hover {
+  color: #2ca7ff;
 }
 
 .task-modal__notes {
@@ -1433,6 +1869,14 @@ body.modal-open {
   color: #f34235;
 }
 
+.task-modal__meta-start-btn--overdue {
+  color: #f34235;
+}
+
+.task-modal__meta-label--overdue {
+  color: #f34235;
+}
+
 .start-date-picker,
 .due-date-picker {
   position: absolute;
@@ -1505,7 +1949,7 @@ body.modal-open {
 .sdp__divider {
   height: 1px;
   background: #ebebeb;
-  margin: 4px 14px;
+  margin: 4px 0;
 }
 
 .sdp-cal {
@@ -1602,6 +2046,697 @@ body.modal-open {
 .sdp-cal__day--selected:not(.sdp-cal__day--today) {
   background: #d0e7fb;
   color: #2ca7ff;
+}
+
+/* ═══════════════════════════════════════════════
+   PLANNED TIME PICKER
+═══════════════════════════════════════════════ */
+.task-modal__metric--planned,
+.task-modal__metric--actual {
+  cursor: pointer;
+}
+
+.task-modal__metric--planned:hover .task-modal__metric-value--set,
+.task-modal__metric--actual:hover .task-modal__metric-value--set {
+  color: #B4B4B4;
+}
+
+.task-modal__metric--planned:hover .task-modal__metric-value--placeholder,
+.task-modal__metric--actual:hover .task-modal__metric-value--placeholder {
+  color: #B4B4B4;
+}
+
+.task-modal__metric--disabled {
+  cursor: default;
+  pointer-events: none;
+}
+
+.planned-picker {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: -8px;
+  width: 125px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15), 0 1px 4px rgba(0, 0, 0, 0.1);
+  z-index: 5000;
+  padding: 12px 0 8px;
+}
+
+.planned-picker__arrow {
+  position: absolute;
+  top: -6px;
+  right: 20px;
+  width: 12px;
+  height: 12px;
+  background: #ffffff;
+  transform: rotate(45deg);
+  box-shadow: -1px -1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.planned-picker__header {
+  font-size: 12px;
+  font-weight: 400;
+  color: #787878;
+  padding: 0 15px 4px;
+}
+
+.planned-picker__time-display {
+  display: block;
+  font-size: 16px;
+  font-weight: 500;
+  color: #787878;
+  padding: 4px 15px 8px;
+  background: none;
+  border: none;
+  text-align: left;
+  width: 100%;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.planned-picker__time-display:hover {
+  color: #413F39;
+}
+
+.planned-picker__divider {
+  border-top: 1px solid #ebebeb;
+  margin: 4px 0;
+}
+
+.planned-picker__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 4px 15px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #413F39;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.planned-picker__option:hover {
+  background: #f5f5f5;
+}
+
+.planned-picker__option--selected {
+  font-weight: 500;
+}
+
+.planned-picker__check {
+  font-size: 14px;
+  color: #413F39;
+}
+
+.planned-picker__clear {
+  display: block;
+  width: 100%;
+  padding: 4px 15px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #2ca7ff;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.planned-picker__clear:hover {
+  background: #f5f5f5;
+}
+
+/* Time entry mode */
+.planned-picker__time-entry {
+  display: flex;
+  align-items: baseline;
+  padding: 8px 0 0;
+  border-bottom: 1px solid #2ca7ff;
+  margin: 0 15px 4px;
+}
+
+.planned-picker__input {
+  width: 20px;
+  font-size: 16px;
+  font-weight: 500;
+  color: #b4b4b4;
+  border: none;
+  outline: none;
+  text-align: left;
+  padding: 2px 0 6px;
+  font-family: inherit;
+  background: transparent;
+}
+
+.planned-picker__input--has-value {
+  color: #413F39;
+}
+
+.planned-picker__input--hours {
+  width: 12px;
+}
+
+.planned-picker__input:focus {
+  background: transparent;
+}
+
+.planned-picker__colon {
+  font-size: 16px;
+  font-weight: 500;
+  color: #b4b4b4;
+  padding-bottom: 6px;
+  margin: 0 2px;
+}
+
+.planned-picker__colon--has-value {
+  color: #413F39;
+}
+
+.planned-picker__hint {
+  font-size: 10px;
+  font-weight: 500;
+  color: #B4B4B4;
+  padding: 6px 15px 4px;
+}
+
+/* ═══════════════════════════════════════════════
+   FOCUS MODE
+═══════════════════════════════════════════════ */
+.focus-modal {
+  position: fixed;
+  inset: 8px;
+  background: #ffffff;
+  border-radius: 4px;
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+}
+
+.focus-modal__topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+.focus-modal__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #413f39;
+  background: #f0f0f0;
+  border: 1px solid #dcdcdc;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.focus-modal__tab svg {
+  width: 14px;
+  height: 14px;
+}
+
+.focus-modal__content {
+  --focus-actual-col: 124px;
+  --focus-planned-col: 96px;
+  --focus-start-col: 96px;
+  flex: 1;
+  overflow-y: auto;
+  padding: 72px 108px 56px;
+}
+
+.focus-modal__task-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 32px;
+  margin-bottom: 28px;
+}
+
+.focus-modal__title-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.focus-modal__title-wrap .task-modal__check {
+  width: 20px;
+  height: 20px;
+  margin-top: 8px;
+  margin-right: 16px;
+}
+
+.focus-modal__title-wrap .task-modal__check svg {
+  width: 10px;
+  height: 10px;
+}
+
+.focus-modal__title {
+  font-size: 32px;
+  font-weight: 600;
+  color: #413f39;
+  line-height: 1.22;
+  letter-spacing: 0;
+  margin: 0;
+  outline: none;
+}
+
+.focus-modal__metrics {
+  display: grid;
+  grid-template-columns: var(--focus-actual-col) var(--focus-planned-col) var(--focus-start-col);
+  align-items: end;
+  justify-items: end;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.focus-modal__metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.focus-modal__metric--clickable {
+  cursor: pointer;
+}
+
+.focus-modal__metric-label {
+  font-size: 8px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+  color: #787878;
+}
+
+.focus-modal__actual {
+  font-size: 24px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.focus-modal__actual--placeholder {
+  color: #b4b4b4;
+}
+
+.focus-modal__actual--set {
+  color: #787878;
+}
+
+.focus-modal__actual--running {
+  color: #4dcd7d;
+}
+
+.focus-modal__planned {
+  font-size: 24px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.focus-modal__planned--placeholder {
+  color: #b4b4b4;
+}
+
+.focus-modal__planned--set {
+  color: #787878;
+}
+
+.focus-modal__metric--clickable:hover .focus-modal__actual--placeholder,
+.focus-modal__metric--clickable:hover .focus-modal__planned--placeholder {
+  color: #787878;
+}
+
+.focus-modal__stop-btn {
+  border: 1.5px solid #f25a43;
+  border-radius: 4px;
+  background: transparent;
+  color: #f25a43;
+  padding: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  width: auto;
+  min-width: 0;
+  box-sizing: border-box;
+  justify-content: center;
+  line-height: 1;
+}
+
+.focus-modal__stop-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.focus-modal__start-btn {
+  border: 1.5px solid #e5e5e5;
+  border-radius: 4px;
+  background: transparent;
+  color: #a7a7a7;
+  padding: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  width: auto;
+  min-width: 0;
+  box-sizing: border-box;
+  justify-content: center;
+  line-height: 1;
+}
+
+.focus-modal__start-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.focus-modal__start-btn:hover {
+  border-color: #4dcd7d;
+  color: #4dcd7d;
+}
+
+.focus-modal__btn--hidden {
+  display: none !important;
+}
+
+.focus-modal__body {
+  margin-left: 0;
+  padding-top: 8px;
+}
+
+.focus-modal__subtask-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-bottom: 12px;
+}
+
+.focus-modal__subtask-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 40px;
+  padding: 4px 0;
+}
+
+.focus-modal__subtask-row--active {
+  background: #f7f8fa;
+}
+
+.focus-modal__subtask-row--dragging {
+  opacity: 0.45;
+}
+
+.focus-modal__subtask-row--drop-before {
+  box-shadow: inset 0 1px 0 #d4d9e1;
+}
+
+.focus-modal__subtask-row--drop-after {
+  box-shadow: inset 0 -1px 0 #d4d9e1;
+}
+
+.focus-modal__subtask-grab {
+  position: absolute;
+  left: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  color: #b4b4b4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  cursor: grab;
+}
+
+.focus-modal__subtask-grab svg {
+  width: 12px;
+  height: 12px;
+}
+
+.focus-modal__subtask-row:hover .focus-modal__subtask-grab {
+  opacity: 1;
+}
+
+.focus-modal__subtask-check {
+  width: 16px;
+  height: 16px;
+  margin-top: 0;
+  justify-self: center;
+}
+
+.focus-modal__subtask-check svg {
+  width: 8px;
+  height: 8px;
+}
+
+.focus-modal__subtask-title {
+  min-width: 0;
+  outline: none;
+  font-size: 16px;
+  line-height: 1.25;
+  font-weight: 500;
+  color: #413f38;
+  min-height: 20px;
+  padding-top: 0;
+}
+
+.focus-modal__subtask-title:empty::before {
+  content: attr(data-placeholder);
+  color: #b4b4b4;
+}
+
+.focus-modal__subtask-title--filled {
+  color: #413f38;
+}
+
+.focus-modal__subtask-metrics {
+  display: grid;
+  grid-template-columns: var(--focus-actual-col) var(--focus-planned-col) var(--focus-start-col);
+  align-items: center;
+  justify-items: end;
+  column-gap: 16px;
+}
+
+.focus-modal__subtask-time-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  cursor: pointer;
+}
+
+.focus-modal__subtask-actual,
+.focus-modal__subtask-planned {
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.focus-modal__subtask-actual--placeholder,
+.focus-modal__subtask-planned--placeholder {
+  color: #b4b4b4;
+}
+
+.focus-modal__subtask-actual--set,
+.focus-modal__subtask-planned--set {
+  color: #787878;
+}
+
+.focus-modal__subtask-actual--running {
+  color: #4dcd7d;
+}
+
+.focus-modal__subtask-actual--placeholder:hover,
+.focus-modal__subtask-planned--placeholder:hover {
+  color: #787878;
+}
+
+.focus-modal__subtask-start-btn {
+  border: 1.5px solid #e5e5e5;
+  border-radius: 4px;
+  background: transparent;
+  color: #a7a7a7;
+  padding: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  font-family: inherit;
+  width: auto;
+  min-width: 0;
+  box-sizing: border-box;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  line-height: 1;
+}
+
+.focus-modal__subtask-row:hover .focus-modal__subtask-start-btn,
+.focus-modal__subtask-start-btn--running {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.focus-modal__subtask-start-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+.focus-modal__subtask-start-btn:hover {
+  border-color: #4dcd7d;
+  color: #4dcd7d;
+}
+
+.focus-modal__subtask-start-btn--running {
+  border-color: #f25a43;
+  color: #f25a43;
+}
+
+.focus-modal__subtask-start-btn--running:hover {
+  border-color: #f25a43;
+  color: #f25a43;
+}
+
+.focus-modal--subtask-dragging {
+  cursor: grabbing;
+}
+
+.focus-modal--subtask-dragging .focus-modal__subtask-row {
+  user-select: none;
+}
+
+.focus-modal--subtask-dragging .focus-modal__subtask-row:hover {
+  background: transparent;
+}
+
+.focus-modal--subtask-dragging .focus-modal__subtask-row:hover .focus-modal__subtask-grab,
+.focus-modal--subtask-dragging .focus-modal__subtask-row:hover .focus-modal__subtask-start-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.focus-modal__add-subtask {
+  border: none;
+  background: none;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+  justify-items: start;
+  gap: 16px;
+  color: #b4b4b4;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  cursor: pointer;
+  padding: 4px 0;
+  width: 100%;
+  text-align: left;
+}
+
+.focus-modal__add-subtask svg {
+  width: 16px;
+  height: 16px;
+  justify-self: center;
+}
+
+.focus-modal__add-subtask:hover {
+  color: #2ca7ff;
+}
+
+.focus-modal__notes {
+  margin-top: 24px;
+  margin-left: 36px;
+  font-size: 16px;
+  font-weight: 500;
+  color: #413f39;
+  line-height: 1.25;
+  outline: none;
+  min-height: 130px;
+}
+
+.focus-modal__notes:empty::before {
+  content: attr(data-placeholder);
+  color: #b4b4b4;
+}
+
+@media (max-width: 1200px) {
+  .focus-modal__content {
+    padding: 52px 56px 40px;
+  }
+}
+
+@media (max-width: 760px) {
+  .focus-modal {
+    inset: 4px;
+  }
+
+  .focus-modal__content {
+    padding: 26px 20px 20px;
+  }
+
+  .focus-modal__task-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 16px;
+  }
+
+  .focus-modal__metrics {
+    grid-template-columns: 1fr 1fr var(--focus-start-col);
+  }
+
+  .focus-modal__body {
+    margin-left: 0;
+  }
+
+  .focus-modal__subtask-row {
+    grid-template-columns: 20px minmax(0, 1fr);
+    row-gap: 8px;
+    align-items: start;
+    padding: 8px 0;
+  }
+
+  .focus-modal__subtask-metrics {
+    grid-column: 2;
+    grid-template-columns: 1fr 1fr var(--focus-start-col);
+    width: 100%;
+  }
+
+  .focus-modal__subtask-grab {
+    left: -14px;
+  }
 }
 
 .drop-indicator::before {

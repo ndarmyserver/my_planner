@@ -228,8 +228,21 @@ function formatMinutes(mins) {
   return `${h}:${String(m).padStart(2, '0')}`;
 }
 
+function hasActualTime(actualSeconds) {
+  return (actualSeconds || 0) > 0;
+}
+
+function formatActualDisplay(actualSeconds) {
+  return hasActualTime(actualSeconds)
+    ? formatMinutes(Math.floor(actualSeconds / 60))
+    : '--:--';
+}
+
 function computeProgress(column) {
-  const total = column.tasks.reduce((s, t) => s + t.timeEstimateMinutes, 0);
+  const total = column.tasks.reduce((s, t) => {
+    ensureTaskTimeState(t);
+    return s + t.timeEstimateMinutes;
+  }, 0);
   if (total === 0) return 0;
   const done = column.tasks
     .filter(t => t.complete)
@@ -290,7 +303,10 @@ function hexToRgba(hex, alpha) {
 function findTaskById(taskId) {
   for (const col of state.columns) {
     const task = col.tasks.find(t => t.id === taskId);
-    if (task) return task;
+    if (task) {
+      ensureTaskTimeState(task);
+      return task;
+    }
   }
   return null;
 }
@@ -298,9 +314,102 @@ function findTaskById(taskId) {
 function findTaskContext(taskId) {
   for (const col of state.columns) {
     const index = col.tasks.findIndex(t => t.id === taskId);
-    if (index !== -1) return { column: col, task: col.tasks[index], index };
+    if (index !== -1) {
+      ensureTaskTimeState(col.tasks[index]);
+      return { column: col, task: col.tasks[index], index };
+    }
   }
   return null;
+}
+
+function ensureSubtaskTimeState(subtask) {
+  if (!subtask || typeof subtask !== 'object') return;
+  if (!Number.isFinite(subtask.plannedMinutes)) subtask.plannedMinutes = 0;
+  if (!Number.isFinite(subtask.actualTimeSeconds)) subtask.actualTimeSeconds = 0;
+  if (typeof subtask.label !== 'string') subtask.label = '';
+  if (typeof subtask.done !== 'boolean') subtask.done = false;
+}
+
+function ensureTaskTimeState(task) {
+  if (!task || typeof task !== 'object') return;
+  if (!Array.isArray(task.subtasks)) task.subtasks = [];
+  task.subtasks.forEach(ensureSubtaskTimeState);
+
+  if (!Number.isFinite(task.ownPlannedMinutes)) {
+    task.ownPlannedMinutes = Number.isFinite(task.timeEstimateMinutes) ? task.timeEstimateMinutes : 0;
+  }
+  if (!Number.isFinite(task.ownActualTimeSeconds)) {
+    task.ownActualTimeSeconds = Number.isFinite(task.actualTimeSeconds) ? task.actualTimeSeconds : 0;
+  }
+  if (typeof task.showSubtasks !== 'boolean') task.showSubtasks = task.subtasks.length > 0;
+
+  syncTaskAggregateTimes(task);
+}
+
+function syncTaskAggregateTimes(task) {
+  if (!task) return;
+  const subtaskPlanned = (task.subtasks || []).reduce((sum, subtask) => {
+    ensureSubtaskTimeState(subtask);
+    return sum + (subtask.plannedMinutes || 0);
+  }, 0);
+  const subtaskActual = (task.subtasks || []).reduce((sum, subtask) => {
+    ensureSubtaskTimeState(subtask);
+    return sum + (subtask.actualTimeSeconds || 0);
+  }, 0);
+
+  task.timeEstimateMinutes = Math.max(0, (task.ownPlannedMinutes || 0) + subtaskPlanned);
+  task.actualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) + subtaskActual);
+}
+
+function findSubtask(task, subtaskId) {
+  if (!task || !Array.isArray(task.subtasks)) return null;
+  const subtask = task.subtasks.find(s => s.id === subtaskId) || null;
+  if (subtask) ensureSubtaskTimeState(subtask);
+  return subtask;
+}
+
+function createEmptySubtask() {
+  return {
+    id: uid(),
+    label: '',
+    done: false,
+    plannedMinutes: 0,
+    actualTimeSeconds: 0,
+    deleteReady: false
+  };
+}
+
+function getFocusTarget(task) {
+  if (!task) return null;
+  if (focusState.subtaskId) {
+    const subtask = findSubtask(task, focusState.subtaskId);
+    if (subtask) {
+      return {
+        type: 'subtask',
+        title: subtask.label || 'Subtask',
+        complete: !!subtask.done,
+        plannedMinutes: subtask.plannedMinutes || 0,
+        actualTimeSeconds: subtask.actualTimeSeconds || 0,
+        subtask
+      };
+    }
+  }
+  return {
+    type: 'task',
+    title: task.title || 'Task',
+    complete: !!task.complete,
+    plannedMinutes: task.timeEstimateMinutes || 0,
+    actualTimeSeconds: task.actualTimeSeconds || 0,
+    subtask: null
+  };
+}
+
+function initializeTaskTimeState() {
+  state.columns.forEach(col => {
+    col.tasks.forEach(task => {
+      ensureTaskTimeState(task);
+    });
+  });
 }
 
 function getHourHeightPx(timeGridEl = null) {
@@ -534,10 +643,11 @@ const CHECK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
 ═══════════════════════════════════════════════ */
 
 function renderSubtasks(subtasks) {
-  if (!subtasks.length) return '';
-  const items = subtasks.map(s => `
+  const visibleSubtasks = subtasks.filter(s => String(s?.label || '').trim().length > 0);
+  if (!visibleSubtasks.length) return '';
+  const items = visibleSubtasks.map(s => `
     <li class="subtask ${s.done ? 'subtask--done' : ''}" data-subtask-id="${escapeHtml(s.id)}">
-      <span class="subtask__check">${CHECK_SVG}</span>
+      <button class="subtask__check" type="button" data-card-subtask-check aria-label="Toggle subtask completion">${CHECK_SVG}</button>
       <span class="subtask__label">${escapeHtml(s.label)}</span>
     </li>
   `).join('');
@@ -562,7 +672,58 @@ function renderTaskTag(tag) {
   return `<span class="task-card__tag">${hash}<span class="task-card__tag-word">${escapeHtml(word)}</span></span>`;
 }
 
+function renderTaskDetailSubtaskRow(subtask) {
+  ensureSubtaskTimeState(subtask);
+  const isRunning = focusState.running && focusState.subtaskId === subtask.id && focusState.taskId === openModalTaskId;
+  const actualDisplay = isRunning
+    ? formatSeconds(subtask.actualTimeSeconds || 0)
+    : formatActualDisplay(subtask.actualTimeSeconds || 0);
+  const plannedDisplay = subtask.plannedMinutes ? formatMinutes(subtask.plannedMinutes) : '--:--';
+  const hasLabel = !!String(subtask.label || '').trim();
+
+  return `
+    <div class="task-modal__subtask-row" data-modal-subtask-row data-modal-subtask-id="${escapeHtml(subtask.id)}">
+      <span class="task-modal__subtask-grab" data-modal-subtask-grab><i data-lucide="grip-vertical"></i></span>
+      <button class="task-modal__check task-modal__subtask-check ${subtask.done ? 'task-modal__check--complete' : ''}" type="button" data-modal-subtask-check="${escapeHtml(subtask.id)}">${CHECK_SVG}</button>
+      <div class="task-modal__subtask-text${hasLabel ? ' task-modal__subtask-text--filled' : ''}" contenteditable="true" draggable="false" data-modal-subtask-label="${escapeHtml(subtask.id)}" data-placeholder="Subtask description...">${hasLabel ? escapeHtml(subtask.label) : ''}</div>
+      <div class="task-modal__subtask-actions">
+        <button class="task-modal__subtask-action" type="button" data-modal-subtask-detach="${escapeHtml(subtask.id)}" aria-label="Convert to standalone task">
+          <i data-lucide="copy"></i>
+        </button>
+        <button class="task-modal__subtask-action" type="button" data-modal-subtask-play="${escapeHtml(subtask.id)}" aria-label="${isRunning ? 'Pause subtask timer' : 'Start subtask timer'}">
+          <i data-lucide="${isRunning ? 'pause' : 'play'}"></i>
+        </button>
+      </div>
+      <button class="task-modal__subtask-time" type="button" data-modal-subtask-actual-btn="${escapeHtml(subtask.id)}">
+        <span class="task-modal__subtask-time-value ${isRunning ? 'task-modal__subtask-time-value--running' : (subtask.actualTimeSeconds ? 'task-modal__subtask-time-value--set' : 'task-modal__subtask-time-value--placeholder')}">${actualDisplay}</span>
+      </button>
+      <button class="task-modal__subtask-time" type="button" data-modal-subtask-planned-btn="${escapeHtml(subtask.id)}">
+        <span class="task-modal__subtask-time-value ${subtask.plannedMinutes ? 'task-modal__subtask-time-value--set' : 'task-modal__subtask-time-value--placeholder'}">${plannedDisplay}</span>
+      </button>
+    </div>
+  `;
+}
+
+function renderTaskDetailSubtasks(task) {
+  ensureTaskTimeState(task);
+  if (!task.showSubtasks && task.subtasks.length === 0) return '';
+
+  const rows = task.subtasks.map(renderTaskDetailSubtaskRow).join('');
+  return `
+    <div class="task-modal__subtasks" data-modal-subtasks>
+      <div class="task-modal__subtask-list" data-modal-subtask-list>
+        ${rows}
+      </div>
+      <button class="task-modal__add-subtask" type="button" data-modal-add-subtask>
+        <span class="task-modal__add-subtask-icon"><i data-lucide="plus"></i></span>
+        <span>Add subtask</span>
+      </button>
+    </div>
+  `;
+}
+
 function renderTaskDetailModal(task, column) {
+  ensureTaskTimeState(task);
   const rawTag = task.tag ? String(task.tag).trim() : '';
   const hasHash = rawTag.startsWith('#');
   const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'general';
@@ -575,22 +736,10 @@ function renderTaskDetailModal(task, column) {
   else if (colDate === addDays(todayISO, 1)) startLabel = 'Tomorrow';
   else startLabel = formatDateDisplay(colDate);
 
-  // Due button content
-  let dueBtnContent;
-  let dueBtnClasses = 'task-modal__top-action';
-  if (task.dueDate) {
-    const dueLabel = task.dueDate === todayISO ? 'Today' : formatDateDisplay(task.dueDate);
-    dueBtnContent = `<span>${escapeHtml(dueLabel)}</span>`;
-    dueBtnClasses += ' task-modal__top-action--has-due';
-    if (task.dueDate < todayISO) dueBtnClasses += ' task-modal__top-action--overdue';
-  } else {
-    dueBtnContent = '<i data-lucide="calendar"></i><span>Due</span>';
-  }
-
-  const actualTime = '--:--';
-  const actualValueClass = actualTime === '--:--'
-    ? 'task-modal__metric-value task-modal__metric-value--placeholder'
-    : 'task-modal__metric-value task-modal__metric-value--set';
+  const actualTime = formatActualDisplay(task.actualTimeSeconds || 0);
+  const actualValueClass = hasActualTime(task.actualTimeSeconds)
+    ? 'task-modal__metric-value task-modal__metric-value--set'
+    : 'task-modal__metric-value task-modal__metric-value--placeholder';
   const plannedTime = formatMinutes(task.timeEstimateMinutes);
   const timelineEntries = [
     `${column.dayName} list task created`,
@@ -616,11 +765,15 @@ function renderTaskDetailModal(task, column) {
             <span class="task-modal__meta-label">START</span>
             <button class="task-modal__meta-start-btn" type="button">${escapeHtml(startLabel)}</button>
           </div>
+          ${task.dueDate ? `<div class="task-modal__meta-group task-modal__due-wrap">
+            <span class="task-modal__meta-label">DUE</span>
+            <button class="task-modal__meta-start-btn${task.dueDate < todayISO ? ' task-modal__meta-start-btn--overdue' : ''}" type="button" data-due-btn>${escapeHtml(task.dueDate === todayISO ? 'Today' : formatDateDisplay(task.dueDate))}</button>
+          </div>` : ''}
           <div class="task-modal__top-actions">
-            <div class="task-modal__due-wrap"><button class="${dueBtnClasses}" type="button" data-due-btn>${dueBtnContent}</button></div>
-            <button class="task-modal__top-action" type="button"><i data-lucide="plus"></i><span>Subtasks</span></button>
+            ${!task.dueDate ? '<div class="task-modal__due-wrap"><button class="task-modal__top-action" type="button" data-due-btn><i data-lucide="calendar"></i><span>Due</span></button></div>' : ''}
+            <button class="task-modal__top-action" type="button" data-modal-add-two-subtasks><i data-lucide="plus"></i><span>Subtasks</span></button>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More"><i data-lucide="ellipsis"></i></button>
-            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand"><i data-lucide="maximize-2"></i></button>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand" data-expand-btn><i data-lucide="maximize-2"></i></button>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close details" data-task-modal-close><i data-lucide="x"></i></button>
           </div>
         </div>
@@ -629,24 +782,26 @@ function renderTaskDetailModal(task, column) {
       <div class="task-modal__body">
         <div class="task-modal__hero">
           <div class="task-modal__title-wrap">
-            <span class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}">${CHECK_SVG}</span>
-            <h2 class="task-modal__title" id="task-modal-title">${escapeHtml(task.title)}</h2>
+            <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-modal-check>${CHECK_SVG}</button>
+            <h2 class="task-modal__title" id="task-modal-title" contenteditable="true">${escapeHtml(task.title)}</h2>
           </div>
           <div class="task-modal__hero-right">
             <button class="task-modal__start-btn" type="button">
               <i data-lucide="play"></i>
               <span>START</span>
             </button>
-            <div class="task-modal__metric">
+            <div class="task-modal__metric task-modal__metric--actual" data-actual-btn>
               <span class="task-modal__metric-label">ACTUAL</span>
               <span class="${actualValueClass}">${actualTime}</span>
             </div>
-            <div class="task-modal__metric">
+            <div class="task-modal__metric task-modal__metric--planned" data-planned-btn>
               <span class="task-modal__metric-label">PLANNED</span>
-              <span class="task-modal__metric-value task-modal__metric-value--set">${escapeHtml(plannedTime)}</span>
+              <span class="task-modal__metric-value ${task.timeEstimateMinutes ? 'task-modal__metric-value--set' : 'task-modal__metric-value--placeholder'}">${task.timeEstimateMinutes ? escapeHtml(plannedTime) : '--:--'}</span>
             </div>
           </div>
         </div>
+
+        ${renderTaskDetailSubtasks(task)}
 
         <div class="task-modal__notes" contenteditable="true" data-placeholder="Notes..." aria-label="Task notes">${task.notes ? escapeHtml(task.notes) : ''}</div>
 
@@ -748,13 +903,21 @@ function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth) {
 /* ── Due Date Picker Dropdown ─────────────── */
 
 function renderDueDateDropdown(currentDueDate, viewYear, viewMonth) {
+  const removeHtml = currentDueDate ? `
+      <div class="sdp__divider"></div>
+      <div class="sdp__section">
+        <button class="sdp__menu-item" data-action="remove-due" type="button">
+          <span>Remove due date</span>
+        </button>
+      </div>` : '';
+
   return `
     <div class="due-date-picker" data-ddp>
       <div class="sdp__arrow"></div>
       <div class="sdp__section">
         <span class="sdp__section-label">Due date:</span>
         ${renderCalendarGrid(currentDueDate, viewYear, viewMonth)}
-      </div>
+      </div>${removeHtml}
     </div>
   `;
 }
@@ -853,6 +1016,90 @@ function handleStartDateAction(action, data) {
   closeStartDatePicker();
 }
 
+/* ── Card-Level Start Date Picker (hover icon) ─ */
+
+let cardDatePickerState = null; // { taskId, viewYear, viewMonth }
+
+function openCardDatePicker(taskId) {
+  closeCardDatePicker();
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+  const today = new Date();
+  cardDatePickerState = {
+    taskId,
+    viewYear: today.getFullYear(),
+    viewMonth: today.getMonth()
+  };
+  renderCardDatePicker();
+}
+
+function closeCardDatePicker() {
+  cardDatePickerState = null;
+  const existing = document.querySelector('[data-card-sdp]');
+  if (existing) existing.remove();
+}
+
+function renderCardDatePicker() {
+  if (!cardDatePickerState) return;
+  const ctx = findTaskContext(cardDatePickerState.taskId);
+  if (!ctx) return;
+
+  const existing = document.querySelector('[data-card-sdp]');
+  if (existing) existing.remove();
+
+  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+
+  const card = document.querySelector(`.task-card[data-task-id="${cardDatePickerState.taskId}"]`);
+  if (!card) return;
+
+  const dateBtn = card.querySelector('[data-card-date-btn]');
+  if (!dateBtn) return;
+
+  dateBtn.style.position = 'relative';
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderStartDateDropdown(
+    currentIsoDate,
+    cardDatePickerState.viewYear,
+    cardDatePickerState.viewMonth
+  );
+  const dropdown = wrapper.firstElementChild;
+  dropdown.setAttribute('data-card-sdp', '');
+  dateBtn.appendChild(dropdown);
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function handleCardDateAction(action, data) {
+  if (!cardDatePickerState) return;
+  const taskId = cardDatePickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  let targetDate = null;
+
+  switch (action) {
+    case 'snooze-day':
+      targetDate = addDays(currentIsoDate, 1);
+      break;
+    case 'snooze-week':
+      targetDate = addDays(currentIsoDate, 7);
+      break;
+    case 'select-date':
+      targetDate = data;
+      break;
+    default:
+      break;
+  }
+
+  if (targetDate) {
+    moveTaskToDate(taskId, targetDate);
+  }
+
+  closeCardDatePicker();
+}
+
 /* ── Due Date Picker Toggle ────────────────── */
 
 let dueDatePickerState = null;
@@ -912,30 +1159,1510 @@ function handleDueDateAction(isoDate) {
   if (!ctx) return;
 
   ctx.task.dueDate = isoDate;
+  closeDueDatePicker();
 
-  // Update the button in the modal
+  // Re-render modal to update layout (DUE label + button position changes)
+  openTaskDetailModal(taskId);
+}
+
+function handleRemoveDueDate() {
+  if (!dueDatePickerState) return;
+  const taskId = dueDatePickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  ctx.task.dueDate = null;
+  closeDueDatePicker();
+
+  // Re-render modal to remove DUE label and move button back to top-actions
+  openTaskDetailModal(taskId);
+}
+
+/* ── Planned Time Picker ──────────────────── */
+
+let plannedPickerOpen = false;
+let plannedPickerEditMode = false; // true = time entry mode
+let plannedPickerSubtaskId = null;
+
+const PLANNED_TIME_OPTIONS = [
+  { label: '5 min',  minutes: 5 },
+  { label: '10 min', minutes: 10 },
+  { label: '15 min', minutes: 15 },
+  { label: '20 min', minutes: 20 },
+  { label: '25 min', minutes: 25 },
+  { label: '30 min', minutes: 30 },
+  { label: '45 min', minutes: 45 },
+  { label: '1 hr',   minutes: 60 },
+];
+
+function closePlannedPicker() {
+  plannedPickerOpen = false;
+  plannedPickerEditMode = false;
+  plannedPickerSubtaskId = null;
+  const existing = document.querySelector('[data-planned-picker]');
+  if (existing) existing.remove();
+}
+
+function openPlannedPicker(subtaskId = null) {
+  plannedPickerOpen = true;
+  plannedPickerEditMode = false;
+  plannedPickerSubtaskId = subtaskId;
+  renderPlannedPickerInModal();
+}
+
+function getPlannedDateLabel(column) {
+  const todayISO = getTodayISO();
+  const colDate = column.isoDate || todayISO;
+  if (colDate === todayISO) return 'today';
+  if (colDate === addDays(todayISO, 1)) return 'tomorrow';
+  return formatDateDisplay(colDate);
+}
+
+function attachPickerInputColorListeners(dropdown) {
+  const inputs = dropdown.querySelectorAll('.planned-picker__input');
+  const colon = dropdown.querySelector('.planned-picker__colon');
+  function update() {
+    const hasTyped = Array.from(inputs).some(inp => parseInt(inp.value, 10) > 0);
+    inputs.forEach(inp => inp.classList.toggle('planned-picker__input--has-value', hasTyped));
+    if (colon) colon.classList.toggle('planned-picker__colon--has-value', hasTyped);
+  }
+  inputs.forEach(inp => inp.addEventListener('input', update));
+}
+
+function renderPlannedPickerInModal() {
+  if (!openModalTaskId) return;
+  const ctx = findTaskContext(openModalTaskId);
+  if (!ctx) return;
+  const task = ctx.task;
+  const subtask = plannedPickerSubtaskId ? findSubtask(task, plannedPickerSubtaskId) : null;
+
+  const existing = document.querySelector('[data-planned-picker]');
+  if (existing) existing.remove();
+
   const overlay = document.getElementById('task-modal-overlay');
-  const dueBtn = overlay.querySelector('[data-due-btn]');
-  if (dueBtn) {
-    const todayISO = getTodayISO();
-    let label;
-    let overdue = false;
-    if (isoDate === todayISO) {
-      label = 'Today';
-    } else {
-      label = formatDateDisplay(isoDate);
-      if (isoDate < todayISO) overdue = true;
+  const metricEl = subtask
+    ? overlay.querySelector(`[data-modal-subtask-planned-btn="${plannedPickerSubtaskId}"]`)
+    : overlay.querySelector('[data-planned-btn]');
+  if (!metricEl) return;
+
+  const currentMins = subtask ? (subtask.plannedMinutes || 0) : (task.timeEstimateMinutes || 0);
+  const currentFormatted = currentMins ? formatMinutes(currentMins) : '--:--';
+  const dateLabel = getPlannedDateLabel(ctx.column);
+
+  let html;
+  if (plannedPickerEditMode) {
+    // Time entry mode
+    const h = Math.floor(currentMins / 60);
+    const m = currentMins % 60;
+    const hasVal = currentMins > 0;
+    const valClass = hasVal ? ' planned-picker__input--has-value' : '';
+    const colonClass = hasVal ? ' planned-picker__colon--has-value' : '';
+    html = `
+      <div class="planned-picker" data-planned-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Planned (${escapeHtml(dateLabel)}):</div>
+        <div class="planned-picker__time-entry">
+          <input class="planned-picker__input planned-picker__input--hours${valClass}" type="text" maxlength="2" value="${h}" data-planned-hours>
+          <span class="planned-picker__colon${colonClass}">:</span>
+          <input class="planned-picker__input${valClass}" type="text" maxlength="2" value="${String(m).padStart(2, '0')}" data-planned-mins>
+        </div>
+        <div class="planned-picker__hint">↵ Return to save</div>
+      </div>
+    `;
+  } else {
+    // Quick-select mode
+    const optionsHtml = PLANNED_TIME_OPTIONS.map(opt => {
+      const isSelected = currentMins === opt.minutes;
+      return `<button class="planned-picker__option${isSelected ? ' planned-picker__option--selected' : ''}" type="button" data-planned-minutes="${opt.minutes}">
+        <span>${opt.label}</span>
+        ${isSelected ? '<span class="planned-picker__check">✓</span>' : ''}
+      </button>`;
+    }).join('');
+
+    const clearHtml = currentMins
+      ? '<div class="planned-picker__divider"></div><button class="planned-picker__clear" type="button" data-planned-clear>Clear planned</button>'
+      : '';
+
+    html = `
+      <div class="planned-picker" data-planned-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Planned (${escapeHtml(dateLabel)}):</div>
+        <button class="planned-picker__time-display" type="button" data-planned-edit-mode>${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        ${optionsHtml}
+        ${clearHtml}
+      </div>
+    `;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const dropdown = wrapper.firstElementChild;
+  metricEl.style.position = 'relative';
+  metricEl.appendChild(dropdown);
+
+  if (plannedPickerEditMode) {
+    attachPickerInputColorListeners(dropdown);
+    const hoursInput = dropdown.querySelector('[data-planned-hours]');
+    if (hoursInput) {
+      hoursInput.focus();
+      hoursInput.select();
     }
-    dueBtn.innerHTML = `<span>${escapeHtml(label)}</span>`;
-    dueBtn.classList.add('task-modal__top-action--has-due');
-    if (overdue) {
-      dueBtn.classList.add('task-modal__top-action--overdue');
+  }
+}
+
+function applyPlannedTime(minutes) {
+  if (!openModalTaskId) return;
+  const ctx = findTaskContext(openModalTaskId);
+  if (!ctx) return;
+  const task = ctx.task;
+  const subtask = plannedPickerSubtaskId ? findSubtask(task, plannedPickerSubtaskId) : null;
+
+  if (subtask) {
+    subtask.plannedMinutes = minutes;
+    subtask.deleteReady = false;
+  } else {
+    const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
+    task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
+  }
+  syncTaskAggregateTimes(task);
+  closePlannedPicker();
+  const overlay = document.getElementById('task-modal-overlay');
+  const parentMetricEl = overlay.querySelector('[data-planned-btn] .task-modal__metric-value');
+  if (parentMetricEl) {
+    if (task.timeEstimateMinutes) {
+      parentMetricEl.textContent = formatMinutes(task.timeEstimateMinutes);
+      parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--set';
     } else {
-      dueBtn.classList.remove('task-modal__top-action--overdue');
+      parentMetricEl.textContent = '--:--';
+      parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--placeholder';
     }
   }
 
-  closeDueDatePicker();
+  if (subtask) {
+    const subtaskMetricEl = overlay.querySelector(`[data-modal-subtask-planned-btn="${subtask.id}"] .task-modal__subtask-time-value`);
+    if (subtaskMetricEl) {
+      if (subtask.plannedMinutes) {
+        subtaskMetricEl.textContent = formatMinutes(subtask.plannedMinutes);
+        subtaskMetricEl.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--set';
+      } else {
+        subtaskMetricEl.textContent = '--:--';
+        subtaskMetricEl.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--placeholder';
+      }
+    }
+  }
+
+  if (ctx.column) renderColumn(ctx.column);
+}
+
+function handlePlannedTimeEntry() {
+  const picker = document.querySelector('[data-planned-picker]');
+  if (!picker) return;
+  const hInput = picker.querySelector('[data-planned-hours]');
+  const mInput = picker.querySelector('[data-planned-mins]');
+  if (!hInput || !mInput) return;
+  const h = parseInt(hInput.value, 10) || 0;
+  const m = parseInt(mInput.value, 10) || 0;
+  const total = h * 60 + m;
+  applyPlannedTime(total);
+}
+
+/* ─── Actual Time Picker ─── */
+let actualPickerOpen = false;
+let actualPickerEditMode = false;
+let actualPickerSubtaskId = null;
+
+const ACTUAL_TIME_OPTIONS = [
+  { label: '5 min',  minutes: 5 },
+  { label: '10 min', minutes: 10 },
+  { label: '15 min', minutes: 15 },
+  { label: '20 min', minutes: 20 },
+  { label: '25 min', minutes: 25 },
+  { label: '30 min', minutes: 30 },
+  { label: '45 min', minutes: 45 },
+  { label: '1 hr',   minutes: 60 },
+];
+
+function closeActualPicker() {
+  actualPickerOpen = false;
+  actualPickerEditMode = false;
+  actualPickerSubtaskId = null;
+  const existing = document.querySelector('[data-actual-picker]');
+  if (existing) existing.remove();
+}
+
+function openActualPicker(subtaskId = null) {
+  actualPickerOpen = true;
+  actualPickerEditMode = false;
+  actualPickerSubtaskId = subtaskId;
+  renderActualPickerInModal();
+}
+
+function getActualDateLabel(column) {
+  const todayISO = getTodayISO();
+  const colDate = column.isoDate || todayISO;
+  if (colDate === todayISO) return 'today';
+  if (colDate === addDays(todayISO, 1)) return 'tomorrow';
+  return formatDateDisplay(colDate);
+}
+
+function renderActualPickerInModal() {
+  if (!openModalTaskId) return;
+  const ctx = findTaskContext(openModalTaskId);
+  if (!ctx) return;
+  const task = ctx.task;
+  const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
+
+  const existing = document.querySelector('[data-actual-picker]');
+  if (existing) existing.remove();
+
+  const overlay = document.getElementById('task-modal-overlay');
+  const metricEl = subtask
+    ? overlay.querySelector(`[data-modal-subtask-actual-btn="${actualPickerSubtaskId}"]`)
+    : overlay.querySelector('[data-actual-btn]');
+  if (!metricEl) return;
+
+  const currentSeconds = subtask ? (subtask.actualTimeSeconds || 0) : (task.actualTimeSeconds || 0);
+  const currentMins = currentSeconds ? Math.floor(currentSeconds / 60) : 0;
+  const hasCurrentActual = hasActualTime(currentSeconds);
+  const currentFormatted = hasCurrentActual ? formatMinutes(currentMins) : '--:--';
+  const dateLabel = getActualDateLabel(ctx.column);
+
+  let html;
+  if (actualPickerEditMode) {
+    const h = Math.floor(currentMins / 60);
+    const m = currentMins % 60;
+    const hasVal = hasCurrentActual;
+    const valClass = hasVal ? ' planned-picker__input--has-value' : '';
+    const colonClass = hasVal ? ' planned-picker__colon--has-value' : '';
+    html = `
+      <div class="planned-picker" data-actual-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Actual (${escapeHtml(dateLabel)}):</div>
+        <div class="planned-picker__time-entry">
+          <input class="planned-picker__input planned-picker__input--hours${valClass}" type="text" maxlength="2" value="${h}" data-actual-hours>
+          <span class="planned-picker__colon${colonClass}">:</span>
+          <input class="planned-picker__input${valClass}" type="text" maxlength="2" value="${String(m).padStart(2, '0')}" data-actual-mins>
+        </div>
+        <div class="planned-picker__hint">↵ Return to save</div>
+      </div>
+    `;
+  } else {
+    const optionsHtml = ACTUAL_TIME_OPTIONS.map(opt => {
+      const isSelected = currentMins === opt.minutes;
+      return `<button class="planned-picker__option${isSelected ? ' planned-picker__option--selected' : ''}" type="button" data-actual-minutes="${opt.minutes}">
+        <span>${opt.label}</span>
+        ${isSelected ? '<span class="planned-picker__check">✓</span>' : ''}
+      </button>`;
+    }).join('');
+
+    const clearHtml = hasCurrentActual
+      ? '<div class="planned-picker__divider"></div><button class="planned-picker__clear" type="button" data-actual-clear>Clear actual</button>'
+      : '';
+
+    html = `
+      <div class="planned-picker" data-actual-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Actual (${escapeHtml(dateLabel)}):</div>
+        <button class="planned-picker__time-display" type="button" data-actual-edit-mode>${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        ${optionsHtml}
+        ${clearHtml}
+      </div>
+    `;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const dropdown = wrapper.firstElementChild;
+  metricEl.style.position = 'relative';
+  metricEl.appendChild(dropdown);
+
+  if (actualPickerEditMode) {
+    attachPickerInputColorListeners(dropdown);
+    const hoursInput = dropdown.querySelector('[data-actual-hours]');
+    if (hoursInput) {
+      hoursInput.focus();
+      hoursInput.select();
+    }
+  }
+}
+
+function applyActualTime(minutes) {
+  if (!openModalTaskId) return;
+  const ctx = findTaskContext(openModalTaskId);
+  if (!ctx) return;
+  const task = ctx.task;
+  const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
+
+  if (subtask) {
+    subtask.actualTimeSeconds = minutes * 60;
+    subtask.deleteReady = false;
+  } else {
+    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
+    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+  }
+  syncTaskAggregateTimes(task);
+
+  closeActualPicker();
+  const overlay = document.getElementById('task-modal-overlay');
+  const parentMetricEl = overlay.querySelector('[data-actual-btn] .task-modal__metric-value');
+  if (parentMetricEl) {
+    if (task.actualTimeSeconds) {
+      parentMetricEl.textContent = formatMinutes(Math.floor(task.actualTimeSeconds / 60));
+      parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--set';
+    } else {
+      parentMetricEl.textContent = '--:--';
+      parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--placeholder';
+    }
+  }
+
+  if (subtask) {
+    const subtaskMetricEl = overlay.querySelector(`[data-modal-subtask-actual-btn="${subtask.id}"] .task-modal__subtask-time-value`);
+    if (subtaskMetricEl) {
+      if (subtask.actualTimeSeconds) {
+        subtaskMetricEl.textContent = formatMinutes(Math.floor(subtask.actualTimeSeconds / 60));
+        subtaskMetricEl.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--set';
+      } else {
+        subtaskMetricEl.textContent = '--:--';
+        subtaskMetricEl.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--placeholder';
+      }
+    }
+  }
+  if (ctx.column) renderColumn(ctx.column);
+}
+
+function handleActualTimeEntry() {
+  const picker = document.querySelector('[data-actual-picker]');
+  if (!picker) return;
+  const hInput = picker.querySelector('[data-actual-hours]');
+  const mInput = picker.querySelector('[data-actual-mins]');
+  if (!hInput || !mInput) return;
+  const h = parseInt(hInput.value, 10) || 0;
+  const m = parseInt(mInput.value, 10) || 0;
+  const total = h * 60 + m;
+  applyActualTime(total);
+}
+
+/* ═══════════════════════════════════════════════
+   FOCUS MODE
+═══════════════════════════════════════════════ */
+let focusState = { taskId: null, subtaskId: null, running: false, intervalId: null, enteredFrom: null };
+let cardTimerExpanded = new Set(); // taskIds with expanded timer dropdown on kanban card
+let cardPickerState = null; // { taskId, type: 'actual'|'planned', editMode: false }
+let focusPickerState = null; // { type: 'actual'|'planned', editMode: false, subtaskId: string|null }
+let focusEscKeyHandler = null;
+
+function removeFocusEscKeyHandler() {
+  if (!focusEscKeyHandler) return;
+  document.removeEventListener('keydown', focusEscKeyHandler);
+  focusEscKeyHandler = null;
+}
+
+function focusSubtaskTitleInput(subtaskId) {
+  const focusEl = document.getElementById('focus-modal');
+  if (!focusEl || !subtaskId) return;
+  const input = focusEl.querySelector(`[data-focus-subtask-title="${subtaskId}"]`);
+  if (!(input instanceof HTMLElement)) return;
+  input.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(input);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function rerenderFocusModal(focusSubtaskId = null) {
+  if (!focusState.taskId) return;
+  const task = findTaskById(focusState.taskId);
+  if (!task) return;
+  renderFocusModal(task, focusState.running);
+  if (focusSubtaskId) {
+    requestAnimationFrame(() => focusSubtaskTitleInput(focusSubtaskId));
+  }
+}
+
+function closeCardPicker() {
+  cardPickerState = null;
+  const existing = document.querySelector('[data-card-picker]');
+  if (existing) existing.remove();
+}
+
+function openCardPicker(taskId, type) {
+  closeCardPicker();
+  cardPickerState = { taskId, type, editMode: false };
+  renderCardPicker();
+}
+
+function renderCardPicker() {
+  if (!cardPickerState) return;
+  const { taskId, type, editMode } = cardPickerState;
+  const task = findTaskById(taskId);
+  if (!task) return;
+
+  const existing = document.querySelector('[data-card-picker]');
+  if (existing) existing.remove();
+
+  const btnAttr = type === 'actual' ? 'data-card-actual-picker-btn' : 'data-card-planned-picker-btn';
+  const metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${btnAttr}]`);
+  if (!metricEl) return;
+
+  const isActual = type === 'actual';
+  const currentSeconds = task.actualTimeSeconds || 0;
+  const hasCurrentActual = isActual && hasActualTime(currentSeconds);
+  const currentMins = isActual
+    ? Math.floor(currentSeconds / 60)
+    : (task.timeEstimateMinutes || 0);
+  const currentFormatted = (isActual ? hasCurrentActual : currentMins > 0) ? formatMinutes(currentMins) : '--:--';
+  const options = isActual ? ACTUAL_TIME_OPTIONS : PLANNED_TIME_OPTIONS;
+  const label = isActual ? 'Actual' : 'Planned';
+  const clearLabel = isActual ? 'Clear actual' : 'Clear planned';
+
+  let html;
+  if (editMode) {
+    const h = Math.floor(currentMins / 60);
+    const m = currentMins % 60;
+    const hasVal = isActual ? hasCurrentActual : currentMins > 0;
+    html = `
+      <div class="planned-picker" data-card-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <div class="planned-picker__time-entry">
+          <input class="planned-picker__input planned-picker__input--hours${hasVal ? ' planned-picker__input--has-value' : ''}" type="text" maxlength="2" value="${h}" data-card-picker-hours>
+          <span class="planned-picker__colon${hasVal ? ' planned-picker__colon--has-value' : ''}">:</span>
+          <input class="planned-picker__input${hasVal ? ' planned-picker__input--has-value' : ''}" type="text" maxlength="2" value="${String(m).padStart(2, '0')}" data-card-picker-mins>
+        </div>
+        <div class="planned-picker__hint">↵ Return to save</div>
+      </div>
+    `;
+  } else {
+    const optionsHtml = options.map(opt => {
+      const isSelected = currentMins === opt.minutes;
+      return `<button class="planned-picker__option${isSelected ? ' planned-picker__option--selected' : ''}" type="button" data-card-picker-minutes="${opt.minutes}">
+        <span>${opt.label}</span>
+        ${isSelected ? '<span class="planned-picker__check">✓</span>' : ''}
+      </button>`;
+    }).join('');
+
+    const clearHtml = (isActual ? hasCurrentActual : currentMins > 0)
+      ? `<div class="planned-picker__divider"></div><button class="planned-picker__clear" type="button" data-card-picker-clear>${clearLabel}</button>`
+      : '';
+
+    html = `
+      <div class="planned-picker" data-card-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <button class="planned-picker__time-display" type="button" data-card-picker-edit>${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        ${optionsHtml}
+        ${clearHtml}
+      </div>
+    `;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const dropdown = wrapper.firstElementChild;
+  metricEl.style.position = 'relative';
+  metricEl.appendChild(dropdown);
+
+  if (editMode) {
+    attachPickerInputColorListeners(dropdown);
+    const hoursInput = dropdown.querySelector('[data-card-picker-hours]');
+    if (hoursInput) { hoursInput.focus(); hoursInput.select(); }
+  }
+}
+
+function applyCardPickerTime(minutes) {
+  if (!cardPickerState) return;
+  const { taskId, type } = cardPickerState;
+  const task = findTaskById(taskId);
+  if (!task) return;
+
+  if (type === 'actual') {
+    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
+    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+  } else {
+    const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
+    task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
+  }
+  syncTaskAggregateTimes(task);
+
+  closeCardPicker();
+  const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+  if (col) renderColumn(col);
+}
+
+function handleCardPickerTimeEntry() {
+  const picker = document.querySelector('[data-card-picker]');
+  if (!picker) return;
+  const hInput = picker.querySelector('[data-card-picker-hours]');
+  const mInput = picker.querySelector('[data-card-picker-mins]');
+  if (!hInput || !mInput) return;
+  const h = parseInt(hInput.value, 10) || 0;
+  const m = parseInt(mInput.value, 10) || 0;
+  applyCardPickerTime(h * 60 + m);
+}
+
+function formatSeconds(totalSeconds) {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function openFocusMode(taskId, autoStart, from, subtaskId = null) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  focusState.taskId = taskId;
+  focusState.subtaskId = subtaskId;
+  focusState.enteredFrom = from || 'kanban';
+  // Hide card detail modal but keep it in DOM for returning later
+  const overlay = document.getElementById('task-modal-overlay');
+  if (overlay && !overlay.hidden) {
+    if (focusState.enteredFrom === 'card-detail') {
+      overlay.hidden = true;
+    } else {
+      // Entered from kanban — close card detail fully
+      closeTaskDetailModal();
+    }
+  }
+
+  renderFocusModal(ctx.task, autoStart);
+  if (autoStart) startFocusTimer();
+}
+
+function closeFocusMode() {
+  closeFocusPicker();
+  removeFocusEscKeyHandler();
+  saveFocusModalEdits();
+  const taskId = focusState.taskId;
+  const enteredFrom = focusState.enteredFrom;
+  const el = document.getElementById('focus-modal');
+  if (el) el.remove();
+
+  if (taskId && enteredFrom === 'card-detail') {
+    // Return to card detail modal
+    const overlay = document.getElementById('task-modal-overlay');
+    const ctx = findTaskContext(taskId);
+    if (ctx && overlay) {
+      openModalTaskId = taskId;
+      overlay.innerHTML = renderTaskDetailModal(ctx.task, ctx.column);
+      overlay.hidden = false;
+      document.body.classList.add('modal-open');
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+      if (focusState.running) {
+        updateCardDetailTimerState();
+      }
+    }
+  } else if (taskId && focusState.running) {
+    // Return to kanban with timer running — show timer on card
+    cardTimerExpanded.add(taskId);
+    const ctx = findTaskContext(taskId);
+    if (ctx) renderColumn(ctx.column);
+  }
+
+  // Don't clear focusState.taskId or stop timer — timer may still be running
+  if (!focusState.running) {
+    focusState.taskId = null;
+    focusState.subtaskId = null;
+  }
+  focusState.enteredFrom = null;
+}
+
+function startFocusTimer() {
+  if (focusState.running) return;
+  focusState.running = true;
+
+  // Immediately show H:MM:SS format
+  const task = findTaskById(focusState.taskId);
+  if (task) {
+    const focusActual = document.querySelector('[data-focus-actual]');
+    if (focusActual) focusActual.textContent = formatSeconds(task.actualTimeSeconds || 0);
+  }
+
+  updateFocusTimerUI();
+  updateCardDetailTimerState();
+
+  focusState.intervalId = setInterval(() => {
+    const task = findTaskById(focusState.taskId);
+    if (!task) { stopFocusTimer(); return; }
+    const target = getFocusTarget(task);
+    if (!target) { stopFocusTimer(); return; }
+
+    if (target.type === 'subtask' && target.subtask) {
+      target.subtask.actualTimeSeconds = (target.subtask.actualTimeSeconds || 0) + 1;
+    } else {
+      task.ownActualTimeSeconds = (task.ownActualTimeSeconds || 0) + 1;
+    }
+    syncTaskAggregateTimes(task);
+
+    const targetSeconds = target.type === 'subtask' && target.subtask
+      ? target.subtask.actualTimeSeconds
+      : task.actualTimeSeconds;
+
+    // Update focus modal if visible
+    updateFocusModalValues(task);
+    // Update card detail modal if visible
+    const overlay = document.getElementById('task-modal-overlay');
+    if (overlay && !overlay.hidden) {
+      const actualMetric = overlay.querySelector('[data-actual-btn] .task-modal__metric-value');
+      if (actualMetric) actualMetric.textContent = formatSeconds(task.actualTimeSeconds);
+      if (focusState.subtaskId) {
+        const subtaskMetric = overlay.querySelector(`[data-modal-subtask-actual-btn="${focusState.subtaskId}"] .task-modal__subtask-time-value`);
+        if (subtaskMetric) subtaskMetric.textContent = formatSeconds(targetSeconds || 0);
+      }
+    }
+    // Update kanban card timer if visible
+    const cardTimerActual = document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-timer-actual]`);
+    if (cardTimerActual) cardTimerActual.textContent = formatSeconds(task.actualTimeSeconds);
+    // Update kanban card time badge only when minute changes
+    if (task.actualTimeSeconds % 60 === 0) {
+      const cardBadge = document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-time-badge]`);
+      if (cardBadge) {
+        const mins = Math.floor(task.actualTimeSeconds / 60);
+        const planned = task.timeEstimateMinutes;
+        cardBadge.textContent = planned ? `${formatMinutes(mins)} / ${formatMinutes(planned)}` : `${formatMinutes(mins)} / --:--`;
+      }
+    }
+  }, 1000);
+}
+
+function stopFocusTimer() {
+  if (focusState.intervalId) {
+    clearInterval(focusState.intervalId);
+    focusState.intervalId = null;
+  }
+  focusState.running = false;
+
+  const task = findTaskById(focusState.taskId);
+  updateFocusTimerUI();
+
+  // Update card detail modal if visible
+  updateCardDetailTimerState();
+
+  // Re-render the column to update kanban card
+  if (task) {
+    const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+    if (col) renderColumn(col);
+  }
+
+  // Only clear taskId if focus modal is not open (user can restart from there)
+  if (!document.getElementById('focus-modal')) {
+    focusState.taskId = null;
+    focusState.subtaskId = null;
+  }
+}
+
+function updateFocusModalValues(task) {
+  const el = document.getElementById('focus-modal');
+  if (!el || !task) return;
+
+  const actualMetric = el.querySelector('[data-focus-actual-metric]');
+  const plannedMetric = el.querySelector('[data-focus-planned-metric]');
+  const actualVal = el.querySelector('[data-focus-actual]');
+  if (actualVal) {
+    if (focusState.running) {
+      actualVal.textContent = formatSeconds(task.actualTimeSeconds || 0);
+      actualVal.classList.add('focus-modal__actual--running');
+      actualVal.classList.remove('focus-modal__actual--placeholder');
+      actualVal.classList.add('focus-modal__actual--set');
+      actualMetric?.classList.add('focus-modal__metric--has-value');
+    } else {
+      const hasActual = hasActualTime(task.actualTimeSeconds);
+      actualVal.textContent = formatActualDisplay(task.actualTimeSeconds || 0);
+      actualVal.classList.remove('focus-modal__actual--running');
+      actualVal.classList.toggle('focus-modal__actual--set', hasActual);
+      actualVal.classList.toggle('focus-modal__actual--placeholder', !hasActual);
+      actualMetric?.classList.toggle('focus-modal__metric--has-value', hasActual);
+    }
+  }
+
+  const plannedVal = el.querySelector('[data-focus-planned]');
+  if (plannedVal) {
+    const hasPlanned = !!task.timeEstimateMinutes;
+    plannedVal.textContent = hasPlanned ? formatMinutes(task.timeEstimateMinutes) : '--:--';
+    plannedVal.classList.toggle('focus-modal__planned--set', hasPlanned);
+    plannedVal.classList.toggle('focus-modal__planned--placeholder', !hasPlanned);
+    plannedMetric?.classList.toggle('focus-modal__metric--has-value', hasPlanned);
+  }
+
+  const topCheck = el.querySelector('[data-focus-check]');
+  if (topCheck) {
+    topCheck.classList.toggle('task-modal__check--complete', !!task.complete);
+  }
+
+  let iconChanged = false;
+  el.querySelectorAll('[data-focus-subtask-row]').forEach(row => {
+    const subtaskId = row.getAttribute('data-focus-subtask-id');
+    const subtask = findSubtask(task, subtaskId);
+    if (!subtask) return;
+
+    const isRunningSubtask = focusState.running && focusState.taskId === task.id && focusState.subtaskId === subtask.id;
+    row.classList.toggle('focus-modal__subtask-row--active', isRunningSubtask);
+
+    const checkBtn = row.querySelector('[data-focus-subtask-check]');
+    if (checkBtn) {
+      checkBtn.classList.toggle('task-modal__check--complete', !!subtask.done);
+    }
+
+    const actualEl = row.querySelector('[data-focus-subtask-actual]');
+    if (actualEl) {
+      if (isRunningSubtask) {
+        actualEl.textContent = formatSeconds(subtask.actualTimeSeconds || 0);
+        actualEl.classList.add('focus-modal__subtask-actual--running');
+        actualEl.classList.remove('focus-modal__subtask-actual--placeholder');
+        actualEl.classList.add('focus-modal__subtask-actual--set');
+      } else {
+        const hasActual = hasActualTime(subtask.actualTimeSeconds);
+        actualEl.textContent = formatActualDisplay(subtask.actualTimeSeconds || 0);
+        actualEl.classList.remove('focus-modal__subtask-actual--running');
+        actualEl.classList.toggle('focus-modal__subtask-actual--set', hasActual);
+        actualEl.classList.toggle('focus-modal__subtask-actual--placeholder', !hasActual);
+      }
+    }
+
+    const plannedEl = row.querySelector('[data-focus-subtask-planned]');
+    if (plannedEl) {
+      const hasPlanned = !!subtask.plannedMinutes;
+      plannedEl.textContent = hasPlanned ? formatMinutes(subtask.plannedMinutes) : '--:--';
+      plannedEl.classList.toggle('focus-modal__subtask-planned--set', hasPlanned);
+      plannedEl.classList.toggle('focus-modal__subtask-planned--placeholder', !hasPlanned);
+    }
+
+    const playBtn = row.querySelector('[data-focus-subtask-play]');
+    if (playBtn) {
+      const desiredState = isRunningSubtask ? 'running' : 'stopped';
+      const desiredIcon = isRunningSubtask ? 'pause' : 'play';
+      const desiredLabel = isRunningSubtask ? 'STOP' : 'START';
+      playBtn.classList.toggle('focus-modal__subtask-start-btn--running', isRunningSubtask);
+      playBtn.setAttribute('aria-label', isRunningSubtask ? 'Pause subtask timer' : 'Start subtask timer');
+      if (playBtn.getAttribute('data-focus-subtask-state') !== desiredState) {
+        playBtn.setAttribute('data-focus-subtask-state', desiredState);
+        playBtn.innerHTML = `<span class="focus-modal__subtask-start-btn-icon"><i data-lucide="${desiredIcon}"></i></span><span class="focus-modal__subtask-start-btn-label">${desiredLabel}</span>`;
+        iconChanged = true;
+      }
+    }
+  });
+
+  if (iconChanged && typeof lucide !== 'undefined') {
+    lucide.createIcons();
+  }
+}
+
+function updateFocusTimerUI() {
+  const el = document.getElementById('focus-modal');
+  if (!el) return;
+  const task = findTaskById(focusState.taskId);
+  if (!task) return;
+  if (focusState.running) {
+    el.querySelector('[data-focus-start]')?.classList.add('focus-modal__btn--hidden');
+    el.querySelector('[data-focus-stop]')?.classList.remove('focus-modal__btn--hidden');
+  } else {
+    el.querySelector('[data-focus-stop]')?.classList.add('focus-modal__btn--hidden');
+    el.querySelector('[data-focus-start]')?.classList.remove('focus-modal__btn--hidden');
+  }
+  updateFocusModalValues(task);
+}
+
+function updateCardDetailTimerState() {
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay || overlay.hidden) return;
+  const task = findTaskById(focusState.taskId);
+  const startBtn = overlay.querySelector('.task-modal__start-btn');
+  const actualMetric = overlay.querySelector('[data-actual-btn] .task-modal__metric-value');
+
+  const actualContainer = overlay.querySelector('[data-actual-btn]');
+
+  if (focusState.running && task) {
+    // Transform START → STOP
+    if (startBtn) {
+      startBtn.classList.add('task-modal__start-btn--stop');
+      startBtn.innerHTML = '<i data-lucide="pause"></i><span>STOP</span>';
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+    // Green H:MM:SS
+    if (actualMetric) {
+      actualMetric.textContent = formatSeconds(task.actualTimeSeconds);
+      actualMetric.classList.add('task-modal__metric-value--running');
+      actualMetric.classList.remove('task-modal__metric-value--placeholder');
+      actualMetric.classList.add('task-modal__metric-value--set');
+    }
+    // Disable actual picker
+    if (actualContainer) actualContainer.classList.add('task-modal__metric--disabled');
+  } else {
+    // Revert STOP → START
+    if (startBtn) {
+      startBtn.classList.remove('task-modal__start-btn--stop');
+      startBtn.innerHTML = '<i data-lucide="play"></i><span>START</span>';
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+    // Revert to normal H:MM
+    if (actualMetric && task) {
+      const hasActual = hasActualTime(task.actualTimeSeconds);
+      actualMetric.textContent = formatActualDisplay(task.actualTimeSeconds || 0);
+      actualMetric.classList.remove('task-modal__metric-value--running');
+      if (hasActual) {
+        actualMetric.classList.add('task-modal__metric-value--set');
+        actualMetric.classList.remove('task-modal__metric-value--placeholder');
+      } else {
+        actualMetric.classList.remove('task-modal__metric-value--set');
+        actualMetric.classList.add('task-modal__metric-value--placeholder');
+      }
+    }
+    // Re-enable actual picker
+    if (actualContainer) actualContainer.classList.remove('task-modal__metric--disabled');
+  }
+
+  if (overlay) {
+    const subtaskPlayButtons = overlay.querySelectorAll('[data-modal-subtask-play]');
+    subtaskPlayButtons.forEach(btn => {
+      const subtaskId = btn.getAttribute('data-modal-subtask-play');
+      const icon = btn.querySelector('i');
+      const isRunningSubtask = focusState.running && focusState.taskId === openModalTaskId && focusState.subtaskId === subtaskId;
+      if (icon) {
+        icon.setAttribute('data-lucide', isRunningSubtask ? 'pause' : 'play');
+      }
+      btn.setAttribute('aria-label', isRunningSubtask ? 'Pause subtask timer' : 'Start subtask timer');
+    });
+
+    if (task) {
+      overlay.querySelectorAll('[data-modal-subtask-row]').forEach(row => {
+        const subtaskId = row.getAttribute('data-modal-subtask-id');
+        const subtask = findSubtask(task, subtaskId);
+        if (!subtask) return;
+        const actualVal = row.querySelector('[data-modal-subtask-actual-btn] .task-modal__subtask-time-value');
+        if (!actualVal) return;
+        const isRunningSubtask = focusState.running && focusState.taskId === task.id && focusState.subtaskId === subtask.id;
+        if (isRunningSubtask) {
+          actualVal.textContent = formatSeconds(subtask.actualTimeSeconds || 0);
+          actualVal.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--running';
+        } else if (subtask.actualTimeSeconds) {
+          actualVal.textContent = formatMinutes(Math.floor(subtask.actualTimeSeconds / 60));
+          actualVal.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--set';
+        } else {
+          actualVal.textContent = '--:--';
+          actualVal.className = 'task-modal__subtask-time-value task-modal__subtask-time-value--placeholder';
+        }
+      });
+    }
+
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+  }
+}
+
+function saveFocusModalEdits() {
+  const el = document.getElementById('focus-modal');
+  if (!el || !focusState.taskId) return;
+  const task = findTaskById(focusState.taskId);
+  if (!task) return;
+
+  const titleEl = el.querySelector('.focus-modal__title');
+  if (titleEl) {
+    const newTitle = titleEl.textContent.trim();
+    if (newTitle) {
+      task.title = newTitle;
+    }
+  }
+  const notesEl = el.querySelector('.focus-modal__notes');
+  if (notesEl) {
+    task.notes = notesEl.textContent.trim() || '';
+  }
+  el.querySelectorAll('[data-focus-subtask-title]').forEach(titleEl => {
+    const subtaskId = titleEl.getAttribute('data-focus-subtask-title');
+    const subtask = findSubtask(task, subtaskId);
+    if (!subtask) return;
+    const clean = titleEl.textContent.replace(/\n/g, '').trim();
+    subtask.label = clean;
+    subtask.deleteReady = false;
+  });
+
+  syncTaskAggregateTimes(task);
+
+  // Re-render kanban column
+  const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+  if (col) renderColumn(col);
+}
+
+function closeFocusPicker() {
+  if (!focusPickerState) return;
+  const existing = document.querySelector('[data-focus-picker]');
+  if (existing) existing.remove();
+  focusPickerState = null;
+}
+
+function openFocusPicker(type, subtaskId = null) {
+  closeFocusPicker();
+  focusPickerState = { type, editMode: false, subtaskId };
+  renderFocusPicker();
+}
+
+function renderFocusPicker() {
+  if (!focusPickerState) return;
+  const { type, editMode, subtaskId } = focusPickerState;
+  const task = findTaskById(focusState.taskId);
+  if (!task) return;
+  const subtask = subtaskId ? findSubtask(task, subtaskId) : null;
+  if (subtaskId && !subtask) return;
+
+  const existing = document.querySelector('[data-focus-picker]');
+  if (existing) existing.remove();
+
+  const isActual = type === 'actual';
+  let metricEl;
+  if (subtask) {
+    const subtaskAttr = isActual ? 'data-focus-subtask-actual-metric' : 'data-focus-subtask-planned-metric';
+    metricEl = document.querySelector(`#focus-modal [${subtaskAttr}="${subtask.id}"]`);
+  } else {
+    const metricAttr = isActual ? 'data-focus-actual-metric' : 'data-focus-planned-metric';
+    metricEl = document.querySelector(`#focus-modal [${metricAttr}]`);
+  }
+  if (!metricEl) return;
+
+  const currentSeconds = isActual
+    ? (subtask ? (subtask.actualTimeSeconds || 0) : (task.actualTimeSeconds || 0))
+    : 0;
+  const hasCurrentActual = isActual && hasActualTime(currentSeconds);
+  const currentMins = isActual
+    ? Math.floor(currentSeconds / 60)
+    : (subtask ? (subtask.plannedMinutes || 0) : (task.timeEstimateMinutes || 0));
+  const currentFormatted = (isActual ? hasCurrentActual : currentMins > 0) ? formatMinutes(currentMins) : '--:--';
+  const options = isActual ? ACTUAL_TIME_OPTIONS : PLANNED_TIME_OPTIONS;
+  const label = isActual ? 'Actual' : 'Planned';
+  const clearLabel = isActual ? 'Clear actual' : 'Clear planned';
+
+  let html;
+  if (editMode) {
+    const h = Math.floor(currentMins / 60);
+    const m = currentMins % 60;
+    const hasVal = isActual ? hasCurrentActual : currentMins > 0;
+    const valClass = hasVal ? ' planned-picker__input--has-value' : '';
+    const colonClass = hasVal ? ' planned-picker__colon--has-value' : '';
+    html = `
+      <div class="planned-picker" data-focus-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <div class="planned-picker__time-entry">
+          <input class="planned-picker__input planned-picker__input--hours${valClass}" type="text" maxlength="2" value="${h}" data-focus-picker-hours>
+          <span class="planned-picker__colon${colonClass}">:</span>
+          <input class="planned-picker__input${valClass}" type="text" maxlength="2" value="${String(m).padStart(2, '0')}" data-focus-picker-mins>
+        </div>
+        <div class="planned-picker__hint">↵ Return to save</div>
+      </div>
+    `;
+  } else {
+    const optionsHtml = options.map(opt => {
+      const isSelected = currentMins === opt.minutes;
+      return `<button class="planned-picker__option${isSelected ? ' planned-picker__option--selected' : ''}" type="button" data-focus-picker-minutes="${opt.minutes}">
+        <span>${opt.label}</span>
+        ${isSelected ? '<span class="planned-picker__check">✓</span>' : ''}
+      </button>`;
+    }).join('');
+
+    const clearHtml = (isActual ? hasCurrentActual : currentMins > 0)
+      ? `<div class="planned-picker__divider"></div><button class="planned-picker__clear" type="button" data-focus-picker-clear>${clearLabel}</button>`
+      : '';
+
+    html = `
+      <div class="planned-picker" data-focus-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <button class="planned-picker__time-display" type="button" data-focus-picker-edit>${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        ${optionsHtml}
+        ${clearHtml}
+      </div>
+    `;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const dropdown = wrapper.firstElementChild;
+  metricEl.style.position = 'relative';
+  metricEl.appendChild(dropdown);
+
+  if (editMode) {
+    attachPickerInputColorListeners(dropdown);
+    const hoursInput = dropdown.querySelector('[data-focus-picker-hours]');
+    if (hoursInput) { hoursInput.focus(); hoursInput.select(); }
+  }
+}
+
+function applyFocusPickerTime(minutes) {
+  if (!focusPickerState) return;
+  const { type, subtaskId } = focusPickerState;
+  const task = findTaskById(focusState.taskId);
+  if (!task) return;
+  const subtask = subtaskId ? findSubtask(task, subtaskId) : null;
+  if (subtaskId && !subtask) return;
+
+  if (subtask) {
+    if (type === 'actual') {
+      subtask.actualTimeSeconds = Math.max(0, minutes * 60);
+    } else {
+      subtask.plannedMinutes = Math.max(0, minutes);
+    }
+  } else if (type === 'actual') {
+    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
+    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+  } else {
+    const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
+    task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
+  }
+  syncTaskAggregateTimes(task);
+  closeFocusPicker();
+  updateFocusModalValues(task);
+  updateCardDetailTimerState();
+  // Update kanban card
+  const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+  if (col) renderColumn(col);
+}
+
+function handleFocusPickerTimeEntry() {
+  if (!focusPickerState || !focusPickerState.editMode) return;
+  const hoursInput = document.querySelector('[data-focus-picker-hours]');
+  const minsInput = document.querySelector('[data-focus-picker-mins]');
+  if (!hoursInput || !minsInput) return;
+  const h = parseInt(hoursInput.value, 10) || 0;
+  const m = parseInt(minsInput.value, 10) || 0;
+  applyFocusPickerTime(h * 60 + m);
+}
+
+function renderFocusSubtaskRows(task) {
+  const subtasks = task.subtasks || [];
+  if (!subtasks.length) return '';
+
+  const rows = subtasks.map(subtask => {
+    ensureSubtaskTimeState(subtask);
+    const hasLabel = !!String(subtask.label || '').trim();
+    const isRunning = focusState.running && focusState.taskId === task.id && focusState.subtaskId === subtask.id;
+    const hasActual = isRunning || !!subtask.actualTimeSeconds;
+    const hasPlanned = !!subtask.plannedMinutes;
+    const actualDisplay = isRunning
+      ? formatSeconds(subtask.actualTimeSeconds || 0)
+      : (subtask.actualTimeSeconds ? formatMinutes(Math.floor(subtask.actualTimeSeconds / 60)) : '--:--');
+    const plannedDisplay = subtask.plannedMinutes ? formatMinutes(subtask.plannedMinutes) : '--:--';
+
+    return `
+      <div class="focus-modal__subtask-row${isRunning ? ' focus-modal__subtask-row--active' : ''}" data-focus-subtask-row data-focus-subtask-id="${escapeHtml(subtask.id)}">
+        <span class="focus-modal__subtask-grab" data-focus-subtask-grab><i data-lucide="grip-vertical"></i></span>
+        <button class="task-modal__check focus-modal__subtask-check ${subtask.done ? 'task-modal__check--complete' : ''}" type="button" data-focus-subtask-check="${escapeHtml(subtask.id)}">${CHECK_SVG}</button>
+        <div class="focus-modal__subtask-title${hasLabel ? ' focus-modal__subtask-title--filled' : ''}" contenteditable="true" draggable="false" data-focus-subtask-title="${escapeHtml(subtask.id)}" data-placeholder="Subtask description...">${hasLabel ? escapeHtml(subtask.label) : ''}</div>
+        <div class="focus-modal__subtask-metrics">
+          <button class="focus-modal__subtask-time-btn" type="button" data-focus-subtask-actual-metric="${escapeHtml(subtask.id)}">
+            <span class="focus-modal__subtask-actual${isRunning ? ' focus-modal__subtask-actual--running' : (hasActual ? ' focus-modal__subtask-actual--set' : ' focus-modal__subtask-actual--placeholder')}" data-focus-subtask-actual="${escapeHtml(subtask.id)}">${actualDisplay}</span>
+          </button>
+          <button class="focus-modal__subtask-time-btn" type="button" data-focus-subtask-planned-metric="${escapeHtml(subtask.id)}">
+            <span class="focus-modal__subtask-planned${hasPlanned ? ' focus-modal__subtask-planned--set' : ' focus-modal__subtask-planned--placeholder'}" data-focus-subtask-planned="${escapeHtml(subtask.id)}">${plannedDisplay}</span>
+          </button>
+          <button class="focus-modal__subtask-start-btn${isRunning ? ' focus-modal__subtask-start-btn--running' : ''}" type="button" data-focus-subtask-play="${escapeHtml(subtask.id)}" data-focus-subtask-state="${isRunning ? 'running' : 'stopped'}" aria-label="${isRunning ? 'Pause subtask timer' : 'Start subtask timer'}">
+            <span class="focus-modal__subtask-start-btn-icon"><i data-lucide="${isRunning ? 'pause' : 'play'}"></i></span>
+            <span class="focus-modal__subtask-start-btn-label">${isRunning ? 'STOP' : 'START'}</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `<div class="focus-modal__subtask-list">${rows}</div>`;
+}
+
+function renderFocusModal(task, autoStart) {
+  const existing = document.getElementById('focus-modal');
+  if (existing) existing.remove();
+
+  const isRunning = autoStart || focusState.running;
+  const hasActual = isRunning || !!task.actualTimeSeconds;
+  const hasPlanned = !!task.timeEstimateMinutes;
+  const plannedDisplay = hasPlanned ? formatMinutes(task.timeEstimateMinutes) : '--:--';
+  const actualDisplay = isRunning
+    ? formatSeconds(task.actualTimeSeconds || 0)
+    : (task.actualTimeSeconds ? formatMinutes(Math.floor(task.actualTimeSeconds / 60)) : '--:--');
+
+  const el = document.createElement('div');
+  el.id = 'focus-modal';
+  el.className = 'focus-modal';
+  el.innerHTML = `
+    <div class="focus-modal__topbar">
+      <button class="focus-modal__tab" type="button">
+        <i data-lucide="timer"></i>
+        <span>Focus</span>
+      </button>
+    </div>
+    <div class="focus-modal__content">
+      <div class="focus-modal__task-row">
+        <div class="focus-modal__title-wrap">
+          <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-focus-check>${CHECK_SVG}</button>
+          <h2 class="focus-modal__title" contenteditable="true">${escapeHtml(task.title || 'Task')}</h2>
+        </div>
+        <div class="focus-modal__metrics">
+          <div class="focus-modal__metric focus-modal__metric--clickable${hasActual ? ' focus-modal__metric--has-value' : ''}" data-focus-actual-metric>
+            <span class="focus-modal__metric-label">ACTUAL</span>
+            <span class="focus-modal__actual${isRunning ? ' focus-modal__actual--running' : (hasActual ? ' focus-modal__actual--set' : ' focus-modal__actual--placeholder')}" data-focus-actual>${actualDisplay}</span>
+          </div>
+          <div class="focus-modal__metric focus-modal__metric--clickable${hasPlanned ? ' focus-modal__metric--has-value' : ''}" data-focus-planned-metric>
+            <span class="focus-modal__metric-label">PLANNED</span>
+            <span class="focus-modal__planned${hasPlanned ? ' focus-modal__planned--set' : ' focus-modal__planned--placeholder'}" data-focus-planned>${plannedDisplay}</span>
+          </div>
+          <button class="focus-modal__stop-btn${isRunning ? '' : ' focus-modal__btn--hidden'}" type="button" data-focus-stop>
+            <i data-lucide="pause"></i>
+            <span>STOP</span>
+          </button>
+          <button class="focus-modal__start-btn${isRunning ? ' focus-modal__btn--hidden' : ''}" type="button" data-focus-start>
+            <i data-lucide="play"></i>
+            <span>START</span>
+          </button>
+        </div>
+      </div>
+      <div class="focus-modal__body">
+        ${renderFocusSubtaskRows(task)}
+        <button class="focus-modal__add-subtask" type="button" data-focus-add-subtask>
+          <i data-lucide="plus-circle"></i>
+          <span>Add subtask</span>
+        </button>
+        <div class="focus-modal__notes" contenteditable="true" data-placeholder="Notes...">${task.notes ? escapeHtml(task.notes) : ''}</div>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(el);
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  // Attach focus mode events
+  el.addEventListener('click', e => {
+    // Inside an open focus picker
+    const picker = e.target.closest('[data-focus-picker]');
+    if (picker) {
+      e.stopImmediatePropagation();
+      const optBtn = e.target.closest('[data-focus-picker-minutes]');
+      if (optBtn) { applyFocusPickerTime(parseInt(optBtn.dataset.focusPickerMinutes, 10)); return; }
+      if (e.target.closest('[data-focus-picker-edit]')) {
+        if (focusPickerState) { focusPickerState.editMode = true; renderFocusPicker(); }
+        return;
+      }
+      if (e.target.closest('[data-focus-picker-clear]')) { applyFocusPickerTime(0); return; }
+      return;
+    }
+    if (e.target.closest('[data-focus-close]')) {
+      closeFocusPicker();
+      closeFocusMode();
+      return;
+    }
+    if (e.target.closest('[data-focus-stop]')) {
+      closeFocusPicker();
+      stopFocusTimer();
+      return;
+    }
+    if (e.target.closest('[data-focus-start]')) {
+      closeFocusPicker();
+      startFocusTimer();
+      return;
+    }
+    if (e.target.closest('[data-focus-add-subtask]')) {
+      closeFocusPicker();
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      const subtask = addModalSubtask(t);
+      const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+      if (col) renderColumn(col);
+      rerenderFocusModal(subtask.id);
+      return;
+    }
+    const subtaskPlayBtn = e.target.closest('[data-focus-subtask-play]');
+    if (subtaskPlayBtn) {
+      closeFocusPicker();
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      const subtaskId = subtaskPlayBtn.getAttribute('data-focus-subtask-play');
+      if (!subtaskId) return;
+
+      const isSameRunning = focusState.running && focusState.taskId === t.id && focusState.subtaskId === subtaskId;
+      if (isSameRunning) {
+        stopFocusTimer();
+        return;
+      }
+
+      if (focusState.running) stopFocusTimer();
+      focusState.subtaskId = subtaskId;
+      startFocusTimer();
+      return;
+    }
+    const subtaskCheckBtn = e.target.closest('[data-focus-subtask-check]');
+    if (subtaskCheckBtn) {
+      closeFocusPicker();
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      const subtaskId = subtaskCheckBtn.getAttribute('data-focus-subtask-check');
+      const subtask = findSubtask(t, subtaskId);
+      if (!subtask) return;
+      subtask.done = !subtask.done;
+      subtask.deleteReady = false;
+      subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
+      updateFocusModalValues(t);
+      const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+      if (col) renderColumn(col);
+      return;
+    }
+    if (e.target.closest('[data-focus-check]')) {
+      closeFocusPicker();
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      t.complete = !t.complete;
+      const btn = el.querySelector('[data-focus-check]');
+      if (btn) {
+        btn.classList.toggle('task-modal__check--complete', t.complete);
+      }
+      const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+      if (col) renderColumn(col);
+      return;
+    }
+    // Actual metric click
+    if (e.target.closest('[data-focus-actual-metric]')) {
+      // Disabled while timer is running
+      if (focusState.running) return;
+      if (focusPickerState && focusPickerState.type === 'actual' && !focusPickerState.subtaskId) {
+        closeFocusPicker();
+      } else {
+        openFocusPicker('actual');
+      }
+      return;
+    }
+    // Planned metric click
+    if (e.target.closest('[data-focus-planned-metric]')) {
+      if (focusPickerState && focusPickerState.type === 'planned' && !focusPickerState.subtaskId) {
+        closeFocusPicker();
+      } else {
+        openFocusPicker('planned');
+      }
+      return;
+    }
+    // Subtask actual metric click
+    const subtaskActualMetric = e.target.closest('[data-focus-subtask-actual-metric]');
+    if (subtaskActualMetric) {
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      const subtaskId = subtaskActualMetric.getAttribute('data-focus-subtask-actual-metric');
+      if (!subtaskId) return;
+      const isRunningSubtask = focusState.running && focusState.taskId === t.id && focusState.subtaskId === subtaskId;
+      if (isRunningSubtask) return;
+      if (focusPickerState && focusPickerState.type === 'actual' && focusPickerState.subtaskId === subtaskId) {
+        closeFocusPicker();
+      } else {
+        openFocusPicker('actual', subtaskId);
+      }
+      return;
+    }
+    // Subtask planned metric click
+    const subtaskPlannedMetric = e.target.closest('[data-focus-subtask-planned-metric]');
+    if (subtaskPlannedMetric) {
+      const subtaskId = subtaskPlannedMetric.getAttribute('data-focus-subtask-planned-metric');
+      if (!subtaskId) return;
+      if (focusPickerState && focusPickerState.type === 'planned' && focusPickerState.subtaskId === subtaskId) {
+        closeFocusPicker();
+      } else {
+        openFocusPicker('planned', subtaskId);
+      }
+      return;
+    }
+    // Click elsewhere in focus modal closes picker
+    if (focusPickerState) { closeFocusPicker(); }
+  });
+
+  el.addEventListener('input', e => {
+    const notesEl = e.target instanceof Element ? e.target.closest('.focus-modal__notes') : null;
+    if (notesEl) {
+      const cleanNotes = notesEl.textContent.replace(/\n/g, '').trim();
+      if (!cleanNotes && notesEl.innerHTML !== '') {
+        notesEl.textContent = '';
+      }
+      return;
+    }
+
+    const titleEl = e.target instanceof Element ? e.target.closest('[data-focus-subtask-title]') : null;
+    if (!titleEl) return;
+    const t = findTaskById(focusState.taskId);
+    if (!t) return;
+    const subtaskId = titleEl.getAttribute('data-focus-subtask-title');
+    const subtask = findSubtask(t, subtaskId);
+    if (!subtask) return;
+
+    const cleanText = titleEl.textContent.replace(/\n/g, '').trim();
+    if (!cleanText && titleEl.innerHTML !== '') {
+      titleEl.textContent = '';
+    }
+    subtask.label = cleanText;
+    subtask.deleteReady = false;
+    titleEl.classList.toggle('focus-modal__subtask-title--filled', !!cleanText);
+  });
+
+  el.addEventListener('focusout', e => {
+    const titleEl = e.target instanceof Element ? e.target.closest('[data-focus-subtask-title]') : null;
+    if (!titleEl) return;
+    const t = findTaskById(focusState.taskId);
+    if (!t) return;
+    const subtaskId = titleEl.getAttribute('data-focus-subtask-title');
+    const subtask = findSubtask(t, subtaskId);
+    if (!subtask) return;
+
+    const cleanText = titleEl.textContent.replace(/\n/g, '').trim();
+    subtask.label = cleanText;
+    subtask.deleteReady = false;
+    if (!cleanText && titleEl.innerHTML !== '') titleEl.textContent = '';
+    titleEl.classList.toggle('focus-modal__subtask-title--filled', !!cleanText);
+
+    const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+    if (col) renderColumn(col);
+  });
+
+  el.addEventListener('keydown', e => {
+    const titleEl = e.target instanceof Element ? e.target.closest('[data-focus-subtask-title]') : null;
+    if (!titleEl) return;
+    const t = findTaskById(focusState.taskId);
+    if (!t) return;
+    const subtaskId = titleEl.getAttribute('data-focus-subtask-title');
+    const index = t.subtasks.findIndex(st => st.id === subtaskId);
+    if (index === -1) return;
+    const subtask = t.subtasks[index];
+    if (!subtask) return;
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const inserted = addModalSubtask(t, index + 1);
+      const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+      if (col) renderColumn(col);
+      rerenderFocusModal(inserted.id);
+      return;
+    }
+
+    if (e.key === 'Backspace') {
+      const cleanText = titleEl.textContent.replace(/\n/g, '').trim();
+      if (cleanText.length > 0) {
+        subtask.deleteReady = false;
+        return;
+      }
+      e.preventDefault();
+      const nextFocusId = t.subtasks[index + 1]?.id || t.subtasks[index - 1]?.id || null;
+      removeModalSubtask(t, subtaskId);
+      closeFocusPicker();
+      const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+      if (col) renderColumn(col);
+      rerenderFocusModal(nextFocusId);
+    }
+  });
+
+  let focusSubtaskPointerDrag = null;
+
+  const clearFocusSubtaskDropTargets = () => {
+    el.querySelectorAll('.focus-modal__subtask-row--drop-before, .focus-modal__subtask-row--drop-after')
+      .forEach(row => row.classList.remove('focus-modal__subtask-row--drop-before', 'focus-modal__subtask-row--drop-after'));
+  };
+
+  const onFocusSubtaskPointerMove = ev => {
+    if (!focusSubtaskPointerDrag) return;
+    ev.preventDefault();
+
+    const target = document.elementFromPoint(ev.clientX, ev.clientY);
+    const row = target instanceof Element ? target.closest('[data-focus-subtask-row]') : null;
+    clearFocusSubtaskDropTargets();
+
+    if (!row) {
+      focusSubtaskPointerDrag.targetId = null;
+      return;
+    }
+
+    const targetId = row.getAttribute('data-focus-subtask-id');
+    if (!targetId || targetId === focusSubtaskPointerDrag.draggedId) {
+      focusSubtaskPointerDrag.targetId = null;
+      return;
+    }
+
+    const rect = row.getBoundingClientRect();
+    const placeAfter = ev.clientY > rect.top + rect.height / 2;
+    focusSubtaskPointerDrag.targetId = targetId;
+    focusSubtaskPointerDrag.placeAfter = placeAfter;
+    row.classList.add(placeAfter ? 'focus-modal__subtask-row--drop-after' : 'focus-modal__subtask-row--drop-before');
+  };
+
+  const endFocusSubtaskPointerDrag = commit => {
+    if (!focusSubtaskPointerDrag) return;
+    const drag = focusSubtaskPointerDrag;
+    focusSubtaskPointerDrag = null;
+
+    document.removeEventListener('mousemove', onFocusSubtaskPointerMove, true);
+    document.removeEventListener('mouseup', onFocusSubtaskPointerUp, true);
+    el.classList.remove('focus-modal--subtask-dragging');
+    el.querySelectorAll('.focus-modal__subtask-row--dragging').forEach(row => {
+      row.classList.remove('focus-modal__subtask-row--dragging');
+    });
+    clearFocusSubtaskDropTargets();
+
+    if (!commit || !drag.targetId || drag.targetId === drag.draggedId) {
+      return;
+    }
+
+    const t = findTaskById(focusState.taskId);
+    if (!t) return;
+    const from = t.subtasks.findIndex(st => st.id === drag.draggedId);
+    const to = t.subtasks.findIndex(st => st.id === drag.targetId);
+    if (from === -1 || to === -1) return;
+
+    const [moved] = t.subtasks.splice(from, 1);
+    let insertAt = to;
+    if (from < to) insertAt -= 1;
+    if (drag.placeAfter) insertAt += 1;
+    insertAt = Math.max(0, Math.min(insertAt, t.subtasks.length));
+    t.subtasks.splice(insertAt, 0, moved);
+
+    const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
+    if (col) renderColumn(col);
+    rerenderFocusModal(drag.draggedId);
+  };
+
+  const onFocusSubtaskPointerUp = ev => {
+    if (!focusSubtaskPointerDrag) return;
+    ev.preventDefault();
+    endFocusSubtaskPointerDrag(true);
+  };
+
+  el.addEventListener('mousedown', e => {
+    const grab = e.target instanceof Element ? e.target.closest('[data-focus-subtask-grab]') : null;
+    if (!grab) return;
+    const row = grab.closest('[data-focus-subtask-row]');
+    if (!row) return;
+    const draggedId = row.getAttribute('data-focus-subtask-id');
+    if (!draggedId) return;
+
+    e.preventDefault();
+    clearFocusSubtaskDropTargets();
+    row.classList.add('focus-modal__subtask-row--dragging');
+    el.classList.add('focus-modal--subtask-dragging');
+    focusSubtaskPointerDrag = {
+      draggedId,
+      targetId: null,
+      placeAfter: false
+    };
+
+    document.addEventListener('mousemove', onFocusSubtaskPointerMove, true);
+    document.addEventListener('mouseup', onFocusSubtaskPointerUp, true);
+  });
+
+  removeFocusEscKeyHandler();
+  focusEscKeyHandler = function focusEsc(e) {
+    if (e.key === 'Enter' && focusPickerState && focusPickerState.editMode) {
+      e.preventDefault();
+      handleFocusPickerTimeEntry();
+      return;
+    }
+    if (e.key === 'Escape' && document.getElementById('focus-modal')) {
+      e.preventDefault();
+      if (focusPickerState) { closeFocusPicker(); return; }
+      closeFocusMode();
+    }
+  };
+  document.addEventListener('keydown', focusEscKeyHandler);
 }
 
 let openModalTaskId = null;
@@ -955,22 +2682,42 @@ function openTaskDetailModal(taskId) {
   if (typeof lucide !== 'undefined') {
     lucide.createIcons();
   }
+
+  // If timer is running for this task, update card detail to show STOP state
+  if (focusState.running && focusState.taskId === taskId) {
+    updateCardDetailTimerState();
+  }
 }
 
 function closeTaskDetailModal() {
   closeStartDatePicker();
   closeDueDatePicker();
+  closePlannedPicker();
+  closeActualPicker();
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
-  // Save notes before closing
+  // Save title and notes before closing
   if (openModalTaskId) {
-    const notesEl = overlay.querySelector('.task-modal__notes');
-    if (notesEl) {
-      const ctx = findTaskContext(openModalTaskId);
-      if (ctx) {
+    const ctx = findTaskContext(openModalTaskId);
+    if (ctx) {
+      const titleEl = overlay.querySelector('.task-modal__title');
+      if (titleEl) {
+        const newTitle = titleEl.textContent.trim();
+        if (newTitle) {
+          ctx.task.title = newTitle;
+        }
+      }
+      const notesEl = overlay.querySelector('.task-modal__notes');
+      if (notesEl) {
         ctx.task.notes = notesEl.textContent.trim() || '';
       }
+      syncTaskAggregateTimes(ctx.task);
+      // If timer is running for this task, show timer on kanban card
+      if (focusState.running && focusState.taskId === openModalTaskId) {
+        cardTimerExpanded.add(openModalTaskId);
+      }
+      renderColumn(ctx.column);
     }
     openModalTaskId = null;
   }
@@ -981,6 +2728,7 @@ function closeTaskDetailModal() {
 }
 
 function renderTaskCard(task) {
+  ensureTaskTimeState(task);
   const card = document.createElement('div');
   card.className = 'task-card' + (task.complete ? ' task-card--complete' : '');
   card.dataset.taskId = task.id;
@@ -990,9 +2738,43 @@ function renderTaskCard(task) {
     ? `<span class="task-card__scheduled-pill">${escapeHtml(task.scheduledTime)}</span>`
     : '';
 
-  const timeBadge = task.timeEstimateMinutes
-    ? `<span class="task-card__time-badge">${formatMinutes(task.timeEstimateMinutes)}</span>`
-    : '';
+  const isTimerRunning = focusState.running && focusState.taskId === task.id;
+  const showTimerDropdown = isTimerRunning || cardTimerExpanded.has(task.id);
+  const badgeGreenClass = isTimerRunning ? ' task-card__time-badge--running' : '';
+
+  let timeBadge = '';
+  const actualMins = task.actualTimeSeconds ? Math.floor(task.actualTimeSeconds / 60) : 0;
+  const showActualOnBadge = hasActualTime(task.actualTimeSeconds) || isTimerRunning;
+  if (showActualOnBadge && task.timeEstimateMinutes) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / ${formatMinutes(task.timeEstimateMinutes)}</span>`;
+  } else if (showActualOnBadge) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / --:--</span>`;
+  } else if (task.timeEstimateMinutes) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(task.timeEstimateMinutes)}</span>`;
+  }
+
+  const actualDisplay = isTimerRunning
+    ? formatSeconds(task.actualTimeSeconds || 0)
+    : formatActualDisplay(task.actualTimeSeconds || 0);
+  const plannedDisplay = task.timeEstimateMinutes ? formatMinutes(task.timeEstimateMinutes) : '--:--';
+
+  const timerSection = showTimerDropdown ? `
+    <div class="task-card__timer" data-card-timer>
+      <button class="task-card__timer-btn" type="button" data-card-timer-toggle>
+        <i data-lucide="${isTimerRunning ? 'pause' : 'play'}"></i>
+      </button>
+      <div class="task-card__timer-metrics">
+        <div class="task-card__timer-metric${isTimerRunning ? '' : ' task-card__timer-metric--clickable'}" data-card-actual-picker-btn>
+          <span class="task-card__timer-label">ACTUAL</span>
+          <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${actualDisplay}</span>
+        </div>
+        <div class="task-card__timer-metric task-card__timer-metric--clickable" data-card-planned-picker-btn>
+          <span class="task-card__timer-label">PLANNED</span>
+          <span class="task-card__timer-value">${plannedDisplay}</span>
+        </div>
+      </div>
+    </div>
+  ` : '';
 
   card.innerHTML = `
     <div class="task-card__header">
@@ -1007,9 +2789,16 @@ function renderTaskCard(task) {
       <button class="task-card__complete-btn" aria-label="Mark complete">
         <span class="complete-circle">${CHECK_SVG}</span>
       </button>
+      <button class="task-card__hover-icon" data-card-date-btn aria-label="Set start date" type="button">
+        <i data-lucide="calendar"></i>
+      </button>
+      <button class="task-card__hover-icon" data-card-clock-btn aria-label="Timer" type="button">
+        <i data-lucide="clock"></i>
+      </button>
       ${renderIntegrationIcon(task.integrationColor)}
       ${renderTaskTag(task.tag)}
     </div>
+    ${timerSection}
   `;
 
   return card;
@@ -1020,6 +2809,7 @@ function renderColumn(column) {
   if (!colEl) return;
 
   moveCompletedTasksToBottom(column);
+  column.tasks.forEach(ensureTaskTimeState);
 
   const progress = computeProgress(column);
   colEl.querySelector('.progress-bar__fill').style.width = progress + '%';
@@ -1030,6 +2820,7 @@ function renderColumn(column) {
   const taskList = colEl.querySelector('.task-list');
   taskList.innerHTML = '';
   column.tasks.forEach(task => taskList.appendChild(renderTaskCard(task)));
+  if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
 function renderCalendarEvents() {
@@ -1352,11 +3143,15 @@ function commitAddTask(colEl) {
     id: uid(),
     title,
     timeEstimateMinutes: 0,
+    actualTimeSeconds: 0,
+    ownPlannedMinutes: 0,
+    ownActualTimeSeconds: 0,
     scheduledTime: null,
     complete: false,
     tag: null,
     integrationColor: null,
-    subtasks: []
+    subtasks: [],
+    showSubtasks: false
   });
 
   hideAddTaskInput(colEl);
@@ -1625,6 +3420,10 @@ function attachEvents() {
           const incompleteTasks = col.tasks.filter(t => !t.complete);
           task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
           task.complete = true;
+          // Auto-set actual time to planned time when completing without actual time
+          if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
+            task.actualTimeSeconds = task.timeEstimateMinutes * 60;
+          }
           moveCompletedTasksToBottom(col);
         } else {
           const taskIndex = col.tasks.findIndex(t => t.id === task.id);
@@ -1648,6 +3447,28 @@ function attachEvents() {
         break;
       }
     }
+  });
+
+  // ── Kanban subtask completion toggle ────────
+  container.addEventListener('click', e => {
+    const subtaskBtn = closestFromTarget(e.target, '[data-card-subtask-check]');
+    if (!subtaskBtn) return;
+    e.stopImmediatePropagation();
+
+    const subtaskEl = subtaskBtn.closest('.subtask');
+    const card = subtaskBtn.closest('.task-card');
+    if (!subtaskEl || !card) return;
+
+    const ctx = findTaskContext(card.dataset.taskId);
+    if (!ctx) return;
+
+    const subtaskId = subtaskEl.dataset.subtaskId;
+    const subtask = findSubtask(ctx.task, subtaskId);
+    if (!subtask) return;
+
+    subtask.done = !subtask.done;
+    subtask.deleteReady = false;
+    renderColumn(ctx.column);
   });
 
   // ── Show add-task input ─────────────────────
@@ -1678,6 +3499,165 @@ function attachEvents() {
     if (e.key === 'Escape') { hideAddTaskInput(colEl); }
   });
 
+  // ── Card hover: calendar icon (date picker) ──
+  container.addEventListener('click', e => {
+    // Handle clicks inside the card date picker dropdown
+    const cardSdp = closestFromTarget(e.target, '[data-card-sdp]');
+    if (cardSdp) {
+      e.stopImmediatePropagation();
+      // Calendar prev/next
+      if (closestFromTarget(e.target, '[data-cal-prev]') && cardDatePickerState) {
+        cardDatePickerState.viewMonth--;
+        if (cardDatePickerState.viewMonth < 0) { cardDatePickerState.viewMonth = 11; cardDatePickerState.viewYear--; }
+        renderCardDatePicker();
+        return;
+      }
+      if (closestFromTarget(e.target, '[data-cal-next]') && cardDatePickerState) {
+        cardDatePickerState.viewMonth++;
+        if (cardDatePickerState.viewMonth > 11) { cardDatePickerState.viewMonth = 0; cardDatePickerState.viewYear++; }
+        renderCardDatePicker();
+        return;
+      }
+      // Date cell click
+      const dayCell = closestFromTarget(e.target, '[data-date]');
+      if (dayCell) { handleCardDateAction('select-date', dayCell.dataset.date); return; }
+      // Snooze / move actions
+      const actionBtn = closestFromTarget(e.target, '[data-action]');
+      if (actionBtn) { handleCardDateAction(actionBtn.dataset.action); return; }
+      return;
+    }
+
+    const btn = closestFromTarget(e.target, '[data-card-date-btn]');
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest('.task-card');
+    if (!card) return;
+    const taskId = card.dataset.taskId;
+    if (cardDatePickerState && cardDatePickerState.taskId === taskId) {
+      closeCardDatePicker();
+    } else {
+      openCardDatePicker(taskId);
+    }
+  });
+
+  // ── Card hover: clock icon (timer + planned) ──
+  container.addEventListener('click', e => {
+    const btn = closestFromTarget(e.target, '[data-card-clock-btn]');
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest('.task-card');
+    if (!card) return;
+    const taskId = card.dataset.taskId;
+    const task = findTaskById(taskId);
+    if (!task) return;
+
+    // If timer area is not showing, expand it
+    if (!cardTimerExpanded.has(taskId) && !(focusState.running && focusState.taskId === taskId)) {
+      cardTimerExpanded.add(taskId);
+      const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+      if (col) renderColumn(col);
+
+      // If no planned time, also open the planned time picker
+      if (!task.timeEstimateMinutes) {
+        setTimeout(() => openCardPicker(taskId, 'planned'), 0);
+      }
+    } else {
+      // Timer area already visible — if no planned time, open planned picker
+      if (!task.timeEstimateMinutes) {
+        if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'planned') {
+          closeCardPicker();
+        } else {
+          openCardPicker(taskId, 'planned');
+        }
+      }
+    }
+  });
+
+  // ── Kanban card time badge toggle ───────────
+  container.addEventListener('click', e => {
+    const badge = closestFromTarget(e.target, '[data-card-time-badge]');
+    if (!badge) return;
+    e.stopPropagation();
+    const card = badge.closest('.task-card');
+    if (!card) return;
+    const taskId = card.dataset.taskId;
+    if (cardTimerExpanded.has(taskId)) {
+      cardTimerExpanded.delete(taskId);
+    } else {
+      cardTimerExpanded.add(taskId);
+    }
+    const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+    if (col) renderColumn(col);
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+  });
+
+  // ── Kanban card timer pause/play ──────────
+  container.addEventListener('click', e => {
+    const btn = closestFromTarget(e.target, '[data-card-timer-toggle]');
+    if (!btn) return;
+    e.stopPropagation();
+    const card = btn.closest('.task-card');
+    if (!card) return;
+    const taskId = card.dataset.taskId;
+    if (focusState.running && focusState.taskId === taskId) {
+      // Pause: stop timer and hide timer area
+      stopFocusTimer();
+      cardTimerExpanded.delete(taskId);
+      const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+      if (col) renderColumn(col);
+    } else {
+      // Play: enter focus mode and start timer
+      openFocusMode(taskId, true);
+    }
+  });
+
+  // ── Card timer actual/planned picker ────────
+  container.addEventListener('click', e => {
+    // Inside an open card picker
+    const picker = closestFromTarget(e.target, '[data-card-picker]');
+    if (picker) {
+      e.stopImmediatePropagation();
+      const optBtn = closestFromTarget(e.target, '[data-card-picker-minutes]');
+      if (optBtn) { applyCardPickerTime(parseInt(optBtn.dataset.cardPickerMinutes, 10)); return; }
+      if (closestFromTarget(e.target, '[data-card-picker-edit]')) {
+        if (cardPickerState) { cardPickerState.editMode = true; renderCardPicker(); }
+        return;
+      }
+      if (closestFromTarget(e.target, '[data-card-picker-clear]')) { applyCardPickerTime(0); return; }
+      return;
+    }
+    // Actual picker toggle
+    const actualBtn = closestFromTarget(e.target, '[data-card-actual-picker-btn]');
+    if (actualBtn) {
+      e.stopPropagation();
+      const card = actualBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      // Disabled while timer is running
+      if (focusState.running && focusState.taskId === taskId) return;
+      if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'actual') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'actual');
+      }
+      return;
+    }
+    // Planned picker toggle
+    const plannedBtn = closestFromTarget(e.target, '[data-card-planned-picker-btn]');
+    if (plannedBtn) {
+      e.stopPropagation();
+      const card = plannedBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'planned') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'planned');
+      }
+      return;
+    }
+  });
+
   // ── Open task detail modal ──────────────────
   container.addEventListener('click', e => {
     if (suppressTaskCardClick) {
@@ -1685,6 +3665,18 @@ function attachEvents() {
       return;
     }
     if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-check]')) return;
+    if (closestFromTarget(e.target, '[data-card-time-badge]')) return;
+    if (closestFromTarget(e.target, '[data-card-timer-toggle]')) return;
+    if (closestFromTarget(e.target, '[data-card-actual-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-planned-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-date-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-sdp]')) return;
+    if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
+    // Close any open card picker when clicking elsewhere
+    if (cardPickerState) { closeCardPicker(); }
+    if (cardDatePickerState) { closeCardDatePicker(); }
     const card = closestFromTarget(e.target, '.task-card');
     if (!card) return;
     openTaskDetailModal(card.dataset.taskId);
@@ -1696,6 +3688,15 @@ function attachEvents() {
   container.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
     if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-check]')) return;
+    if (closestFromTarget(e.target, '[data-card-time-badge]')) return;
+    if (closestFromTarget(e.target, '[data-card-timer-toggle]')) return;
+    if (closestFromTarget(e.target, '[data-card-actual-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-planned-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-date-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-sdp]')) return;
+    if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
     const card = closestFromTarget(e.target, '.task-card');
     if (!card) return;
     e.preventDefault();
@@ -1865,8 +3866,11 @@ function attachEvents() {
 }
 
 function closeAnyPicker() {
+  if (actualPickerOpen) { closeActualPicker(); return true; }
+  if (plannedPickerOpen) { closePlannedPicker(); return true; }
   if (startDatePickerState) { closeStartDatePicker(); return true; }
   if (dueDatePickerState) { closeDueDatePicker(); return true; }
+  if (focusPickerState) { closeFocusPicker(); return true; }
   return false;
 }
 
@@ -1880,9 +3884,137 @@ function navigatePicker(dir) {
   else renderDueDatePickerInModal();
 }
 
+function focusModalSubtaskInput(subtaskId) {
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay || overlay.hidden) return;
+  const labelEl = overlay.querySelector(`[data-modal-subtask-label="${subtaskId}"]`);
+  if (!labelEl) return;
+  labelEl.focus();
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(labelEl);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function rerenderOpenTaskDetailModal(focusSubtaskId = null) {
+  if (!openModalTaskId) return;
+  const ctx = findTaskContext(openModalTaskId);
+  if (!ctx) return;
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return;
+
+  overlay.innerHTML = renderTaskDetailModal(ctx.task, ctx.column);
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  if (focusState.running && focusState.taskId === openModalTaskId) {
+    updateCardDetailTimerState();
+  }
+  if (focusSubtaskId) {
+    requestAnimationFrame(() => focusModalSubtaskInput(focusSubtaskId));
+  }
+}
+
+function addModalSubtask(task, insertAt = null) {
+  ensureTaskTimeState(task);
+  const subtask = createEmptySubtask();
+  const index = Number.isInteger(insertAt) ? Math.max(0, Math.min(insertAt, task.subtasks.length)) : task.subtasks.length;
+  task.subtasks.splice(index, 0, subtask);
+  task.showSubtasks = true;
+  syncTaskAggregateTimes(task);
+  return subtask;
+}
+
+function removeModalSubtask(task, subtaskId) {
+  ensureTaskTimeState(task);
+  const index = task.subtasks.findIndex(s => s.id === subtaskId);
+  if (index === -1) return null;
+  const [removed] = task.subtasks.splice(index, 1);
+  if (task.subtasks.length === 0) task.showSubtasks = false;
+  syncTaskAggregateTimes(task);
+  return removed;
+}
+
+function detachModalSubtaskToTask(task, column, subtaskId) {
+  const removed = removeModalSubtask(task, subtaskId);
+  if (!removed) return null;
+
+  const parentIndex = column.tasks.findIndex(t => t.id === task.id);
+  const standaloneTitle = String(removed.label || '').trim() || 'Untitled subtask';
+  const newTask = {
+    id: uid(),
+    title: standaloneTitle,
+    timeEstimateMinutes: removed.plannedMinutes || 0,
+    actualTimeSeconds: removed.actualTimeSeconds || 0,
+    ownPlannedMinutes: removed.plannedMinutes || 0,
+    ownActualTimeSeconds: removed.actualTimeSeconds || 0,
+    scheduledTime: null,
+    complete: !!removed.done,
+    tag: task.tag || null,
+    integrationColor: task.integrationColor || null,
+    subtasks: [],
+    showSubtasks: false,
+    notes: ''
+  };
+
+  const insertAt = parentIndex === -1 ? column.tasks.length : parentIndex + 1;
+  column.tasks.splice(insertAt, 0, newTask);
+  ensureTaskTimeState(newTask);
+
+  return newTask;
+}
+
 function attachTaskModalEvents() {
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
+  let clearSubtaskHoverSuppression = null;
+  let suppressTopActionClick = false;
+
+  const suppressSubtaskHoverUntilPointerMove = () => {
+    overlay.classList.add('task-modal-overlay--suppress-subtask-hover');
+
+    const release = () => {
+      overlay.classList.remove('task-modal-overlay--suppress-subtask-hover');
+      window.removeEventListener('mousemove', release, true);
+      if (clearSubtaskHoverSuppression === release) {
+        clearSubtaskHoverSuppression = null;
+      }
+    };
+
+    if (clearSubtaskHoverSuppression) {
+      window.removeEventListener('mousemove', clearSubtaskHoverSuppression, true);
+      clearSubtaskHoverSuppression();
+    }
+    clearSubtaskHoverSuppression = release;
+    window.addEventListener('mousemove', release, { once: true, capture: true });
+  };
+
+  const suppressNextTopActionClick = () => {
+    suppressTopActionClick = true;
+    requestAnimationFrame(() => {
+      suppressTopActionClick = false;
+    });
+  };
+
+  // Handle close/expand on mousedown so focused subtask inputs don't require a second click.
+  overlay.addEventListener('mousedown', e => {
+    if (!(e.target instanceof Element)) return;
+    const closeBtn = e.target.closest('[data-task-modal-close]');
+    if (closeBtn) {
+      e.preventDefault();
+      suppressNextTopActionClick();
+      closeTaskDetailModal();
+      return;
+    }
+    const expandBtn = e.target.closest('[data-expand-btn]');
+    if (expandBtn) {
+      if (!openModalTaskId) return;
+      e.preventDefault();
+      suppressNextTopActionClick();
+      openFocusMode(openModalTaskId, false, 'card-detail');
+    }
+  }, true);
 
   overlay.addEventListener('click', e => {
     // Click on overlay background
@@ -1891,6 +4023,11 @@ function attachTaskModalEvents() {
       return;
     }
     if (!(e.target instanceof Element)) return;
+    if (suppressTopActionClick) {
+      if (e.target.closest('[data-task-modal-close]') || e.target.closest('[data-expand-btn]')) {
+        return;
+      }
+    }
 
     // Close modal button
     if (e.target.closest('[data-task-modal-close]')) {
@@ -1898,24 +4035,166 @@ function attachTaskModalEvents() {
       return;
     }
 
-    // Start date picker toggle
-    if (e.target.closest('.task-modal__meta-start-btn')) {
-      closeDueDatePicker();
-      if (startDatePickerState) {
-        closeStartDatePicker();
-      } else if (openModalTaskId) {
-        openStartDatePicker(openModalTaskId);
+    // "+ Subtasks" top action: create one row initially and focus label
+    if (e.target.closest('[data-modal-add-two-subtasks]')) {
+      if (!openModalTaskId) return;
+      const ctx = findTaskContext(openModalTaskId);
+      if (!ctx) return;
+      const { task, column } = ctx;
+
+      task.showSubtasks = true;
+      let focusSubtaskId;
+      if (task.subtasks.length === 0) {
+        focusSubtaskId = addModalSubtask(task).id;
+      } else {
+        const emptyExisting = task.subtasks.find(st => !String(st.label || '').trim());
+        focusSubtaskId = emptyExisting ? emptyExisting.id : addModalSubtask(task).id;
+      }
+
+      renderColumn(column);
+      rerenderOpenTaskDetailModal(focusSubtaskId);
+      return;
+    }
+
+    // Add subtask row button
+    if (e.target.closest('[data-modal-add-subtask]')) {
+      if (!openModalTaskId) return;
+      const ctx = findTaskContext(openModalTaskId);
+      if (!ctx) return;
+      const subtask = addModalSubtask(ctx.task);
+      renderColumn(ctx.column);
+      rerenderOpenTaskDetailModal(subtask.id);
+      return;
+    }
+
+    // Subtask checkbox toggle
+    const subtaskCheckBtn = e.target.closest('[data-modal-subtask-check]');
+    if (subtaskCheckBtn) {
+      if (!openModalTaskId) return;
+      const ctx = findTaskContext(openModalTaskId);
+      if (!ctx) return;
+      const subtaskId = subtaskCheckBtn.getAttribute('data-modal-subtask-check');
+      const subtask = findSubtask(ctx.task, subtaskId);
+      if (!subtask) return;
+      subtask.done = !subtask.done;
+      subtask.deleteReady = false;
+      subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
+      renderColumn(ctx.column);
+      return;
+    }
+
+    // Convert subtask into standalone task (time moves with it and parent recalculates)
+    const detachBtn = e.target.closest('[data-modal-subtask-detach]');
+    if (detachBtn) {
+      if (!openModalTaskId) return;
+      const ctx = findTaskContext(openModalTaskId);
+      if (!ctx) return;
+      const subtaskId = detachBtn.getAttribute('data-modal-subtask-detach');
+
+      if (focusState.running && focusState.taskId === openModalTaskId && focusState.subtaskId === subtaskId) {
+        stopFocusTimer();
+      }
+
+      detachModalSubtaskToTask(ctx.task, ctx.column, subtaskId);
+      renderColumn(ctx.column);
+      rerenderOpenTaskDetailModal();
+      return;
+    }
+
+    // Subtask play/pause
+    const subtaskPlayBtn = e.target.closest('[data-modal-subtask-play]');
+    if (subtaskPlayBtn) {
+      if (!openModalTaskId) return;
+      const subtaskId = subtaskPlayBtn.getAttribute('data-modal-subtask-play');
+      if (!subtaskId) return;
+
+      const isSameRunning = focusState.running
+        && focusState.taskId === openModalTaskId
+        && focusState.subtaskId === subtaskId;
+
+      if (isSameRunning) {
+        stopFocusTimer();
+        return;
+      }
+
+      if (focusState.running) stopFocusTimer();
+      openFocusMode(openModalTaskId, true, 'card-detail', subtaskId);
+      return;
+    }
+
+    // START/STOP button on card detail
+    if (e.target.closest('.task-modal__start-btn')) {
+      if (!openModalTaskId) return;
+      if (focusState.running && focusState.taskId === openModalTaskId) {
+        // Timer is running — stop it
+        stopFocusTimer();
+      } else {
+        // Open focus mode and auto-start timer
+        openFocusMode(openModalTaskId, true, 'card-detail');
       }
       return;
     }
 
-    // Due date picker toggle
+    // Expand button → enter focus mode without starting timer
+    if (e.target.closest('[data-expand-btn]')) {
+      if (openModalTaskId) openFocusMode(openModalTaskId, false, 'card-detail');
+      return;
+    }
+
+    // Modal checkmark toggle
+    if (e.target.closest('[data-modal-check]')) {
+      if (!openModalTaskId) return;
+      let task = null;
+      let col = null;
+      for (const c of state.columns) {
+        const t = c.tasks.find(t => t.id === openModalTaskId);
+        if (t) { task = t; col = c; break; }
+      }
+      if (!task) return;
+      task.complete = !task.complete;
+      // Auto-set actual time to planned time when completing without actual time
+      if (task.complete && !task.actualTimeSeconds && task.timeEstimateMinutes) {
+        task.ownActualTimeSeconds = task.timeEstimateMinutes * 60;
+        syncTaskAggregateTimes(task);
+        const actualMetric = overlay.querySelector('[data-actual-btn]');
+        if (actualMetric) {
+          const valEl = actualMetric.querySelector('.task-modal__metric-value');
+          if (valEl) {
+            valEl.textContent = formatMinutes(task.timeEstimateMinutes);
+            valEl.className = 'task-modal__metric-value task-modal__metric-value--set';
+          }
+        }
+      }
+      const btn = overlay.querySelector('[data-modal-check]');
+      if (btn) {
+        btn.classList.toggle('task-modal__check--complete', task.complete);
+      }
+      if (col) renderColumn(col);
+      return;
+    }
+
+    // Due date picker toggle (check before start btn since due btn may also have meta-start-btn class)
     if (e.target.closest('[data-due-btn]')) {
       closeStartDatePicker();
+      closePlannedPicker();
+      closeActualPicker();
       if (dueDatePickerState) {
         closeDueDatePicker();
       } else if (openModalTaskId) {
         openDueDatePicker(openModalTaskId);
+      }
+      return;
+    }
+
+    // Start date picker toggle
+    if (e.target.closest('.task-modal__meta-start-btn')) {
+      closeDueDatePicker();
+      closePlannedPicker();
+      closeActualPicker();
+      if (startDatePickerState) {
+        closeStartDatePicker();
+      } else if (openModalTaskId) {
+        openStartDatePicker(openModalTaskId);
       }
       return;
     }
@@ -1946,8 +4225,114 @@ function attachTaskModalEvents() {
         handleDueDateAction(dayBtn.dataset.date);
         return;
       }
+      const menuItem = e.target.closest('[data-action="remove-due"]');
+      if (menuItem) {
+        handleRemoveDueDate();
+        return;
+      }
       if (e.target.closest('[data-cal-prev]')) { navigatePicker(-1); return; }
       if (e.target.closest('[data-cal-next]')) { navigatePicker(1); return; }
+      return;
+    }
+
+    // Inside planned time picker
+    const ptp = e.target.closest('[data-planned-picker]');
+    if (ptp) {
+      // Quick-select option
+      const optBtn = e.target.closest('[data-planned-minutes]');
+      if (optBtn) {
+        applyPlannedTime(parseInt(optBtn.dataset.plannedMinutes, 10));
+        return;
+      }
+      // Switch to edit mode
+      if (e.target.closest('[data-planned-edit-mode]')) {
+        plannedPickerEditMode = true;
+        renderPlannedPickerInModal();
+        return;
+      }
+      // Clear planned
+      if (e.target.closest('[data-planned-clear]')) {
+        applyPlannedTime(0);
+        return;
+      }
+      return;
+    }
+
+    // Planned time picker toggle (PLANNED metric click)
+    if (e.target.closest('[data-planned-btn]')) {
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closeActualPicker();
+      if (plannedPickerOpen) {
+        closePlannedPicker();
+      } else {
+        openPlannedPicker();
+      }
+      return;
+    }
+
+    // Planned picker toggle on subtask row
+    const subtaskPlannedBtn = e.target.closest('[data-modal-subtask-planned-btn]');
+    if (subtaskPlannedBtn) {
+      const subtaskId = subtaskPlannedBtn.getAttribute('data-modal-subtask-planned-btn');
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closeActualPicker();
+      if (plannedPickerOpen && plannedPickerSubtaskId === subtaskId) {
+        closePlannedPicker();
+      } else {
+        openPlannedPicker(subtaskId);
+      }
+      return;
+    }
+
+    // Inside actual time picker
+    const atp = e.target.closest('[data-actual-picker]');
+    if (atp) {
+      const optBtn = e.target.closest('[data-actual-minutes]');
+      if (optBtn) {
+        applyActualTime(parseInt(optBtn.dataset.actualMinutes, 10));
+        return;
+      }
+      if (e.target.closest('[data-actual-edit-mode]')) {
+        actualPickerEditMode = true;
+        renderActualPickerInModal();
+        return;
+      }
+      if (e.target.closest('[data-actual-clear]')) {
+        applyActualTime(0);
+        return;
+      }
+      return;
+    }
+
+    // Actual time picker toggle (ACTUAL metric click) — disabled while timer running
+    if (e.target.closest('[data-actual-btn]')) {
+      if (focusState.running && focusState.taskId === openModalTaskId) return;
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closePlannedPicker();
+      if (actualPickerOpen) {
+        closeActualPicker();
+      } else {
+        openActualPicker();
+      }
+      return;
+    }
+
+    // Actual picker toggle on subtask row
+    const subtaskActualBtn = e.target.closest('[data-modal-subtask-actual-btn]');
+    if (subtaskActualBtn) {
+      const subtaskId = subtaskActualBtn.getAttribute('data-modal-subtask-actual-btn');
+      if (focusState.running && focusState.taskId === openModalTaskId && focusState.subtaskId === subtaskId) return;
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closePlannedPicker();
+      if (actualPickerOpen && actualPickerSubtaskId === subtaskId) {
+        closeActualPicker();
+      } else {
+        openActualPicker(subtaskId);
+      }
       return;
     }
 
@@ -1955,11 +4340,244 @@ function attachTaskModalEvents() {
     closeAnyPicker();
   });
 
+  overlay.addEventListener('input', e => {
+    const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
+    if (!(targetEl instanceof Element)) return;
+    const notesEl = targetEl.closest('.task-modal__notes');
+    if (notesEl) {
+      const cleanNotes = notesEl.textContent.replace(/\n/g, '').trim();
+      if (!cleanNotes && notesEl.innerHTML !== '') {
+        notesEl.textContent = '';
+      }
+      return;
+    }
+    const labelEl = targetEl.closest('[data-modal-subtask-label]');
+    if (!labelEl) return;
+    if (!openModalTaskId) return;
+    const ctx = findTaskContext(openModalTaskId);
+    if (!ctx) return;
+
+    const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
+    const subtask = findSubtask(ctx.task, subtaskId);
+    if (!subtask) return;
+
+    const cleanText = labelEl.textContent.replace(/\n/g, '').trim();
+    if (!cleanText && labelEl.innerHTML !== '') {
+      labelEl.textContent = '';
+    }
+    subtask.label = cleanText;
+    subtask.deleteReady = false;
+    labelEl.classList.toggle('task-modal__subtask-text--filled', !!cleanText);
+  });
+
+  overlay.addEventListener('focusout', e => {
+    const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
+    if (!(targetEl instanceof Element)) return;
+    const labelEl = targetEl.closest('[data-modal-subtask-label]');
+    if (!labelEl) return;
+    if (!openModalTaskId) return;
+    const ctx = findTaskContext(openModalTaskId);
+    if (!ctx) return;
+
+    const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
+    const subtask = findSubtask(ctx.task, subtaskId);
+    if (!subtask) return;
+
+    const cleanText = labelEl.textContent.replace(/\n/g, '').trim();
+    subtask.label = cleanText;
+    subtask.deleteReady = false;
+    labelEl.classList.toggle('task-modal__subtask-text--filled', !!cleanText);
+    if (!cleanText) {
+      labelEl.textContent = '';
+    }
+
+    // Reflect subtask title changes on the kanban card as soon as field focus leaves.
+    renderColumn(ctx.column);
+  });
+
+  overlay.addEventListener('keydown', e => {
+    const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
+    if (!(targetEl instanceof Element)) return;
+    const labelEl = targetEl.closest('[data-modal-subtask-label]');
+    if (!labelEl) return;
+    if (!openModalTaskId) return;
+    const ctx = findTaskContext(openModalTaskId);
+    if (!ctx) return;
+
+    const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
+    const task = ctx.task;
+    const index = task.subtasks.findIndex(s => s.id === subtaskId);
+    if (index === -1) return;
+    const subtask = task.subtasks[index];
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const inserted = addModalSubtask(task, index + 1);
+      renderColumn(ctx.column);
+      rerenderOpenTaskDetailModal(inserted.id);
+      return;
+    }
+
+    if (e.key === 'Backspace') {
+      const cleanText = labelEl.textContent.replace(/\n/g, '').trim();
+      if (cleanText.length > 0) {
+        subtask.deleteReady = false;
+        return;
+      }
+      e.preventDefault();
+      const nextFocusId = task.subtasks[index + 1]?.id || task.subtasks[index - 1]?.id || null;
+      removeModalSubtask(task, subtaskId);
+      renderColumn(ctx.column);
+      rerenderOpenTaskDetailModal(nextFocusId);
+    }
+  });
+
+  let modalSubtaskPointerDrag = null;
+
+  const clearSubtaskDropTargets = () => {
+    overlay.querySelectorAll('.task-modal__subtask-row--drop-before, .task-modal__subtask-row--drop-after')
+      .forEach(row => row.classList.remove('task-modal__subtask-row--drop-before', 'task-modal__subtask-row--drop-after'));
+  };
+
+  const onSubtaskPointerMove = e => {
+    if (!modalSubtaskPointerDrag) return;
+    e.preventDefault();
+
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    const row = target instanceof Element ? target.closest('[data-modal-subtask-row]') : null;
+    clearSubtaskDropTargets();
+
+    if (!row) {
+      modalSubtaskPointerDrag.targetId = null;
+      return;
+    }
+
+    const targetId = row.getAttribute('data-modal-subtask-id');
+    if (!targetId || targetId === modalSubtaskPointerDrag.draggedId) {
+      modalSubtaskPointerDrag.targetId = null;
+      return;
+    }
+
+    const rect = row.getBoundingClientRect();
+    const placeAfter = e.clientY > rect.top + rect.height / 2;
+    modalSubtaskPointerDrag.targetId = targetId;
+    modalSubtaskPointerDrag.placeAfter = placeAfter;
+    row.classList.add(placeAfter ? 'task-modal__subtask-row--drop-after' : 'task-modal__subtask-row--drop-before');
+  };
+
+  const endSubtaskPointerDrag = commit => {
+    if (!modalSubtaskPointerDrag) return;
+    const drag = modalSubtaskPointerDrag;
+    modalSubtaskPointerDrag = null;
+
+    document.removeEventListener('mousemove', onSubtaskPointerMove, true);
+    document.removeEventListener('mouseup', onSubtaskPointerUp, true);
+    overlay.classList.remove('task-modal-overlay--subtask-dragging');
+    overlay.querySelectorAll('.task-modal__subtask-row--dragging')
+      .forEach(row => row.classList.remove('task-modal__subtask-row--dragging'));
+    clearSubtaskDropTargets();
+
+    if (!commit || !openModalTaskId || !drag.targetId || drag.targetId === drag.draggedId) {
+      suppressSubtaskHoverUntilPointerMove();
+      return;
+    }
+
+    const ctx = findTaskContext(openModalTaskId);
+    if (!ctx) {
+      suppressSubtaskHoverUntilPointerMove();
+      return;
+    }
+
+    const list = ctx.task.subtasks;
+    const from = list.findIndex(s => s.id === drag.draggedId);
+    const to = list.findIndex(s => s.id === drag.targetId);
+    if (from === -1 || to === -1) {
+      suppressSubtaskHoverUntilPointerMove();
+      return;
+    }
+
+    const [moved] = list.splice(from, 1);
+    let insertAt = to;
+    if (from < to) insertAt -= 1;
+    if (drag.placeAfter) insertAt += 1;
+    insertAt = Math.max(0, Math.min(insertAt, list.length));
+    list.splice(insertAt, 0, moved);
+
+    renderColumn(ctx.column);
+    rerenderOpenTaskDetailModal(drag.draggedId);
+    suppressSubtaskHoverUntilPointerMove();
+  };
+
+  const onSubtaskPointerUp = e => {
+    if (!modalSubtaskPointerDrag) return;
+    e.preventDefault();
+    endSubtaskPointerDrag(true);
+  };
+
+  overlay.addEventListener('mousedown', e => {
+    const grab = e.target instanceof Element ? e.target.closest('[data-modal-subtask-grab]') : null;
+    if (!grab) return;
+    if (!openModalTaskId) return;
+
+    const row = grab.closest('[data-modal-subtask-row]');
+    if (!row) return;
+    const draggedId = row.getAttribute('data-modal-subtask-id');
+    if (!draggedId) return;
+
+    e.preventDefault();
+    clearSubtaskDropTargets();
+    row.classList.add('task-modal__subtask-row--dragging');
+    overlay.classList.add('task-modal-overlay--subtask-dragging');
+    modalSubtaskPointerDrag = {
+      draggedId,
+      targetId: null,
+      placeAfter: false
+    };
+
+    document.addEventListener('mousemove', onSubtaskPointerMove, true);
+    document.addEventListener('mouseup', onSubtaskPointerUp, true);
+  });
+
   document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape') return;
     if (overlay.hidden) return;
+    // Handle Enter in planned time entry mode
+    if (e.key === 'Enter' && plannedPickerEditMode) {
+      e.preventDefault();
+      handlePlannedTimeEntry();
+      return;
+    }
+    // Handle Enter in actual time entry mode
+    if (e.key === 'Enter' && actualPickerEditMode) {
+      e.preventDefault();
+      handleActualTimeEntry();
+      return;
+    }
+    if (e.key !== 'Escape') return;
     e.preventDefault();
     if (!closeAnyPicker()) closeTaskDetailModal();
+  });
+}
+
+function attachSidebarEvents() {
+  const focusBtn = document.querySelector('[data-sidebar-focus]');
+  if (!focusBtn) return;
+
+  focusBtn.addEventListener('click', e => {
+    e.preventDefault();
+
+    const topCard = document.querySelector(
+      '#day-columns .day-column:first-child .task-list .task-card:not(.task-card--placeholder):not(.task-card--dragging)'
+    );
+
+    if (topCard && topCard.dataset.taskId) {
+      openFocusMode(topCard.dataset.taskId, false, 'sidebar');
+      return;
+    }
+
+    const firstTaskId = state.columns[0]?.tasks[0]?.id;
+    if (firstTaskId) {
+      openFocusMode(firstTaskId, false, 'sidebar');
+    }
   });
 }
 
@@ -2239,12 +4857,37 @@ function attachCalendarResizeEvents() {
    INIT
 ═══════════════════════════════════════════════ */
 
+// Close card picker on outside click
+document.addEventListener('click', e => {
+  if (!cardPickerState) return;
+  if (e.target instanceof Element) {
+    if (e.target.closest('[data-card-picker]')) return;
+    if (e.target.closest('[data-card-actual-picker-btn]')) return;
+    if (e.target.closest('[data-card-planned-picker-btn]')) return;
+  }
+  closeCardPicker();
+});
+
+// Enter key for card picker edit mode
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && cardPickerState && cardPickerState.editMode) {
+    e.preventDefault();
+    handleCardPickerTimeEntry();
+  }
+  if (e.key === 'Escape' && cardPickerState) {
+    e.preventDefault();
+    closeCardPicker();
+  }
+});
+
 document.addEventListener('DOMContentLoaded', () => {
+  initializeTaskTimeState();
   renderAllColumns();
   renderCalendarEvents();
   renderWorkdayMarkers();
   attachCalendarZoomEvents();
   attachEvents();
+  attachSidebarEvents();
   attachTaskModalEvents();
   attachCalendarEvents();
   attachCalendarResizeEvents();
