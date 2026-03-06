@@ -209,6 +209,43 @@ const state = {
   }
 };
 
+const DAILY_PLANNING_STEPS = {
+  ADD_TASKS: 1,
+  WORKLOAD: 2,
+  FINALIZE: 3,
+  SHARE: 4
+};
+
+const DAILY_PLANNING_STEP_ORDER = [
+  DAILY_PLANNING_STEPS.ADD_TASKS,
+  DAILY_PLANNING_STEPS.WORKLOAD,
+  DAILY_PLANNING_STEPS.FINALIZE,
+  DAILY_PLANNING_STEPS.SHARE
+];
+
+const DAILY_PLANNING_DEFER_MODES = {
+  NEXT_MONDAY: 'next_monday'
+};
+
+const DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME = '17:00';
+
+const dailyPlanningState = {
+  isActive: false,
+  selectedDate: null,
+  returnToDate: null,
+  step: DAILY_PLANNING_STEPS.ADD_TASKS,
+  runDraft: null,
+  runHistoryByDate: {},
+  deferPolicy: {
+    nextWeekMode: DAILY_PLANNING_DEFER_MODES.NEXT_MONDAY
+  },
+  capacityConfig: {
+    mode: 'remaining_before_shutdown',
+    defaultMinutes: 480,
+    perDayOverrides: {}
+  }
+};
+
 /* ═══════════════════════════════════════════════
    UTILITIES
 ═══════════════════════════════════════════════ */
@@ -512,6 +549,672 @@ function initializeTaskTimeState() {
       ensureTaskTimeState(task);
     });
   });
+}
+
+function getRelativeDateLabel(isoDate) {
+  const todayISO = getTodayISO();
+  if (isoDate === todayISO) return 'Today';
+  if (isoDate === addDays(todayISO, 1)) return 'Tomorrow';
+  if (isoDate === addDays(todayISO, -1)) return 'Yesterday';
+  return formatDateDisplay(isoDate);
+}
+
+function getNextMondayISO(isoDate) {
+  const dayIndex = parseISO(isoDate).getDay(); // 0 = Sunday ... 6 = Saturday
+  let delta = (8 - dayIndex) % 7;
+  if (delta === 0) delta = 7;
+  return addDays(isoDate, delta);
+}
+
+function getDailyPlanningNextWeekDate(isoDate) {
+  const tomorrowISO = addDays(isoDate, 1);
+  switch (dailyPlanningState.deferPolicy.nextWeekMode) {
+    case DAILY_PLANNING_DEFER_MODES.NEXT_MONDAY:
+    default: {
+      let nextMonday = getNextMondayISO(isoDate);
+      // Avoid duplicate Tomorrow/Next week buckets on Sundays.
+      if (nextMonday === tomorrowISO) {
+        nextMonday = addDays(nextMonday, 7);
+      }
+      return nextMonday;
+    }
+  }
+}
+
+function getDailyPlanningCapacityMinutes(isoDate) {
+  const draft = ensureDailyPlanningRunDraft();
+  const specific = dailyPlanningState.capacityConfig.perDayOverrides[isoDate];
+  if (Number.isFinite(specific) && specific > 0) return specific;
+
+  if (dailyPlanningState.capacityConfig.mode === 'remaining_before_shutdown') {
+    const shutdownTime = getDailyPlanningShutdownTimeForDate(isoDate, draft.shutdownTime);
+    const [hRaw, mRaw] = shutdownTime.split(':').map(Number);
+    const shutdownHour = Math.max(0, Math.min(23, hRaw));
+    const shutdownMinute = Math.max(0, Math.min(59, mRaw));
+    const todayISO = getTodayISO();
+
+    if (isoDate === todayISO) {
+      const now = new Date();
+      const shutdown = new Date();
+      shutdown.setHours(shutdownHour, shutdownMinute, 0, 0);
+      return Math.max(0, Math.round((shutdown.getTime() - now.getTime()) / 60000));
+    }
+
+    return Math.max(0, shutdownHour * 60 + shutdownMinute);
+  }
+
+  return dailyPlanningState.capacityConfig.defaultMinutes;
+}
+
+function isDailyPlanningArtifactTask(task) {
+  return !!(task && task.systemType === 'daily_planning');
+}
+
+function isWorkTask(task) {
+  if (!task) return false;
+  const tag = normalizeTag(task.tag);
+  if (!tag) return false;
+  if (tag === '#work') return true;
+  const channel = CHANNELS.find(ch => '#' + ch.label === tag);
+  if (!channel) return false;
+  return channel.context === 'work' || channel.label === 'work';
+}
+
+function getDailyPlanningWorkloadSummary(isoDate) {
+  const col = ensureColumnForDate(isoDate);
+  const tasks = (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task));
+  const plannedWorkMinutes = tasks.reduce((sum, task) => {
+    ensureTaskTimeState(task);
+    return sum + (isWorkTask(task) ? (task.timeEstimateMinutes || 0) : 0);
+  }, 0);
+  const plannedTotalMinutes = tasks.reduce((sum, task) => {
+    ensureTaskTimeState(task);
+    return sum + (task.timeEstimateMinutes || 0);
+  }, 0);
+  const capacityMinutes = getDailyPlanningCapacityMinutes(isoDate);
+  return {
+    plannedWorkMinutes,
+    plannedTotalMinutes,
+    capacityMinutes,
+    overcommitted: plannedWorkMinutes > capacityMinutes
+  };
+}
+
+function createDailyPlanningRunDraft(dateISO) {
+  const shutdownTask = getDailyShutdownTaskForDate(dateISO);
+  const shutdownTime = shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))
+    ? shutdownTask.scheduledTime
+    : DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+
+  return {
+    runId: 'daily-plan-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+    dateISO,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    shutdownTime,
+    reflectionText: '',
+    obstaclesText: '',
+    shareText: ''
+  };
+}
+
+function ensureDailyPlanningRunDraft() {
+  if (!dailyPlanningState.runDraft || dailyPlanningState.runDraft.dateISO !== dailyPlanningState.selectedDate) {
+    dailyPlanningState.runDraft = createDailyPlanningRunDraft(dailyPlanningState.selectedDate || getTodayISO());
+  }
+  return dailyPlanningState.runDraft;
+}
+
+function getDailyShutdownTaskForDate(isoDate) {
+  const col = ensureColumnForDate(isoDate);
+  return col.tasks.find(task =>
+    task.systemType === 'daily_shutdown'
+    || String(task.title || '').trim().toLowerCase() === 'daily shutdown'
+  ) || null;
+}
+
+function getDailyPlanningShutdownTimeForDate(isoDate, fallback = DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME) {
+  const shutdownTask = getDailyShutdownTaskForDate(isoDate);
+  const fromTask = shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))
+    ? shutdownTask.scheduledTime
+    : null;
+  if (fromTask) return fromTask;
+  if (/^\d{2}:\d{2}$/.test(String(fallback || ''))) return fallback;
+  return DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+}
+
+function buildDailyPlanShareTemplate(isoDate) {
+  const tasks = getDailyPlanningTaskList(isoDate);
+  const taskLines = tasks.length
+    ? tasks.map(task => {
+      const estimate = task.timeEstimateMinutes > 0 ? formatMinutes(task.timeEstimateMinutes) : '--:--';
+      return `- ${task.title} (${estimate})`;
+    }).join('\n')
+    : '- No tasks planned';
+
+  return [
+    'Planned for today:',
+    taskLines,
+    '',
+    'Obstacles in my way:',
+    '- '
+  ].join('\n');
+}
+
+function getDailyPlanningStepColumnDescriptors() {
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  if (dailyPlanningState.step === DAILY_PLANNING_STEPS.WORKLOAD) {
+    return [
+      {
+        isoDate: selectedDate,
+        bucket: 'today',
+        heading: 'Today',
+        subtitle: "Keep only what's essential"
+      },
+      {
+        isoDate: addDays(selectedDate, 1),
+        bucket: 'tomorrow',
+        heading: 'Tomorrow',
+        subtitle: 'Drag over tasks that can wait'
+      },
+      {
+        isoDate: getDailyPlanningNextWeekDate(selectedDate),
+        bucket: 'next-week',
+        heading: 'Next week',
+        subtitle: 'Drag over tasks that can wait'
+      }
+    ];
+  }
+
+  return [
+    {
+      isoDate: selectedDate,
+      bucket: 'today',
+      heading: 'Today',
+      subtitle: getRelativeDateLabel(selectedDate)
+    }
+  ];
+}
+
+function getDailyPlanningVisibleIsoDates() {
+  return getDailyPlanningStepColumnDescriptors().map(desc => desc.isoDate);
+}
+
+function getDailyPlanningTaskList(isoDate) {
+  const col = ensureColumnForDate(isoDate);
+  return (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task));
+}
+
+function formatSnapshotTimestamp(isoDateTime) {
+  const d = new Date(isoDateTime);
+  return d.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit'
+  });
+}
+
+function formatTime24AsDisplay(timeValue) {
+  if (!/^\d{2}:\d{2}$/.test(String(timeValue || ''))) return '5:00 PM';
+  const [hRaw, mRaw] = String(timeValue).split(':').map(Number);
+  const hour = Math.max(0, Math.min(23, hRaw));
+  const minute = Math.max(0, Math.min(59, mRaw));
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`;
+}
+
+function parseTime24ToOffset(timeValue) {
+  if (!/^\d{2}:\d{2}$/.test(String(timeValue || ''))) return 17;
+  const [hRaw, mRaw] = String(timeValue).split(':').map(Number);
+  const hour = Math.max(0, Math.min(23, hRaw));
+  const minute = Math.max(0, Math.min(59, mRaw));
+  const offset = (hour - CALENDAR_START_HOUR) + minute / 60;
+  return clampCalendarOffset(offset, 0);
+}
+
+function setSidebarActiveNav(mode) {
+  const homeNav = document.querySelector('[data-sidebar-home]');
+  const dailyPlanningNav = document.querySelector('[data-sidebar-daily-planning]');
+  [homeNav, dailyPlanningNav].forEach(el => {
+    if (el) el.classList.remove('nav-item--active');
+  });
+  if (mode === 'daily-planning') {
+    if (dailyPlanningNav) dailyPlanningNav.classList.add('nav-item--active');
+    return;
+  }
+  if (homeNav) homeNav.classList.add('nav-item--active');
+}
+
+function renderDailyPlanningTaskPreviewHtml(isoDate) {
+  const tasks = getDailyPlanningTaskList(isoDate);
+  if (!tasks.length) return '<li>No tasks planned yet.</li>';
+  return tasks.map(task => {
+    ensureTaskTimeState(task);
+    const estimate = task.timeEstimateMinutes > 0 ? ` · ${formatMinutes(task.timeEstimateMinutes)}` : '';
+    return `<li>${escapeHtml(task.title)}${escapeHtml(estimate)}</li>`;
+  }).join('');
+}
+
+function renderDailyPlanningPanelHtml() {
+  if (!dailyPlanningState.isActive) return '';
+  const draft = ensureDailyPlanningRunDraft();
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  const workload = getDailyPlanningWorkloadSummary(selectedDate);
+  const step = dailyPlanningState.step;
+  const hasShutdownTask = !!getDailyShutdownTaskForDate(selectedDate);
+  const shareText = draft.shareText || buildDailyPlanShareTemplate(selectedDate);
+
+  const workloadSummary = `${formatMinutes(workload.plannedWorkMinutes)} / ${formatMinutes(workload.capacityMinutes)} work planned`;
+  const workloadClass = workload.overcommitted ? ' daily-planning-panel__workload--warn' : '';
+
+  if (step === DAILY_PLANNING_STEPS.ADD_TASKS) {
+    const shutdownCard = hasShutdownTask ? '' : `
+      <div class="daily-planning-panel__card">
+        <h3>Shutdown time</h3>
+        <p>What time would you like to wrap up work by?</p>
+        <div class="daily-planning-panel__shutdown-row">
+          <input type="time" class="daily-planning-panel__time" data-dp-shutdown-input value="${escapeHtml(draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME)}">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--success" type="button" data-dp-add-shutdown>Add to calendar</button>
+        </div>
+      </div>
+    `;
+
+    return `
+      <div class="daily-planning-panel__inner">
+        <h2 class="daily-planning-panel__title">What do you want to get done today?</h2>
+        <p class="daily-planning-panel__subtitle">Add tasks you want to work on today.</p>
+        <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
+        ${shutdownCard}
+        <div class="daily-planning-panel__actions">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+      </div>
+    `;
+  }
+
+  if (step === DAILY_PLANNING_STEPS.WORKLOAD) {
+    const caution = workload.overcommitted
+      ? `
+        <div class="daily-planning-panel__card daily-planning-panel__card--warn">
+          <h3>Caution: Unrealistic workload</h3>
+          <p>There's not enough time before shutdown for all your work tasks.</p>
+        </div>
+      `
+      : '';
+
+    return `
+      <div class="daily-planning-panel__inner">
+        <h2 class="daily-planning-panel__title">What can wait?</h2>
+        <p class="daily-planning-panel__subtitle">Move non-essential tasks to Tomorrow or Next week.</p>
+        <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
+        ${caution}
+        <div class="daily-planning-panel__actions">
+          <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+      </div>
+    `;
+  }
+
+  if (step === DAILY_PLANNING_STEPS.FINALIZE) {
+    return `
+      <div class="daily-planning-panel__inner">
+        <h2 class="daily-planning-panel__title">Finalize your plan for today</h2>
+        <p class="daily-planning-panel__subtitle">Arrange tasks in your preferred work order and timebox if needed.</p>
+        <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
+        <div class="daily-planning-panel__card">
+          <p>Tip: drag tasks to reorder, then drag to the timeline to timebox your day.</p>
+        </div>
+        <div class="daily-planning-panel__actions">
+          <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Looks good</button>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="daily-planning-panel__inner">
+      <h2 class="daily-planning-panel__title">Daily plan</h2>
+      <p class="daily-planning-panel__subtitle">Review, reflect, and get started.</p>
+      <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
+      <textarea class="daily-planning-panel__textarea daily-planning-panel__textarea--share" id="dp-share-text" data-dp-share-text>${escapeHtml(shareText)}</textarea>
+      <div class="daily-planning-panel__actions">
+        <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+        <button class="daily-planning-panel__btn" type="button" data-dp-copy>Copy</button>
+        <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-finish>Get started</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderDailyPlanningPanel() {
+  const panel = document.getElementById('daily-planning-panel');
+  if (!panel) return;
+
+  if (!dailyPlanningState.isActive) {
+    panel.hidden = true;
+    panel.innerHTML = '';
+    return;
+  }
+
+  panel.hidden = false;
+  panel.innerHTML = renderDailyPlanningPanelHtml();
+}
+
+function applyDailyPlanningColumnPresentation(colEl, descriptor) {
+  if (!colEl || !descriptor) return;
+  const headingEl = colEl.querySelector('.day-name');
+  const subtitleEl = colEl.querySelector('.day-date');
+  if (headingEl) {
+    headingEl.textContent = descriptor.heading || 'Today';
+    headingEl.classList.remove('day-name--link');
+    headingEl.removeAttribute('data-day-header-link');
+    headingEl.removeAttribute('href');
+  }
+  if (subtitleEl) {
+    subtitleEl.textContent = descriptor.subtitle || formatDateDisplay(descriptor.isoDate);
+    subtitleEl.classList.add('day-date--daily-hint');
+  }
+  colEl.classList.remove('day-column--past');
+  colEl.setAttribute('data-dp-bucket', descriptor.bucket || 'today');
+
+  const progressBar = colEl.querySelector('.progress-bar');
+  if (progressBar) {
+    progressBar.classList.add('progress-bar--hidden');
+  }
+}
+
+function renderDailyPlanningColumns() {
+  const container = document.getElementById('day-columns');
+  if (!container) return;
+  const descriptors = getDailyPlanningStepColumnDescriptors();
+
+  descriptors.forEach(desc => ensureColumnForDate(desc.isoDate));
+  container.innerHTML = '';
+
+  descriptors.forEach(desc => {
+    const col = ensureColumnForDate(desc.isoDate);
+    const colEl = createColumnElement(col);
+    applyDailyPlanningColumnPresentation(colEl, desc);
+    container.appendChild(colEl);
+    renderColumn(col);
+  });
+
+  container.scrollLeft = 0;
+}
+
+function renderDailyPlanningMode() {
+  const board = document.querySelector('.board');
+  const container = document.getElementById('day-columns');
+  if (!board || !container) return;
+
+  if (!dailyPlanningState.isActive) {
+    board.classList.remove('board--daily-planning');
+    container.classList.remove('board__columns--daily-planning');
+    board.removeAttribute('data-dp-step');
+    document.querySelector('.main-card')?.classList.remove('main-card--hide-calendar');
+    renderDailyPlanningPanel();
+    return;
+  }
+
+  const mainCard = document.querySelector('.main-card');
+  const hideCalendar = dailyPlanningState.step === DAILY_PLANNING_STEPS.WORKLOAD
+    || dailyPlanningState.step === DAILY_PLANNING_STEPS.SHARE;
+  if (mainCard) {
+    mainCard.classList.toggle('main-card--hide-calendar', hideCalendar);
+  }
+
+  board.classList.add('board--daily-planning');
+  board.setAttribute('data-dp-step', String(dailyPlanningState.step));
+  container.classList.add('board__columns--daily-planning');
+  container.classList.add('board__columns--ready');
+  renderDailyPlanningPanel();
+  renderDailyPlanningColumns();
+  updateTodayButtonLabel(dailyPlanningState.selectedDate || getTodayISO());
+}
+
+function setDailyPlanningStep(nextStep) {
+  if (!dailyPlanningState.isActive) return;
+  if (!DAILY_PLANNING_STEP_ORDER.includes(nextStep)) return;
+  const draft = ensureDailyPlanningRunDraft();
+  dailyPlanningState.step = nextStep;
+  if (nextStep === DAILY_PLANNING_STEPS.SHARE && !String(draft.shareText || '').trim()) {
+    draft.shareText = buildDailyPlanShareTemplate(dailyPlanningState.selectedDate || getTodayISO());
+  }
+  draft.updatedAt = new Date().toISOString();
+  renderDailyPlanningMode();
+}
+
+function goToNextDailyPlanningStep() {
+  if (!dailyPlanningState.isActive) return;
+  const idx = DAILY_PLANNING_STEP_ORDER.indexOf(dailyPlanningState.step);
+  if (idx === -1) return;
+  const next = DAILY_PLANNING_STEP_ORDER[idx + 1];
+  if (next) {
+    setDailyPlanningStep(next);
+  }
+}
+
+function goToPrevDailyPlanningStep() {
+  if (!dailyPlanningState.isActive) return;
+  const idx = DAILY_PLANNING_STEP_ORDER.indexOf(dailyPlanningState.step);
+  if (idx <= 0) {
+    exitDailyPlanningMode();
+    return;
+  }
+  setDailyPlanningStep(DAILY_PLANNING_STEP_ORDER[idx - 1]);
+}
+
+function enterDailyPlanningMode() {
+  const selectedDate = getFirstVisibleDate();
+  dailyPlanningState.isActive = true;
+  dailyPlanningState.selectedDate = selectedDate;
+  dailyPlanningState.returnToDate = selectedDate;
+  dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
+  dailyPlanningState.runDraft = createDailyPlanningRunDraft(selectedDate);
+  dailyPlanningState.runDraft.shareText = '';
+  setSidebarActiveNav('daily-planning');
+  closeTopbarTodayPicker();
+  renderDailyPlanningMode();
+}
+
+function exitDailyPlanningMode(options = {}) {
+  const { restoreTodayFirstColumn = false } = options;
+  const returnDate = dailyPlanningState.returnToDate || getTodayISO();
+  dailyPlanningState.isActive = false;
+  dailyPlanningState.selectedDate = null;
+  dailyPlanningState.returnToDate = null;
+  dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
+  dailyPlanningState.runDraft = null;
+
+  renderDailyPlanningMode();
+  setSidebarActiveNav('home');
+
+  renderAllColumns();
+  const targetDate = restoreTodayFirstColumn ? getTodayISO() : returnDate;
+  initializeFirstColumnPosition(targetDate);
+}
+
+function upsertDailyShutdownForDate(isoDate, shutdownTime) {
+  const col = ensureColumnForDate(isoDate);
+  const sanitizedTime = /^\d{2}:\d{2}$/.test(String(shutdownTime || ''))
+    ? shutdownTime
+    : DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+  const existingTask = getDailyShutdownTaskForDate(isoDate);
+  const task = existingTask || {
+    id: uid(),
+    title: 'Daily shutdown',
+    timeEstimateMinutes: 5,
+    actualTimeSeconds: 0,
+    ownPlannedMinutes: 5,
+    ownActualTimeSeconds: 0,
+    scheduledTime: null,
+    complete: false,
+    tag: '#planning',
+    integrationColor: null,
+    subtasks: [],
+    showSubtasks: false,
+    systemType: 'daily_shutdown'
+  };
+
+  task.scheduledTime = sanitizedTime;
+  task.timeEstimateMinutes = 5;
+  task.ownPlannedMinutes = 5;
+  if (!existingTask) col.tasks.push(task);
+
+  const offset = parseTime24ToOffset(sanitizedTime);
+  const existingEvent = state.calendarEvents.find(evt => evt.systemType === 'daily_shutdown' && evt.date === isoDate);
+  if (existingEvent) {
+    existingEvent.offset = offset;
+    existingEvent.duration = 5 / 60;
+    existingEvent.title = task.title;
+    existingEvent.taskId = task.id;
+    existingEvent.colorClass = getTaskEventColorClass(task, 'cal-event--orange');
+    existingEvent.zOrder = ++calZCounter;
+  } else {
+    state.calendarEvents.push({
+      id: 'evt-' + uid(),
+      title: task.title,
+      colorClass: getTaskEventColorClass(task, 'cal-event--orange'),
+      offset,
+      duration: 5 / 60,
+      taskId: task.id,
+      date: isoDate,
+      systemType: 'daily_shutdown',
+      zOrder: ++calZCounter
+    });
+  }
+
+  renderColumn(col);
+  renderCalendarEvents._overrideDate = isoDate;
+  renderCalendarEvents();
+}
+
+function buildDailyPlanningSnapshot() {
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  const draft = ensureDailyPlanningRunDraft();
+  const workload = getDailyPlanningWorkloadSummary(selectedDate);
+  const orderedTasks = getDailyPlanningTaskList(selectedDate).map(task => ({
+    id: task.id,
+    title: task.title,
+    timeEstimateMinutes: task.timeEstimateMinutes || 0,
+    scheduledTime: task.scheduledTime || null,
+    tag: task.tag || null
+  }));
+
+  return {
+    runId: draft.runId,
+    dateISO: selectedDate,
+    completedAt: new Date().toISOString(),
+    orderedTasks,
+    plannedWorkMinutes: workload.plannedWorkMinutes,
+    capacityMinutes: workload.capacityMinutes,
+    overcommitted: workload.overcommitted,
+    reflectionText: '',
+    obstaclesText: '',
+    shareText: draft.shareText || buildDailyPlanShareTemplate(selectedDate)
+  };
+}
+
+function formatDailyPlanningSnapshotEntry(snapshot) {
+  const formattedShareText = String(snapshot.shareText || '').trim()
+    || buildDailyPlanShareTemplate(snapshot.dateISO);
+
+  return [
+    'DAILY PLANNING',
+    `Created at: ${formatSnapshotTimestamp(snapshot.completedAt)}`,
+    `Date: ${snapshot.dateISO}`,
+    `Workload: ${formatMinutes(snapshot.plannedWorkMinutes)} / ${formatMinutes(snapshot.capacityMinutes)} (${snapshot.overcommitted ? 'Overcommitted' : 'Within capacity'})`,
+    '',
+    formattedShareText
+  ].join('\n');
+}
+
+function getOrCreateDailyPlanningTask(isoDate) {
+  const col = ensureColumnForDate(isoDate);
+  let task = col.tasks.find(t =>
+    t.systemType === 'daily_planning'
+    || (
+      String(t.title || '').trim().toLowerCase() === 'daily planning'
+      && normalizeTag(t.tag) === '#planning'
+    )
+  );
+  if (!task) {
+    task = {
+      id: uid(),
+      title: 'Daily planning',
+      timeEstimateMinutes: 0,
+      actualTimeSeconds: 0,
+      ownPlannedMinutes: 0,
+      ownActualTimeSeconds: 0,
+      scheduledTime: null,
+      complete: true,
+      tag: '#planning',
+      integrationColor: null,
+      subtasks: [],
+      showSubtasks: false,
+      notes: '',
+      systemType: 'daily_planning'
+    };
+    col.tasks.push(task);
+  }
+  task.complete = true;
+  task.tag = '#planning';
+  task.systemType = 'daily_planning';
+  return { task, column: col };
+}
+
+function appendDailyPlanningSnapshotToTask(snapshot) {
+  const { task, column } = getOrCreateDailyPlanningTask(snapshot.dateISO);
+  const entry = formatDailyPlanningSnapshotEntry(snapshot);
+  const prior = String(task.notes || '').trim();
+  task.notes = prior ? `${prior}\n\n----------\n\n${entry}` : entry;
+  renderColumn(column);
+}
+
+function buildDailyPlanningCopyText() {
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  const draft = ensureDailyPlanningRunDraft();
+  const workload = getDailyPlanningWorkloadSummary(selectedDate);
+  const shareText = String(draft.shareText || '').trim() || buildDailyPlanShareTemplate(selectedDate);
+
+  return [
+    `Daily plan (${selectedDate})`,
+    `Created at: ${formatSnapshotTimestamp(new Date().toISOString())}`,
+    `Workload: ${formatMinutes(workload.plannedWorkMinutes)} / ${formatMinutes(workload.capacityMinutes)} (${workload.overcommitted ? 'Overcommitted' : 'Within capacity'})`,
+    '',
+    shareText
+  ].join('\n');
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const fallback = document.createElement('textarea');
+  fallback.value = text;
+  fallback.setAttribute('readonly', '');
+  fallback.style.position = 'fixed';
+  fallback.style.left = '-9999px';
+  document.body.appendChild(fallback);
+  fallback.select();
+  document.execCommand('copy');
+  fallback.remove();
+}
+
+function completeDailyPlanningRun() {
+  if (!dailyPlanningState.isActive) return;
+  const snapshot = buildDailyPlanningSnapshot();
+  const history = dailyPlanningState.runHistoryByDate[snapshot.dateISO] || [];
+  history.push(snapshot);
+  dailyPlanningState.runHistoryByDate[snapshot.dateISO] = history;
+  appendDailyPlanningSnapshotToTask(snapshot);
+  exitDailyPlanningMode({ restoreTodayFirstColumn: true });
 }
 
 function getHourHeightPx(timeGridEl = null) {
@@ -3476,6 +4179,9 @@ function renderColumn(column) {
   taskList.innerHTML = '';
   column.tasks.forEach(task => taskList.appendChild(renderTaskCard(task)));
   if (typeof lucide !== 'undefined') lucide.createIcons();
+  if (dailyPlanningState.isActive) {
+    renderDailyPlanningPanel();
+  }
 }
 
 function getCalendarEventsForDate(isoDate) {
@@ -3748,6 +4454,11 @@ function createColumnElement(column) {
 }
 
 function renderAllColumns() {
+  if (dailyPlanningState.isActive) {
+    renderDailyPlanningMode();
+    return;
+  }
+
   const container = document.getElementById('day-columns');
   const { startISO, endISO } = state.dayWindow;
   if (!startISO || !endISO) return;
@@ -3797,6 +4508,7 @@ function shiftDayWindowBy(daysDelta, options = {}) {
 }
 
 function recycleDayWindowIfNeeded() {
+  if (dailyPlanningState.isActive) return;
   const container = document.getElementById('day-columns');
   if (!container || container.clientWidth <= 0) return;
   if (dayWindowRecycleSuppressed) return;
@@ -3816,6 +4528,7 @@ function recycleDayWindowIfNeeded() {
 }
 
 function ensureDateIsVisibleInWindow(isoDate) {
+  if (dailyPlanningState.isActive) return false;
   if (!state.dayWindow.startISO || !state.dayWindow.endISO) initializeDayWindow();
   if (isIsoInRange(isoDate, state.dayWindow.startISO, state.dayWindow.endISO)) return false;
 
@@ -3828,6 +4541,14 @@ function ensureDateIsVisibleInWindow(isoDate) {
 }
 
 function scrollToDateColumn(isoDate, options = {}) {
+  if (dailyPlanningState.isActive) {
+    dailyPlanningState.selectedDate = isoDate;
+    dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
+    dailyPlanningState.runDraft = createDailyPlanningRunDraft(isoDate);
+    renderDailyPlanningMode();
+    return;
+  }
+
   const container = document.getElementById('day-columns');
   if (!container) return;
 
@@ -3868,22 +4589,23 @@ function scrollToDateColumn(isoDate, options = {}) {
   });
 }
 
-function initializeTodayFirstColumnPosition() {
-  const todayISO = getTodayISO();
+function initializeFirstColumnPosition(targetISO) {
   const container = document.getElementById('day-columns');
+  if (!container) return;
 
   // Suppress all label updates during init
   labelUpdateSuppressed = true;
-  updateTodayButtonLabel(todayISO);
+  updateTodayButtonLabel(targetISO);
+  container.classList.remove('board__columns--ready');
 
-  const snap = () => scrollToDateColumn(todayISO, { behavior: 'auto' });
+  const snap = () => scrollToDateColumn(targetISO, { behavior: 'auto' });
 
   function reveal() {
     snap();
     labelUpdateSuppressed = false;
     updateTodayButtonLabel._lastCalDate = null; // force calendar re-render
-    updateTodayButtonLabel(todayISO);
-    if (container) container.classList.add('board__columns--ready');
+    updateTodayButtonLabel(targetISO);
+    container.classList.add('board__columns--ready');
   }
 
   // Keep snapping until scroll position stabilizes, then reveal
@@ -3891,14 +4613,12 @@ function initializeTodayFirstColumnPosition() {
   let stableCount = 0;
   function pollUntilStable() {
     snap();
-    if (container) {
-      if (container.scrollLeft === lastScrollLeft && lastScrollLeft >= 0) {
-        stableCount++;
-      } else {
-        stableCount = 0;
-      }
-      lastScrollLeft = container.scrollLeft;
+    if (container.scrollLeft === lastScrollLeft && lastScrollLeft >= 0) {
+      stableCount++;
+    } else {
+      stableCount = 0;
     }
+    lastScrollLeft = container.scrollLeft;
     if (stableCount >= 3) {
       reveal();
     } else {
@@ -3908,6 +4628,10 @@ function initializeTodayFirstColumnPosition() {
 
   snap();
   requestAnimationFrame(pollUntilStable);
+}
+
+function initializeTodayFirstColumnPosition() {
+  initializeFirstColumnPosition(getTodayISO());
 }
 
 /* ═══════════════════════════════════════════════
@@ -4021,6 +4745,7 @@ function attachEvents() {
     if (recycleRaf !== null) return;
     recycleRaf = requestAnimationFrame(() => {
       recycleRaf = null;
+      if (dailyPlanningState.isActive) return;
       recycleDayWindowIfNeeded();
       if (!labelUpdateSuppressed) updateTodayButtonLabel();
     });
@@ -5534,6 +6259,9 @@ function renderTopbarTodayPicker() {
 }
 
 function getFirstVisibleDate() {
+  if (dailyPlanningState.isActive && dailyPlanningState.selectedDate) {
+    return dailyPlanningState.selectedDate;
+  }
   const container = document.getElementById('day-columns');
   if (!container) return getTodayISO();
   const columnSpan = getColumnSpanPx(container);
@@ -5654,7 +6382,29 @@ function attachBoardTopbarEvents() {
 }
 
 function attachSidebarEvents() {
+  const homeBtn = document.querySelector('[data-sidebar-home]');
+  const dailyPlanningBtn = document.querySelector('[data-sidebar-daily-planning]');
   const focusBtn = document.querySelector('[data-sidebar-focus]');
+
+  if (homeBtn) {
+    homeBtn.addEventListener('click', e => {
+      e.preventDefault();
+      if (dailyPlanningState.isActive) {
+        exitDailyPlanningMode();
+      } else {
+        setSidebarActiveNav('home');
+        scrollToDateColumn(getTodayISO(), { behavior: 'smooth' });
+      }
+    });
+  }
+
+  if (dailyPlanningBtn) {
+    dailyPlanningBtn.addEventListener('click', e => {
+      e.preventDefault();
+      enterDailyPlanningMode();
+    });
+  }
+
   if (!focusBtn) return;
 
   focusBtn.addEventListener('click', e => {
@@ -5673,6 +6423,98 @@ function attachSidebarEvents() {
     if (firstTaskId) {
       openFocusMode(firstTaskId, false, 'sidebar');
     }
+  });
+}
+
+function attachDailyPlanningEvents() {
+  const panel = document.getElementById('daily-planning-panel');
+  if (!panel) return;
+
+  panel.addEventListener('click', async e => {
+    if (!(e.target instanceof Element)) return;
+    const draft = ensureDailyPlanningRunDraft();
+
+    if (e.target.closest('[data-dp-prev]')) {
+      e.preventDefault();
+      goToPrevDailyPlanningStep();
+      return;
+    }
+
+    if (e.target.closest('[data-dp-next]')) {
+      e.preventDefault();
+      goToNextDailyPlanningStep();
+      return;
+    }
+
+    if (e.target.closest('[data-dp-finish]')) {
+      e.preventDefault();
+      completeDailyPlanningRun();
+      return;
+    }
+
+    const copyBtn = e.target.closest('[data-dp-copy]');
+    if (copyBtn) {
+      e.preventDefault();
+      try {
+        await copyTextToClipboard(buildDailyPlanningCopyText());
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => {
+          copyBtn.textContent = prev || 'Copy';
+        }, 1200);
+      } catch (_) {
+        copyBtn.textContent = 'Copy failed';
+      }
+      return;
+    }
+
+    if (e.target.closest('[data-dp-add-shutdown]')) {
+      e.preventDefault();
+      const timeInput = panel.querySelector('[data-dp-shutdown-input]');
+      const nextTime = timeInput ? timeInput.value : DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      draft.shutdownTime = nextTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      draft.updatedAt = new Date().toISOString();
+      upsertDailyShutdownForDate(dailyPlanningState.selectedDate || getTodayISO(), draft.shutdownTime);
+    }
+  });
+
+  panel.addEventListener('input', e => {
+    if (!(e.target instanceof Element) || !dailyPlanningState.isActive) return;
+    const draft = ensureDailyPlanningRunDraft();
+    if (e.target.matches('[data-dp-share-text]')) {
+      draft.shareText = e.target.value;
+      draft.updatedAt = new Date().toISOString();
+      return;
+    }
+    if (e.target.matches('[data-dp-shutdown-input]')) {
+      draft.shutdownTime = e.target.value || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      draft.updatedAt = new Date().toISOString();
+    }
+  });
+}
+
+function attachDailyPlanningEscapeEvents() {
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (!dailyPlanningState.isActive) return;
+    if (e.defaultPrevented) return;
+
+    const overlay = document.getElementById('task-modal-overlay');
+    if (overlay && !overlay.hidden) return;
+    if (document.getElementById('focus-modal')) return;
+    if (topbarTodayPickerState) return;
+    if (cardDatePickerState) return;
+    if (channelPickerState) return;
+    if (cardPickerState) return;
+    if (startDatePickerState) return;
+    if (dueDatePickerState) return;
+    if (plannedPickerOpen) return;
+    if (actualPickerOpen) return;
+    if (focusPickerState) return;
+    if (modalChannelPickerState) return;
+
+    e.preventDefault();
+    exitDailyPlanningMode();
   });
 }
 
@@ -6117,10 +6959,13 @@ document.addEventListener('DOMContentLoaded', () => {
   attachEvents();
   attachBoardTopbarEvents();
   attachSidebarEvents();
+  attachDailyPlanningEvents();
+  attachDailyPlanningEscapeEvents();
   attachTaskModalEvents();
   attachCalendarEvents();
   attachCalendarResizeEvents();
   attachWorkdayMarkerEvents();
+  setSidebarActiveNav('home');
   requestAnimationFrame(scrollTimelineToWorkdayStart);
 
   if (typeof lucide !== 'undefined') {

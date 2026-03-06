@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260305-01">
+  <link rel="stylesheet" href="styles.css?v=20260306-04">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
       </div>
 
       <nav class="sidebar__nav">
-        <a href="#" class="nav-item nav-item--active">
+        <a href="#" class="nav-item nav-item--active" data-sidebar-home>
           <i data-lucide="home" class="nav-icon"></i>
           <span class="nav-label">Home</span>
         </a>
@@ -36,7 +36,7 @@
 
       <div class="sidebar__section">
         <span class="section-label">DAY</span>
-        <a href="#" class="nav-item">
+        <a href="#" class="nav-item" data-sidebar-daily-planning>
           <i data-lucide="book-open" class="nav-icon"></i>
           <span class="nav-label">Daily planning</span>
         </a>
@@ -72,6 +72,8 @@
             Today
           </button>
         </div>
+
+        <section class="daily-planning-panel" id="daily-planning-panel" hidden></section>
 
         <div class="board__columns" id="day-columns">
           <!-- Day columns are rendered by app.js -->
@@ -155,6 +157,6 @@
   <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
 
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
-  <script src="app.js?v=20260305-01"></script>
+  <script src="app.js?v=20260306-04"></script>
 </body>
 </html>

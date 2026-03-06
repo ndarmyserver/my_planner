@@ -32,6 +32,7 @@ button { cursor: pointer; }
   --column-gap: 16px;
   --hour-height: 60px;
   --topbar-height: 52px;
+  --daily-planning-panel-width: 300px;
 
   /* Colors */
   --color-shell-bg: #ecedee;
@@ -197,6 +198,7 @@ button { cursor: pointer; }
    MAIN BOARD
 ═══════════════════════════════════════════════ */
 .board {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -288,6 +290,191 @@ button { cursor: pointer; }
 
 .board__columns--ready {
   opacity: 1;
+}
+
+.board__columns--daily-planning {
+  padding-left: calc(var(--sidebar-width) + var(--daily-planning-panel-width) + 36px);
+}
+
+.main-card--hide-calendar .calendar-panel {
+  display: none;
+}
+
+.main-card--hide-calendar .board__topbar {
+  padding-right: 20px;
+}
+
+.main-card--hide-calendar .board__columns {
+  padding-right: 20px;
+}
+
+.daily-planning-panel {
+  position: absolute;
+  top: var(--topbar-height);
+  left: calc(var(--sidebar-width) + 18px);
+  bottom: 0;
+  width: var(--daily-planning-panel-width);
+  padding: 20px 14px 24px 8px;
+  overflow-y: auto;
+  z-index: 2;
+}
+
+.daily-planning-panel__inner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.daily-planning-panel__title {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: -0.6px;
+  line-height: 1.05;
+  color: #2b2b2b;
+}
+
+.daily-planning-panel__subtitle {
+  font-size: 14px;
+  color: #6b6b6b;
+  line-height: 1.35;
+}
+
+.daily-planning-panel__metric {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6f6f6f;
+  letter-spacing: 0.02em;
+}
+
+.daily-planning-panel__workload--warn {
+  color: #b83f2f;
+}
+
+.daily-planning-panel__card {
+  border: 1px solid #d7d7d7;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.daily-planning-panel__card h3 {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.3px;
+  color: #2e2e2e;
+}
+
+.daily-planning-panel__card p {
+  font-size: 14px;
+  color: #6e6e6e;
+  line-height: 1.35;
+}
+
+.daily-planning-panel__card--warn {
+  background: #fff7f2;
+  border-color: #f0c7b0;
+}
+
+.daily-planning-panel__card--ok {
+  background: #f1fbf3;
+  border-color: #b6dcbc;
+}
+
+.daily-planning-panel__shutdown-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.daily-planning-panel__time {
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #3d3d3d;
+  background: #ffffff;
+  padding: 6px 8px;
+  min-width: 106px;
+}
+
+.daily-planning-panel__btn {
+  border: 1px solid #d0d0d0;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #4e4e4e;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 8px 11px;
+}
+
+.daily-planning-panel__btn:hover {
+  background: #f3f3f3;
+}
+
+.daily-planning-panel__btn--primary {
+  background: #ececec;
+  border-color: #d3d3d3;
+  color: #3a3a3a;
+}
+
+.daily-planning-panel__btn--success {
+  background: #e9f9ee;
+  border-color: #78ce8e;
+  color: #2b8c49;
+}
+
+.daily-planning-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.daily-planning-panel__task-preview {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.daily-planning-panel__task-preview li {
+  font-size: 13px;
+  color: #3f3f3f;
+}
+
+.daily-planning-panel__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #656565;
+  letter-spacing: 0.03em;
+}
+
+.daily-planning-panel__textarea {
+  width: 100%;
+  min-height: 86px;
+  resize: vertical;
+  border: 1px solid #d7d7d7;
+  border-radius: 6px;
+  padding: 9px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: #2f2f2f;
+  line-height: 1.35;
+  background: #ffffff;
+}
+
+.daily-planning-panel__textarea--share {
+  min-height: 360px;
+}
+
+.day-date--daily-hint {
+  font-style: italic;
 }
 
 /* ═══════════════════════════════════════════════
@@ -1963,6 +2150,7 @@ body.is-workday-marker-dragging {
   font-weight: 500;
   line-height: 1.2;
   outline: none;
+  white-space: pre-wrap;
 }
 
 .task-modal__notes:empty::before {
@@ -2946,6 +3134,7 @@ body.modal-open {
   line-height: 1.25;
   outline: none;
   min-height: 130px;
+  white-space: pre-wrap;
 }
 
 .focus-modal__notes:empty::before {
