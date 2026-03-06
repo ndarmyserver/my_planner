@@ -61,11 +61,27 @@ const INTEGRATION = {
   none:   null
 };
 
-const CHANNEL_COLORS = {
-  '#product':  { hashColor: '#4a90d9', eventClass: 'cal-event--blue'   },
-  '#planning': { hashColor: '#f59e0b', eventClass: 'cal-event--orange' },
-  '#growth':   { hashColor: '#22c55e', eventClass: 'cal-event--green'  }
-};
+const CHANNELS = [
+  { id: 'unassigned', label: 'Unassigned', context: null, hashColor: '#999999', eventClass: 'cal-event--blue' },
+  { id: 'ch-work', label: 'work', context: null, hashColor: '#e67e22', eventClass: 'cal-event--orange', isContext: true },
+  { id: 'ch-code-reviews', label: 'code reviews', context: 'work', hashColor: '#e74c3c', eventClass: 'cal-event--orange' },
+  { id: 'ch-coding', label: 'coding', context: 'work', hashColor: '#f39c12', eventClass: 'cal-event--orange' },
+  { id: 'ch-debugging', label: 'debugging', context: 'work', hashColor: '#e67e22', eventClass: 'cal-event--orange' },
+  { id: 'ch-growth', label: 'growth', context: 'work', hashColor: '#22c55e', eventClass: 'cal-event--green' },
+  { id: 'ch-meetings', label: 'meetings', context: 'work', hashColor: '#9b59b6', eventClass: 'cal-event--purple' },
+  { id: 'ch-planning', label: 'planning', context: 'work', hashColor: '#f59e0b', eventClass: 'cal-event--orange' },
+  { id: 'ch-product', label: 'product', context: 'work', hashColor: '#4a90d9', eventClass: 'cal-event--blue' },
+  { id: 'ch-personal', label: 'personal', context: null, hashColor: '#3498db', eventClass: 'cal-event--blue', isContext: true },
+  { id: 'ch-test', label: 'test', context: null, hashColor: '#9b8ec4', eventClass: 'cal-event--purple' },
+];
+
+// Build lookup map from channels
+const CHANNEL_COLORS = {};
+CHANNELS.forEach(ch => {
+  if (ch.id !== 'unassigned') {
+    CHANNEL_COLORS['#' + ch.label] = { hashColor: ch.hashColor, eventClass: ch.eventClass };
+  }
+});
 
 const state = {
   columns: [
@@ -746,16 +762,16 @@ function renderIntegrationIcon(color) {
 }
 
 function renderTaskTag(tag) {
-  if (!tag) return '';
-  const raw = String(tag).trim();
+  const raw = tag ? String(tag).trim() : '';
+  const hasTag = raw.length > 0;
   const hasHash = raw.startsWith('#');
-  const word = hasHash ? raw.slice(1) : raw;
-  const channel = getChannelStyle(raw);
-  const hashColor = channel ? channel.hashColor : '#9b8ec4';
-  const hash = hasHash
-    ? `<span class="task-card__tag-hash" style="color:${escapeHtml(hashColor)};">#</span>`
-    : '';
-  return `<span class="task-card__tag">${hash}<span class="task-card__tag-word">${escapeHtml(word)}</span></span>`;
+  const word = hasHash ? raw.slice(1) : (hasTag ? raw : 'Unassigned');
+  const channel = hasTag ? getChannelStyle(raw) : null;
+  const hashColor = channel ? channel.hashColor : (hasTag ? '#9b8ec4' : '#999999');
+  const unassignedClass = hasTag ? '' : ' task-card__tag--unassigned';
+  return `<span class="task-card__tag${unassignedClass}" data-channel-btn>` +
+    `<span class="task-card__tag-hash" style="color:${escapeHtml(hashColor)};">#</span>` +
+    `<span class="task-card__tag-word">${escapeHtml(word)}</span></span>`;
 }
 
 function renderTaskDetailSubtaskRow(subtask) {
@@ -812,9 +828,9 @@ function renderTaskDetailModal(task, column) {
   ensureTaskTimeState(task);
   const rawTag = task.tag ? String(task.tag).trim() : '';
   const hasHash = rawTag.startsWith('#');
-  const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'general';
+  const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'Unassigned';
   const channelStyle = getChannelStyle(rawTag);
-  const hashColor = channelStyle ? channelStyle.hashColor : '#7da2ff';
+  const hashColor = channelStyle ? channelStyle.hashColor : (rawTag ? '#7da2ff' : '#999999');
   const todayISO = getTodayISO();
   const colDate = column.isoDate || todayISO;
   let startLabel;
@@ -841,8 +857,8 @@ function renderTaskDetailModal(task, column) {
       <div class="task-modal__header">
         <div class="task-modal__meta-group">
           <span class="task-modal__meta-label">CHANNEL</span>
-          <span class="task-modal__channel">
-            ${hasHash ? `<span class="task-modal__channel-hash" style="color:${escapeHtml(hashColor)};">#</span>` : ''}
+          <span class="task-modal__channel" data-modal-channel-btn>
+            <span class="task-modal__channel-hash" style="color:${escapeHtml(hashColor)};">#</span>
             <span class="task-modal__channel-word">${escapeHtml(channelWord)}</span>
           </span>
         </div>
@@ -1131,6 +1147,7 @@ function handleStartDateAction(action, data) {
 let cardDatePickerState = null; // { taskId, viewYear, viewMonth }
 
 function openCardDatePicker(taskId) {
+  closeChannelPicker();
   closeCardDatePicker();
   const ctx = findTaskContext(taskId);
   if (!ctx) return;
@@ -1194,7 +1211,7 @@ function renderCardDatePicker() {
 
   // Center the dropdown under the card
   const cardWidth = card.offsetWidth;
-  const ddWidth = 260; // dropdown width from CSS
+  const ddWidth = 240; // dropdown width from CSS
   dropdown.style.left = (-12 + (cardWidth - ddWidth) / 2) + 'px'; // -12 accounts for card padding
   dropdown.style.width = ddWidth + 'px';
 
@@ -1253,6 +1270,404 @@ function handleCardDateAction(action, data) {
   }
 
   closeCardDatePicker();
+}
+
+/* ── Channel Picker ─────────────────────────── */
+
+let channelPickerState = null; // { taskId, highlightIndex }
+
+function openChannelPicker(taskId) {
+  closeCardDatePicker();
+  closeCardPicker();
+  if (channelPickerState && channelPickerState.taskId === taskId) {
+    closeChannelPicker();
+    return;
+  }
+  closeChannelPicker();
+  channelPickerState = { taskId, highlightIndex: 0 };
+
+  const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+  if (card) card.classList.add('task-card--picker-open');
+
+  renderChannelPicker();
+}
+
+function closeChannelPicker() {
+  if (channelPickerState) {
+    const card = document.querySelector(`.task-card[data-task-id="${channelPickerState.taskId}"]`);
+    if (card) card.classList.remove('task-card--picker-open');
+  }
+  channelPickerState = null;
+  const existing = document.querySelector('[data-channel-picker]');
+  if (existing) existing.remove();
+}
+
+function getFilteredChannels(query) {
+  if (!query) return CHANNELS;
+  const q = query.toLowerCase();
+  return CHANNELS.filter(ch => ch.label.toLowerCase().includes(q));
+}
+
+function renderChannelListHTML(filtered, currentTag) {
+  const normalizedCurrent = normalizeTag(currentTag);
+  return filtered.map((ch, i) => {
+    const isSelected = ch.id === 'unassigned'
+      ? !currentTag
+      : normalizedCurrent === '#' + ch.label;
+    const nested = ch.context ? ' channel-picker__item--nested' : '';
+    const selected = isSelected ? ' channel-picker__item--selected' : '';
+    const highlighted = (channelPickerState && channelPickerState.highlightIndex === i)
+      ? ' channel-picker__item--highlighted' : '';
+    const checkmark = isSelected ? '<span class="channel-picker__check">\u2713</span>' : '';
+    return `<div class="channel-picker__item${nested}${selected}${highlighted}" data-channel-id="${ch.id}" data-channel-idx="${i}">` +
+      `<span class="channel-picker__hash" style="color:${escapeHtml(ch.hashColor)};">#</span>` +
+      `<span class="channel-picker__label">${escapeHtml(ch.label)}</span>${checkmark}</div>`;
+  }).join('');
+}
+
+function renderChannelPicker() {
+  if (!channelPickerState) return;
+  const taskId = channelPickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const existing = document.querySelector('[data-channel-picker]');
+  if (existing) existing.remove();
+
+  const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+  if (!card) return;
+
+  const footer = card.querySelector('.task-card__footer');
+  if (!footer) return;
+  footer.style.position = 'relative';
+
+  const filtered = getFilteredChannels('');
+  const listHTML = renderChannelListHTML(filtered, ctx.task.tag);
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'channel-picker';
+  dropdown.setAttribute('data-channel-picker', '');
+  dropdown.innerHTML =
+    `<div class="channel-picker__arrow"></div>` +
+    `<div class="channel-picker__header">Assign to channel:</div>` +
+    `<input class="channel-picker__search" placeholder="Search..." type="text">` +
+    `<div class="channel-picker__list">${listHTML}</div>` +
+    `<div class="channel-picker__divider"></div>` +
+    `<a class="channel-picker__manage" href="#">Manage channels</a>`;
+
+  footer.appendChild(dropdown);
+
+  // Position: right-aligned under tag button
+  const tagBtn = card.querySelector('[data-channel-btn]');
+  const ddWidth = 220;
+
+  dropdown.style.position = 'absolute';
+  dropdown.style.top = '100%';
+  dropdown.style.marginTop = '12px';
+  dropdown.style.zIndex = '6000';
+  dropdown.style.width = ddWidth + 'px';
+
+  // Right-align to the tag button
+  requestAnimationFrame(() => {
+    const tagRect = tagBtn ? tagBtn.getBoundingClientRect() : null;
+    const footerRect = footer.getBoundingClientRect();
+    if (tagRect) {
+      const tagCenterX = tagRect.left + tagRect.width / 2 - footerRect.left;
+      let left = tagCenterX - ddWidth / 2;
+      // Clamp so dropdown doesn't overflow card left
+      const maxLeft = footerRect.width - ddWidth;
+      left = Math.max(-12, Math.min(left, maxLeft + 12));
+      dropdown.style.left = left + 'px';
+
+      // Position arrow
+      const arrow = dropdown.querySelector('.channel-picker__arrow');
+      if (arrow) {
+        const ddRect = dropdown.getBoundingClientRect();
+        const arrowLeft = tagRect.left + tagRect.width / 2 - ddRect.left - 6;
+        arrow.style.left = arrowLeft + 'px';
+      }
+    } else {
+      dropdown.style.right = '-12px';
+    }
+
+    // Scroll column so dropdown is visible
+    const ddRect = dropdown.getBoundingClientRect();
+    const col = card.closest('.day-column');
+    if (col) {
+      const colRect = col.getBoundingClientRect();
+      if (ddRect.bottom > colRect.bottom) {
+        col.scrollTop += ddRect.bottom - colRect.bottom + 8;
+      }
+    }
+  });
+
+  // Focus search input
+  const searchInput = dropdown.querySelector('.channel-picker__search');
+  if (searchInput) {
+    requestAnimationFrame(() => searchInput.focus());
+    attachChannelPickerEvents(searchInput, dropdown);
+  }
+}
+
+function attachChannelPickerEvents(searchInput, dropdown) {
+  const taskId = channelPickerState.taskId;
+
+  // Search filtering
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value;
+    const ctx = findTaskContext(taskId);
+    if (!ctx) return;
+    const filtered = getFilteredChannels(query);
+    channelPickerState.highlightIndex = 0;
+    const list = dropdown.querySelector('.channel-picker__list');
+    if (list) list.innerHTML = renderChannelListHTML(filtered, ctx.task.tag);
+  });
+
+  // Keyboard navigation
+  searchInput.addEventListener('keydown', e => {
+    if (!channelPickerState) return;
+    const query = searchInput.value;
+    const filtered = getFilteredChannels(query);
+    const count = filtered.length;
+    if (count === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      channelPickerState.highlightIndex = Math.min(channelPickerState.highlightIndex + 1, count - 1);
+      updateChannelHighlight(dropdown);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      channelPickerState.highlightIndex = Math.max(channelPickerState.highlightIndex - 1, 0);
+      updateChannelHighlight(dropdown);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const ch = filtered[channelPickerState.highlightIndex];
+      if (ch) selectChannel(taskId, ch);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeChannelPicker();
+    }
+  });
+}
+
+function updateChannelHighlight(dropdown) {
+  const items = dropdown.querySelectorAll('.channel-picker__item');
+  items.forEach((item, i) => {
+    item.classList.toggle('channel-picker__item--highlighted', i === channelPickerState.highlightIndex);
+  });
+  // Scroll highlighted item into view
+  const highlighted = dropdown.querySelector('.channel-picker__item--highlighted');
+  if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+}
+
+function selectChannel(taskId, channel) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) { closeChannelPicker(); return; }
+
+  if (channel.id === 'unassigned') {
+    ctx.task.tag = null;
+  } else {
+    ctx.task.tag = '#' + channel.label;
+  }
+
+  closeChannelPicker();
+  renderColumn(ctx.column);
+
+  // Update modal if open for this task
+  if (openModalTaskId === taskId) {
+    const overlay = document.querySelector('.task-modal-overlay');
+    if (overlay) {
+      const channelEl = overlay.querySelector('.task-modal__channel');
+      if (channelEl) {
+        const style = getChannelStyle(ctx.task.tag);
+        const hashColor = style ? style.hashColor : '#7da2ff';
+        const word = ctx.task.tag ? ctx.task.tag.replace(/^#/, '') : 'Unassigned';
+        channelEl.innerHTML =
+          `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
+          `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
+      }
+    }
+  }
+
+  // Re-initialize icons for re-rendered card
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+/* ── Modal Channel Picker ───────────────────── */
+
+let modalChannelPickerState = null; // { taskId, highlightIndex }
+
+function openModalChannelPicker(taskId) {
+  closeStartDatePicker();
+  closeDueDatePicker();
+  if (modalChannelPickerState && modalChannelPickerState.taskId === taskId) {
+    closeModalChannelPicker();
+    return;
+  }
+  closeModalChannelPicker();
+  modalChannelPickerState = { taskId, highlightIndex: 0 };
+  renderModalChannelPicker();
+}
+
+function closeModalChannelPicker() {
+  modalChannelPickerState = null;
+  const existing = document.querySelector('[data-modal-channel-picker]');
+  if (existing) existing.remove();
+}
+
+function renderModalChannelPicker() {
+  if (!modalChannelPickerState) return;
+  const taskId = modalChannelPickerState.taskId;
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const existing = document.querySelector('[data-modal-channel-picker]');
+  if (existing) existing.remove();
+
+  const overlay = document.querySelector('.task-modal-overlay');
+  if (!overlay) return;
+
+  const channelBtn = overlay.querySelector('[data-modal-channel-btn]');
+  if (!channelBtn) return;
+
+  const metaGroup = channelBtn.closest('.task-modal__meta-group');
+  if (!metaGroup) return;
+
+  const filtered = getFilteredChannels('');
+  const listHTML = renderModalChannelListHTML(filtered, ctx.task.tag);
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'channel-picker';
+  dropdown.setAttribute('data-modal-channel-picker', '');
+  dropdown.innerHTML =
+    `<div class="channel-picker__arrow"></div>` +
+    `<div class="channel-picker__header">Assign to channel:</div>` +
+    `<input class="channel-picker__search" placeholder="Search..." type="text">` +
+    `<div class="channel-picker__list">${listHTML}</div>` +
+    `<div class="channel-picker__divider"></div>` +
+    `<a class="channel-picker__manage" href="#">Manage channels</a>`;
+
+  metaGroup.style.position = 'relative';
+  metaGroup.appendChild(dropdown);
+
+  dropdown.style.position = 'absolute';
+  dropdown.style.top = 'calc(100% + 8px)';
+  dropdown.style.left = '-8px';
+  dropdown.style.zIndex = '6000';
+  dropdown.style.width = '220px';
+
+  // Position arrow under channel button
+  requestAnimationFrame(() => {
+    const btnRect = channelBtn.getBoundingClientRect();
+    const ddRect = dropdown.getBoundingClientRect();
+    const arrow = dropdown.querySelector('.channel-picker__arrow');
+    if (arrow) {
+      const arrowLeft = btnRect.left + btnRect.width / 2 - ddRect.left - 6;
+      arrow.style.left = arrowLeft + 'px';
+    }
+  });
+
+  // Focus search input
+  const searchInput = dropdown.querySelector('.channel-picker__search');
+  if (searchInput) {
+    requestAnimationFrame(() => searchInput.focus());
+    attachModalChannelPickerEvents(searchInput, dropdown);
+  }
+}
+
+function renderModalChannelListHTML(filtered, currentTag) {
+  const normalizedCurrent = normalizeTag(currentTag);
+  return filtered.map((ch, i) => {
+    const isSelected = ch.id === 'unassigned'
+      ? !currentTag
+      : normalizedCurrent === '#' + ch.label;
+    const nested = ch.context ? ' channel-picker__item--nested' : '';
+    const selected = isSelected ? ' channel-picker__item--selected' : '';
+    const highlighted = (modalChannelPickerState && modalChannelPickerState.highlightIndex === i)
+      ? ' channel-picker__item--highlighted' : '';
+    const checkmark = isSelected ? '<span class="channel-picker__check">\u2713</span>' : '';
+    return `<div class="channel-picker__item${nested}${selected}${highlighted}" data-modal-channel-id="${ch.id}" data-channel-idx="${i}">` +
+      `<span class="channel-picker__hash" style="color:${escapeHtml(ch.hashColor)};">#</span>` +
+      `<span class="channel-picker__label">${escapeHtml(ch.label)}</span>${checkmark}</div>`;
+  }).join('');
+}
+
+function attachModalChannelPickerEvents(searchInput, dropdown) {
+  const taskId = modalChannelPickerState.taskId;
+
+  searchInput.addEventListener('input', () => {
+    const query = searchInput.value;
+    const ctx = findTaskContext(taskId);
+    if (!ctx) return;
+    const filtered = getFilteredChannels(query);
+    modalChannelPickerState.highlightIndex = 0;
+    const list = dropdown.querySelector('.channel-picker__list');
+    if (list) list.innerHTML = renderModalChannelListHTML(filtered, ctx.task.tag);
+  });
+
+  searchInput.addEventListener('keydown', e => {
+    if (!modalChannelPickerState) return;
+    const query = searchInput.value;
+    const filtered = getFilteredChannels(query);
+    const count = filtered.length;
+    if (count === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      modalChannelPickerState.highlightIndex = Math.min(modalChannelPickerState.highlightIndex + 1, count - 1);
+      updateModalChannelHighlight(dropdown);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      modalChannelPickerState.highlightIndex = Math.max(modalChannelPickerState.highlightIndex - 1, 0);
+      updateModalChannelHighlight(dropdown);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const ch = filtered[modalChannelPickerState.highlightIndex];
+      if (ch) selectModalChannel(taskId, ch);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeModalChannelPicker();
+    }
+  });
+}
+
+function updateModalChannelHighlight(dropdown) {
+  const items = dropdown.querySelectorAll('.channel-picker__item');
+  items.forEach((item, i) => {
+    item.classList.toggle('channel-picker__item--highlighted', i === modalChannelPickerState.highlightIndex);
+  });
+  const highlighted = dropdown.querySelector('.channel-picker__item--highlighted');
+  if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+}
+
+function selectModalChannel(taskId, channel) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) { closeModalChannelPicker(); return; }
+
+  if (channel.id === 'unassigned') {
+    ctx.task.tag = null;
+  } else {
+    ctx.task.tag = '#' + channel.label;
+  }
+
+  closeModalChannelPicker();
+  renderColumn(ctx.column);
+
+  // Update modal channel display
+  const overlay = document.querySelector('.task-modal-overlay');
+  if (overlay) {
+    const channelEl = overlay.querySelector('[data-modal-channel-btn]');
+    if (channelEl) {
+      const style = getChannelStyle(ctx.task.tag);
+      const hashColor = style ? style.hashColor : (ctx.task.tag ? '#7da2ff' : '#999999');
+      const word = ctx.task.tag ? ctx.task.tag.replace(/^#/, '') : 'Unassigned';
+      channelEl.innerHTML =
+        `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
+        `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
+    }
+  }
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
 /* ── Due Date Picker Toggle ────────────────── */
@@ -1746,6 +2161,7 @@ function closeCardPicker() {
 }
 
 function openCardPicker(taskId, type) {
+  closeChannelPicker();
   closeCardPicker();
   cardPickerState = { taskId, type, editMode: false };
   renderCardPicker();
@@ -3952,6 +4368,17 @@ function attachEvents() {
     }
   });
 
+  // ── Card channel tag click (channel picker) ──
+  container.addEventListener('click', e => {
+    const btn = closestFromTarget(e.target, '[data-channel-btn]');
+    if (!btn) return;
+    e.stopImmediatePropagation();
+    const card = btn.closest('.task-card');
+    if (!card) return;
+    const taskId = card.dataset.taskId;
+    openChannelPicker(taskId);
+  });
+
   // ── Kanban card time badge toggle ───────────
   container.addEventListener('click', e => {
     const badge = closestFromTarget(e.target, '[data-card-time-badge]');
@@ -4053,9 +4480,12 @@ function attachEvents() {
     if (closestFromTarget(e.target, '[data-card-date-btn]')) return;
     if (closestFromTarget(e.target, '[data-card-sdp]')) return;
     if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-picker]')) return;
     // Close any open card picker when clicking elsewhere
     if (cardPickerState) { closeCardPicker(); }
     if (cardDatePickerState) { closeCardDatePicker(); }
+    if (channelPickerState) { closeChannelPicker(); }
     const card = closestFromTarget(e.target, '.task-card');
     if (!card) return;
     openTaskDetailModal(card.dataset.taskId);
@@ -4250,6 +4680,7 @@ function closeAnyPicker() {
   if (startDatePickerState) { closeStartDatePicker(); return true; }
   if (dueDatePickerState) { closeDueDatePicker(); return true; }
   if (focusPickerState) { closeFocusPicker(); return true; }
+  if (modalChannelPickerState) { closeModalChannelPicker(); return true; }
   return false;
 }
 
@@ -4558,9 +4989,36 @@ function attachTaskModalEvents() {
       return;
     }
 
+    // Modal channel picker toggle
+    if (e.target.closest('[data-modal-channel-btn]')) {
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closePlannedPicker();
+      closeActualPicker();
+      if (modalChannelPickerState) {
+        closeModalChannelPicker();
+      } else if (openModalTaskId) {
+        openModalChannelPicker(openModalTaskId);
+      }
+      return;
+    }
+
+    // Modal channel picker item click
+    if (e.target.closest('[data-modal-channel-picker]')) {
+      const item = e.target.closest('[data-modal-channel-id]');
+      if (item) {
+        const chId = item.dataset.modalChannelId;
+        const ch = CHANNELS.find(c => c.id === chId);
+        if (ch && openModalTaskId) selectModalChannel(openModalTaskId, ch);
+      }
+      if (e.target.closest('.channel-picker__manage')) e.preventDefault();
+      return;
+    }
+
     // Due date picker toggle (check before start btn since due btn may also have meta-start-btn class)
     if (e.target.closest('[data-due-btn]')) {
       closeStartDatePicker();
+      closeModalChannelPicker();
       closePlannedPicker();
       closeActualPicker();
       if (dueDatePickerState) {
@@ -4574,6 +5032,7 @@ function attachTaskModalEvents() {
     // Start date picker toggle
     if (e.target.closest('.task-modal__meta-start-btn')) {
       closeDueDatePicker();
+      closeModalChannelPicker();
       closePlannedPicker();
       closeActualPicker();
       if (startDatePickerState) {
@@ -5507,6 +5966,37 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && cardDatePickerState) {
     e.preventDefault();
     closeCardDatePicker();
+  }
+});
+
+// Close channel picker on outside click
+document.addEventListener('click', e => {
+  if (!channelPickerState) return;
+  if (e.target instanceof Element) {
+    if (e.target.closest('[data-channel-picker]')) {
+      // Handle click on channel item inside dropdown
+      const item = e.target.closest('[data-channel-id]');
+      if (item) {
+        const chId = item.dataset.channelId;
+        const ch = CHANNELS.find(c => c.id === chId);
+        if (ch) selectChannel(channelPickerState.taskId, ch);
+      }
+      // Click on manage link — do nothing for now
+      if (e.target.closest('.channel-picker__manage')) {
+        e.preventDefault();
+      }
+      return;
+    }
+    if (e.target.closest('[data-channel-btn]')) return; // toggle handled by container
+  }
+  closeChannelPicker();
+});
+
+// Escape key for channel picker
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && channelPickerState) {
+    e.preventDefault();
+    closeChannelPicker();
   }
 });
 
