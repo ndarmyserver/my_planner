@@ -744,15 +744,27 @@ const CHECK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" f
    RENDERING
 ═══════════════════════════════════════════════ */
 
-function renderSubtasks(subtasks) {
+function renderSubtasks(subtasks, taskId) {
   const visibleSubtasks = subtasks.filter(s => String(s?.label || '').trim().length > 0);
   if (!visibleSubtasks.length) return '';
-  const items = visibleSubtasks.map(s => `
+  const items = visibleSubtasks.map(s => {
+    ensureSubtaskTimeState(s);
+    const isTimerActive = focusState.running && focusState.taskId === taskId && focusState.subtaskId === s.id;
+    const hasAny = hasActualTime(s.actualTimeSeconds) || s.plannedMinutes > 0 || isTimerActive;
+    let timeHtml = '';
+    if (hasAny) {
+      const activeClass = isTimerActive ? ' subtask__time--active' : '';
+      const actualDisplay = hasActualTime(s.actualTimeSeconds) ? formatMinutes(Math.floor(s.actualTimeSeconds / 60)) : '--:--';
+      const plannedDisplay = s.plannedMinutes > 0 ? formatMinutes(s.plannedMinutes) : '--:--';
+      timeHtml = `<span class="subtask__time${activeClass}"><span data-card-subtask-actual="${escapeHtml(s.id)}">${actualDisplay}</span> / <span data-card-subtask-planned="${escapeHtml(s.id)}">${plannedDisplay}</span></span>`;
+    }
+    return `
     <li class="subtask ${s.done ? 'subtask--done' : ''}" data-subtask-id="${escapeHtml(s.id)}">
       <button class="subtask__check" type="button" data-card-subtask-check aria-label="Toggle subtask completion">${CHECK_SVG}</button>
       <span class="subtask__label">${escapeHtml(s.label)}</span>
-    </li>
-  `).join('');
+      ${timeHtml}
+    </li>`;
+  }).join('');
   return `<ul class="task-card__subtasks">${items}</ul>`;
 }
 
@@ -1722,6 +1734,22 @@ function renderDueDatePickerInModal() {
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
+function updateCardDueDate(taskId, task) {
+  const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+  if (!card) return;
+  const existing = card.querySelector('.task-card__due');
+  if (existing) existing.remove();
+  if (task.dueDate) {
+    const todayISO = getTodayISO();
+    const span = document.createElement('span');
+    span.className = 'task-card__due' + (task.dueDate < todayISO ? ' task-card__due--overdue' : '');
+    span.innerHTML = '<i data-lucide="flag"></i>' + escapeHtml(formatDateDisplay(task.dueDate));
+    const firstHoverIcon = card.querySelector('.task-card__hover-icon');
+    if (firstHoverIcon) firstHoverIcon.parentNode.insertBefore(span, firstHoverIcon);
+    lucide.createIcons({ nodes: [span] });
+  }
+}
+
 function handleDueDateAction(isoDate) {
   if (!dueDatePickerState) return;
   const taskId = dueDatePickerState.taskId;
@@ -1730,6 +1758,7 @@ function handleDueDateAction(isoDate) {
 
   ctx.task.dueDate = isoDate;
   closeDueDatePicker();
+  updateCardDueDate(taskId, ctx.task);
 
   // Re-render modal to update layout (DUE label + button position changes)
   openTaskDetailModal(taskId);
@@ -1743,6 +1772,7 @@ function handleRemoveDueDate() {
 
   ctx.task.dueDate = null;
   closeDueDatePicker();
+  updateCardDueDate(taskId, ctx.task);
 
   // Re-render modal to remove DUE label and move button back to top-actions
   openTaskDetailModal(taskId);
@@ -2160,32 +2190,46 @@ function closeCardPicker() {
   if (existing) existing.remove();
 }
 
-function openCardPicker(taskId, type) {
+function openCardPicker(taskId, type, subtaskId = null) {
   closeChannelPicker();
   closeCardPicker();
-  cardPickerState = { taskId, type, editMode: false };
+  cardPickerState = { taskId, type, editMode: false, subtaskId };
   renderCardPicker();
 }
 
 function renderCardPicker() {
   if (!cardPickerState) return;
-  const { taskId, type, editMode } = cardPickerState;
+  const { taskId, type, editMode, subtaskId } = cardPickerState;
   const task = findTaskById(taskId);
   if (!task) return;
 
   const existing = document.querySelector('[data-card-picker]');
   if (existing) existing.remove();
 
-  const btnAttr = type === 'actual' ? 'data-card-actual-picker-btn' : 'data-card-planned-picker-btn';
-  const metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${btnAttr}]`);
+  let metricEl;
+  if (subtaskId) {
+    const attrName = type === 'actual' ? 'data-card-subtask-actual' : 'data-card-subtask-planned';
+    metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${attrName}="${subtaskId}"]`);
+  } else {
+    const btnAttr = type === 'actual' ? 'data-card-actual-picker-btn' : 'data-card-planned-picker-btn';
+    metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${btnAttr}]`);
+  }
   if (!metricEl) return;
 
   const isActual = type === 'actual';
-  const currentSeconds = task.actualTimeSeconds || 0;
-  const hasCurrentActual = isActual && hasActualTime(currentSeconds);
-  const currentMins = isActual
-    ? Math.floor(currentSeconds / 60)
-    : (task.timeEstimateMinutes || 0);
+  let currentSeconds, currentMins, hasCurrentActual;
+  if (subtaskId) {
+    const subtask = findSubtask(task, subtaskId);
+    if (!subtask) return;
+    ensureSubtaskTimeState(subtask);
+    currentSeconds = subtask.actualTimeSeconds || 0;
+    hasCurrentActual = isActual && hasActualTime(currentSeconds);
+    currentMins = isActual ? Math.floor(currentSeconds / 60) : (subtask.plannedMinutes || 0);
+  } else {
+    currentSeconds = task.actualTimeSeconds || 0;
+    hasCurrentActual = isActual && hasActualTime(currentSeconds);
+    currentMins = isActual ? Math.floor(currentSeconds / 60) : (task.timeEstimateMinutes || 0);
+  }
   const currentFormatted = (isActual ? hasCurrentActual : currentMins > 0) ? formatMinutes(currentMins) : '--:--';
   const options = isActual ? ACTUAL_TIME_OPTIONS : PLANNED_TIME_OPTIONS;
   const label = isActual ? 'Actual' : 'Planned';
@@ -2260,16 +2304,27 @@ function renderCardPicker() {
 
 function applyCardPickerTime(minutes) {
   if (!cardPickerState) return;
-  const { taskId, type } = cardPickerState;
+  const { taskId, type, subtaskId } = cardPickerState;
   const task = findTaskById(taskId);
   if (!task) return;
 
-  if (type === 'actual') {
-    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
-    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+  if (subtaskId) {
+    const subtask = findSubtask(task, subtaskId);
+    if (!subtask) return;
+    ensureSubtaskTimeState(subtask);
+    if (type === 'actual') {
+      subtask.actualTimeSeconds = minutes * 60;
+    } else {
+      subtask.plannedMinutes = minutes;
+    }
   } else {
-    const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
-    task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
+    if (type === 'actual') {
+      const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
+      task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+    } else {
+      const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
+      task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
+    }
   }
   syncTaskAggregateTimes(task);
 
@@ -2409,6 +2464,11 @@ function startFocusTimer() {
         const mins = Math.floor(task.actualTimeSeconds / 60);
         const planned = task.timeEstimateMinutes;
         cardBadge.textContent = planned ? `${formatMinutes(mins)} / ${formatMinutes(planned)}` : `${formatMinutes(mins)} / --:--`;
+      }
+      // Update subtask time on kanban card when minute changes
+      if (focusState.subtaskId && target.type === 'subtask' && target.subtask) {
+        const subtaskActualEl = document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-subtask-actual="${focusState.subtaskId}"]`);
+        if (subtaskActualEl) subtaskActualEl.textContent = formatMinutes(Math.floor(target.subtask.actualTimeSeconds / 60));
       }
     }
   }, 1000);
@@ -3373,12 +3433,13 @@ function renderTaskCard(task) {
       </div>
       ${timeBadge}
     </div>
-    ${renderSubtasks(task.subtasks)}
+    ${renderSubtasks(task.subtasks, task.id)}
     <div class="task-card__footer">
       <button class="task-card__complete-btn" aria-label="Mark complete">
         <span class="complete-circle">${CHECK_SVG}</span>
       </button>
       ${renderIntegrationIcon(task.integrationColor)}
+      ${task.dueDate ? `<span class="task-card__due${task.dueDate < getTodayISO() ? ' task-card__due--overdue' : ''}"><i data-lucide="flag"></i>${formatDateDisplay(task.dueDate)}</span>` : ''}
       <button class="task-card__hover-icon" data-card-date-btn aria-label="Set start date" type="button">
         <i data-lucide="calendar"></i>
       </button>
@@ -4462,6 +4523,37 @@ function attachEvents() {
       }
       return;
     }
+    // Subtask actual time picker toggle
+    const subtaskActualBtn = closestFromTarget(e.target, '[data-card-subtask-actual]');
+    if (subtaskActualBtn) {
+      e.stopPropagation();
+      const card = subtaskActualBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const subtaskId = subtaskActualBtn.dataset.cardSubtaskActual;
+      if (focusState.running && focusState.taskId === taskId && focusState.subtaskId === subtaskId) return;
+      if (cardPickerState && cardPickerState.subtaskId === subtaskId && cardPickerState.type === 'actual') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'actual', subtaskId);
+      }
+      return;
+    }
+    // Subtask planned time picker toggle
+    const subtaskPlannedBtn = closestFromTarget(e.target, '[data-card-subtask-planned]');
+    if (subtaskPlannedBtn) {
+      e.stopPropagation();
+      const card = subtaskPlannedBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const subtaskId = subtaskPlannedBtn.dataset.cardSubtaskPlanned;
+      if (cardPickerState && cardPickerState.subtaskId === subtaskId && cardPickerState.type === 'planned') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'planned', subtaskId);
+      }
+      return;
+    }
   });
 
   // ── Open task detail modal ──────────────────
@@ -4482,6 +4574,8 @@ function attachEvents() {
     if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
     if (closestFromTarget(e.target, '[data-channel-btn]')) return;
     if (closestFromTarget(e.target, '[data-channel-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-actual]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-planned]')) return;
     // Close any open card picker when clicking elsewhere
     if (cardPickerState) { closeCardPicker(); }
     if (cardDatePickerState) { closeCardDatePicker(); }

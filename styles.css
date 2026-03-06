@@ -746,6 +746,21 @@ button { cursor: pointer; }
   color: var(--color-text-muted);
 }
 
+.subtask__time {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: #b4b4b4;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  position: relative;
+}
+
+.subtask__time--active {
+  color: #4dcd7d;
+}
+
 /* Card footer */
 .task-card__footer {
   display: flex;
@@ -826,6 +841,31 @@ button { cursor: pointer; }
 .task-card:hover .task-card__hover-icon,
 .task-card--picker-open .task-card__hover-icon {
   display: inline-flex;
+}
+
+/* Due date label */
+.task-card__due {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+  line-height: 1;
+}
+
+.task-card__due svg {
+  width: 11px;
+  height: 11px;
+}
+
+.task-card__due--overdue {
+  color: #f25a43;
+}
+
+.task-card:hover .task-card__due,
+.task-card--picker-open .task-card__due {
+  display: none;
 }
 
 .task-card__hover-icon:hover {
