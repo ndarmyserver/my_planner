@@ -286,6 +286,12 @@ function addDays(isoStr, n) {
   return toISO(d);
 }
 
+function daysBetween(isoA, isoB) {
+  const a = parseISO(isoA);
+  const b = parseISO(isoB);
+  return Math.round((b - a) / (1000 * 60 * 60 * 24));
+}
+
 function isIsoInRange(isoDate, startISO, endISO) {
   return isoDate >= startISO && isoDate <= endISO;
 }
@@ -329,6 +335,28 @@ function initializeDayWindow() {
   ensureColumnsForWindow(state.dayWindow.startISO, state.dayWindow.endISO);
 }
 
+function performRollover() {
+  const todayISO = getTodayISO();
+  const todayCol = ensureColumnForDate(todayISO);
+
+  for (const col of state.columns) {
+    if (col.isoDate >= todayISO) continue;
+    for (let i = col.tasks.length - 1; i >= 0; i--) {
+      const task = col.tasks[i];
+      ensureTaskRolloverState(task);
+      if (task.complete) continue;
+      if (!task.startDate) {
+        task.startDate = col.isoDate;
+      }
+      // Clear scheduledTime so it doesn't auto-generate a calendar event on today
+      task.scheduledTime = null;
+      // Leave stored calendar events on the old date as-is (historical record)
+      col.tasks.splice(i, 1);
+      todayCol.tasks.push(task);
+    }
+  }
+}
+
 function pruneFarEmptyColumns() {
   if (!state.dayWindow.startISO || !state.dayWindow.endISO) return;
   const keepStart = addDays(state.dayWindow.startISO, -DAY_WINDOW_RADIUS);
@@ -348,12 +376,27 @@ function formatMinutes(mins) {
 }
 
 function formatColumnTimeSummary(column) {
-  const plannedMinutes = column.tasks.reduce((sum, task) => {
+  const todayISO = getTodayISO();
+  const isPastCol = column.isoDate < todayISO;
+  let plannedMinutes = column.tasks.reduce((sum, task) => {
     ensureTaskTimeState(task);
-    return sum + (task.timeEstimateMinutes || 0);
+    return sum + (isPastCol ? getPlannedMinutesForDate(task, column.isoDate) : (task.timeEstimateMinutes || 0));
   }, 0);
-  const actualSeconds = column.tasks.reduce((sum, task) => sum + (task.actualTimeSeconds || 0), 0);
-  const actualMinutes = Math.floor(actualSeconds / 60);
+  // Use daily actual time for the column's date
+  const actualSeconds = column.tasks.reduce((sum, task) => {
+    return sum + getTaskDailyActualSeconds(task, column.isoDate);
+  }, 0);
+  // Also include ghost tasks' daily time and planned time for past columns
+  let ghostActualSeconds = 0;
+  if (isPastCol) {
+    const ghosts = getGhostTasksForDate(column.isoDate);
+    ghostActualSeconds = ghosts.reduce((sum, task) => sum + getTaskDailyActualSeconds(task, column.isoDate), 0);
+    plannedMinutes += ghosts.reduce((sum, task) => {
+      ensureTaskTimeState(task);
+      return sum + getPlannedMinutesForDate(task, column.isoDate);
+    }, 0);
+  }
+  const actualMinutes = Math.floor((actualSeconds + ghostActualSeconds) / 60);
 
   if (actualMinutes > 0 && plannedMinutes > 0) {
     return `${formatMinutes(actualMinutes)} / ${formatMinutes(plannedMinutes)}`;
@@ -469,6 +512,153 @@ function ensureSubtaskTimeState(subtask) {
   if (typeof subtask.done !== 'boolean') subtask.done = false;
 }
 
+function ensureTaskRolloverState(task) {
+  if (!task || typeof task !== 'object') return;
+  if (typeof task.startDate !== 'string' && task.startDate !== null) task.startDate = null;
+  if (!task.dailyActualTime || typeof task.dailyActualTime !== 'object') task.dailyActualTime = {};
+  if (!task.subtaskCompletionsByDate || typeof task.subtaskCompletionsByDate !== 'object') task.subtaskCompletionsByDate = {};
+  if (typeof task.completedOnDate !== 'string' && task.completedOnDate !== null) task.completedOnDate = null;
+}
+
+function getRolloverCount(task, columnIsoDate) {
+  ensureTaskRolloverState(task);
+  if (!task.startDate || !columnIsoDate) return 0;
+  const count = daysBetween(task.startDate, columnIsoDate);
+  return count > 0 ? count : 0;
+}
+
+function getTaskDailyActualSeconds(task, isoDate) {
+  ensureTaskRolloverState(task);
+  const dayEntry = task.dailyActualTime[isoDate];
+  if (!dayEntry) return 0;
+  let total = dayEntry.ownSeconds || 0;
+  if (dayEntry.subtasks) {
+    for (const stId in dayEntry.subtasks) {
+      total += dayEntry.subtasks[stId] || 0;
+    }
+  }
+  return total;
+}
+
+function recordDailyTime(task, isoDate, deltaSeconds, subtaskId) {
+  ensureTaskRolloverState(task);
+  if (!task.dailyActualTime[isoDate]) {
+    task.dailyActualTime[isoDate] = { ownSeconds: 0, subtasks: {} };
+  }
+  const entry = task.dailyActualTime[isoDate];
+  if (subtaskId) {
+    entry.subtasks[subtaskId] = (entry.subtasks[subtaskId] || 0) + deltaSeconds;
+  } else {
+    entry.ownSeconds = (entry.ownSeconds || 0) + deltaSeconds;
+  }
+}
+
+function hasActivityOnDate(task, isoDate) {
+  ensureTaskRolloverState(task);
+  if (task.completedOnDate === isoDate) return true;
+  if (task.subtaskCompletionsByDate[isoDate] && task.subtaskCompletionsByDate[isoDate].length > 0) return true;
+  if (getTaskDailyActualSeconds(task, isoDate) > 0) return true;
+  // Check for stored calendar events (timeboxed) on this date
+  if (state.calendarEvents.some(e => e.taskId === task.id && e.date === isoDate)) return true;
+  return false;
+}
+
+// Get all timebox events for a task on a specific date
+function getTaskTimeboxesForDate(task, isoDate) {
+  if (!task || !isoDate) return [];
+  return state.calendarEvents.filter(e => e.taskId === task.id && e.date === isoDate);
+}
+
+function hasTimeboxForDate(task, isoDate) {
+  return getTaskTimeboxesForDate(task, isoDate).length > 0;
+}
+
+// Get the planned minutes to display for a task on a specific date.
+// If timeboxed on that date, returns the sum of all timebox durations; otherwise returns timeEstimateMinutes.
+function getPlannedMinutesForDate(task, isoDate) {
+  ensureTaskTimeState(task);
+  const timeboxes = getTaskTimeboxesForDate(task, isoDate);
+  if (timeboxes.length > 0) {
+    return timeboxes.reduce((sum, tb) => sum + Math.round(tb.duration * 60), 0);
+  }
+  return task.timeEstimateMinutes || 0;
+}
+
+// Get the aggregate planned minutes across all dates where the task appears.
+// = timeEstimateMinutes (shared/current) + sum of past timebox durations
+function getAggregatePlannedMinutes(task) {
+  ensureTaskTimeState(task);
+  const todayISO = getTodayISO();
+  let totalTimeboxMinutes = 0;
+  for (const evt of state.calendarEvents) {
+    if (evt.taskId === task.id && evt.date < todayISO) {
+      totalTimeboxMinutes += Math.round(evt.duration * 60);
+    }
+  }
+  return (task.timeEstimateMinutes || 0) + totalTimeboxMinutes;
+}
+
+function completeTaskAsOf(task, isoDate) {
+  ensureTaskRolloverState(task);
+  ensureTaskTimeState(task);
+  task.complete = true;
+  task.completedOnDate = isoDate;
+  // Auto-set actual time to planned time if no actual time exists
+  if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
+    task.ownActualTimeSeconds = (task.ownPlannedMinutes || 0) * 60;
+    task.subtasks.forEach(s => {
+      if (s.plannedMinutes && !s.actualTimeSeconds) {
+        s.actualTimeSeconds = s.plannedMinutes * 60;
+      }
+    });
+    syncTaskAggregateTimes(task);
+    // Log to daily actual time
+    if (!task.dailyActualTime[isoDate]) task.dailyActualTime[isoDate] = { ownSeconds: 0, subtasks: {} };
+    task.dailyActualTime[isoDate].ownSeconds = (task.ownActualTimeSeconds || 0);
+    task.subtasks.forEach(s => {
+      if (s.actualTimeSeconds) {
+        task.dailyActualTime[isoDate].subtasks[s.id] = s.actualTimeSeconds;
+      }
+    });
+  }
+  // Mark subtasks complete
+  if (task.subtasks) {
+    task.subtasks.forEach(s => {
+      if (!s.done) {
+        s.done = true;
+        if (!task.subtaskCompletionsByDate[isoDate]) task.subtaskCompletionsByDate[isoDate] = [];
+        if (!task.subtaskCompletionsByDate[isoDate].includes(s.id)) {
+          task.subtaskCompletionsByDate[isoDate].push(s.id);
+        }
+      }
+    });
+  }
+}
+
+function rerenderGhostColumns(task) {
+  const todayISO = getTodayISO();
+  for (const col of state.columns) {
+    if (col.isoDate >= todayISO) continue;
+    if (col.tasks.some(t => t.id === task.id)) continue; // skip home column
+    const colEl = document.querySelector(`.day-column[data-col-id="${col.id}"]`);
+    if (colEl) renderColumn(col);
+  }
+}
+
+function getGhostTasksForDate(isoDate) {
+  const ghosts = [];
+  for (const col of state.columns) {
+    if (col.isoDate === isoDate) continue;
+    for (const task of col.tasks) {
+      ensureTaskRolloverState(task);
+      if (hasActivityOnDate(task, isoDate)) {
+        ghosts.push(task);
+      }
+    }
+  }
+  return ghosts;
+}
+
 function ensureTaskTimeState(task) {
   if (!task || typeof task !== 'object') return;
   if (!Array.isArray(task.subtasks)) task.subtasks = [];
@@ -482,6 +672,7 @@ function ensureTaskTimeState(task) {
   }
   if (typeof task.showSubtasks !== 'boolean') task.showSubtasks = task.subtasks.length > 0;
 
+  ensureTaskRolloverState(task);
   syncTaskAggregateTimes(task);
 }
 
@@ -1539,6 +1730,50 @@ function renderTaskDetailSubtasks(task) {
   `;
 }
 
+function renderTaskTimeboxEntries(task) {
+  const events = state.calendarEvents
+    .filter(e => e.taskId === task.id)
+    .sort((a, b) => {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return a.offset - b.offset;
+    });
+  if (events.length === 0) return '';
+
+  const dayNamesLong = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const monthNamesShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const entries = events.map(evt => {
+    const [y, m, d] = evt.date.split('-').map(Number);
+    const dateObj = new Date(y, m - 1, d, 12);
+    const dayName = dayNamesLong[dateObj.getDay()];
+    const monthName = monthNamesShort[dateObj.getMonth()];
+    const dayNum = dateObj.getDate();
+
+    const startTime = formatOffsetAsClock(evt.offset);
+    const endTime = formatOffsetAsClock(evt.offset + evt.duration);
+    const totalMins = Math.round(evt.duration * 60);
+    const hours = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    let durationStr = '';
+    if (hours > 0 && mins > 0) durationStr = `${hours} hr ${mins} min`;
+    else if (hours > 0) durationStr = `${hours} hr`;
+    else durationStr = `${mins} min`;
+
+    return `<div class="task-modal__timebox-entry">
+      <div class="task-modal__timebox-date">${escapeHtml(dayName)}, ${escapeHtml(monthName)} ${dayNum}</div>
+      <div class="task-modal__timebox-time">${escapeHtml(startTime)} - ${escapeHtml(endTime)}</div>
+      <div class="task-modal__timebox-duration">${escapeHtml(durationStr)}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="task-modal__divider"></div>
+    <div class="task-modal__timebox-section">
+      <div class="task-modal__timebox-heading">Timeboxed</div>
+      ${entries}
+    </div>`;
+}
+
 function renderTaskDetailModal(task, column) {
   ensureTaskTimeState(task);
   const rawTag = task.tag ? String(task.tag).trim() : '';
@@ -1548,16 +1783,18 @@ function renderTaskDetailModal(task, column) {
   const hashColor = channelStyle ? channelStyle.hashColor : (rawTag ? '#7da2ff' : '#999999');
   const todayISO = getTodayISO();
   const colDate = column.isoDate || todayISO;
+  const displayDate = task.startDate || colDate;
   let startLabel;
-  if (colDate === todayISO) startLabel = 'Today';
-  else if (colDate === addDays(todayISO, 1)) startLabel = 'Tomorrow';
-  else startLabel = formatDateDisplay(colDate);
+  if (displayDate === todayISO) startLabel = 'Today';
+  else if (displayDate === addDays(todayISO, 1)) startLabel = 'Tomorrow';
+  else startLabel = formatDateDisplay(displayDate);
 
   const actualTime = formatActualDisplay(task.actualTimeSeconds || 0);
   const actualValueClass = hasActualTime(task.actualTimeSeconds)
     ? 'task-modal__metric-value task-modal__metric-value--set'
     : 'task-modal__metric-value task-modal__metric-value--placeholder';
-  const plannedTime = formatMinutes(task.timeEstimateMinutes);
+  const aggregatePlanned = getAggregatePlannedMinutes(task);
+  const plannedTime = formatMinutes(aggregatePlanned);
   const timelineEntries = [
     `${column.dayName} list task created`,
     task.complete ? 'Marked complete' : 'Marked incomplete',
@@ -1613,7 +1850,7 @@ function renderTaskDetailModal(task, column) {
             </div>
             <div class="task-modal__metric task-modal__metric--planned" data-planned-btn>
               <span class="task-modal__metric-label">PLANNED</span>
-              <span class="task-modal__metric-value ${task.timeEstimateMinutes ? 'task-modal__metric-value--set' : 'task-modal__metric-value--placeholder'}">${task.timeEstimateMinutes ? escapeHtml(plannedTime) : '--:--'}</span>
+              <span class="task-modal__metric-value ${aggregatePlanned ? 'task-modal__metric-value--set' : 'task-modal__metric-value--placeholder'}">${aggregatePlanned ? escapeHtml(plannedTime) : '--:--'}</span>
             </div>
           </div>
         </div>
@@ -1621,6 +1858,8 @@ function renderTaskDetailModal(task, column) {
         ${renderTaskDetailSubtasks(task)}
 
         <div class="task-modal__notes" contenteditable="true" data-placeholder="Notes..." aria-label="Task notes">${task.notes ? escapeHtml(task.notes) : ''}</div>
+
+        ${renderTaskTimeboxEntries(task)}
 
         <div class="task-modal__divider"></div>
 
@@ -2633,8 +2872,9 @@ function applyPlannedTime(minutes) {
   const overlay = document.getElementById('task-modal-overlay');
   const parentMetricEl = overlay.querySelector('[data-planned-btn] .task-modal__metric-value');
   if (parentMetricEl) {
-    if (task.timeEstimateMinutes) {
-      parentMetricEl.textContent = formatMinutes(task.timeEstimateMinutes);
+    const aggregate = getAggregatePlannedMinutes(task);
+    if (aggregate) {
+      parentMetricEl.textContent = formatMinutes(aggregate);
       parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--set';
     } else {
       parentMetricEl.textContent = '--:--';
@@ -2674,6 +2914,7 @@ function handlePlannedTimeEntry() {
 let actualPickerOpen = false;
 let actualPickerEditMode = false;
 let actualPickerSubtaskId = null;
+let actualPickerDateScope = null; // ISO date for which date the actual picker applies to (null = today)
 
 const ACTUAL_TIME_OPTIONS = [
   { label: '5 min',  minutes: 5 },
@@ -2690,6 +2931,7 @@ function closeActualPicker() {
   actualPickerOpen = false;
   actualPickerEditMode = false;
   actualPickerSubtaskId = null;
+  actualPickerDateScope = null;
   const existing = document.querySelector('[data-actual-picker]');
   if (existing) existing.remove();
 }
@@ -2701,10 +2943,11 @@ function openActualPicker(subtaskId = null) {
   renderActualPickerInModal();
 }
 
-function getActualDateLabel(column) {
+function getActualDateLabel(column, overrideDate) {
   const todayISO = getTodayISO();
-  const colDate = column.isoDate || todayISO;
+  const colDate = overrideDate || (column && column.isoDate) || todayISO;
   if (colDate === todayISO) return 'today';
+  if (colDate === addDays(todayISO, -1)) return 'yesterday';
   if (colDate === addDays(todayISO, 1)) return 'tomorrow';
   return formatDateDisplay(colDate);
 }
@@ -2729,7 +2972,7 @@ function renderActualPickerInModal() {
   const currentMins = currentSeconds ? Math.floor(currentSeconds / 60) : 0;
   const hasCurrentActual = hasActualTime(currentSeconds);
   const currentFormatted = hasCurrentActual ? formatMinutes(currentMins) : '--:--';
-  const dateLabel = getActualDateLabel(ctx.column);
+  const dateLabel = getActualDateLabel(ctx.column, actualPickerDateScope);
 
   let html;
   if (actualPickerEditMode) {
@@ -2763,6 +3006,29 @@ function renderActualPickerInModal() {
       ? '<div class="planned-picker__divider"></div><button class="planned-picker__clear" type="button" data-actual-clear>Clear actual</button>'
       : '';
 
+    // Build history section from dailyActualTime
+    ensureTaskRolloverState(task);
+    const historyEntries = Object.entries(task.dailyActualTime)
+      .map(([date, entry]) => {
+        let total = entry.ownSeconds || 0;
+        if (entry.subtasks) {
+          for (const stId in entry.subtasks) total += entry.subtasks[stId] || 0;
+        }
+        return { date, total };
+      })
+      .filter(e => e.total > 0)
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    const historyHtml = historyEntries.length > 0
+      ? `<div class="planned-picker__divider"></div>
+         <div class="planned-picker__header" style="margin-top:4px">History:</div>
+         ${historyEntries.map(e => `<div class="actual-picker__history-entry">
+           <span class="actual-picker__history-time">${formatMinutes(Math.floor(e.total / 60))}</span>
+           <span class="actual-picker__history-date">${formatDateDisplay(e.date)}</span>
+           <button class="actual-picker__history-delete" type="button" data-delete-history="${e.date}">×</button>
+         </div>`).join('')}`
+      : '';
+
     html = `
       <div class="planned-picker" data-actual-picker>
         <div class="planned-picker__arrow"></div>
@@ -2771,6 +3037,7 @@ function renderActualPickerInModal() {
         <div class="planned-picker__divider"></div>
         ${optionsHtml}
         ${clearHtml}
+        ${historyHtml}
       </div>
     `;
   }
@@ -2798,12 +3065,25 @@ function applyActualTime(minutes) {
   const task = ctx.task;
   const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
 
+  const applyDateISO = actualPickerDateScope || getTodayISO();
+  ensureTaskRolloverState(task);
+
   if (subtask) {
+    const oldSeconds = subtask.actualTimeSeconds || 0;
     subtask.actualTimeSeconds = minutes * 60;
     subtask.deleteReady = false;
+    const delta = subtask.actualTimeSeconds - oldSeconds;
+    if (!task.dailyActualTime[applyDateISO]) task.dailyActualTime[applyDateISO] = { ownSeconds: 0, subtasks: {} };
+    task.dailyActualTime[applyDateISO].subtasks[subtask.id] =
+      Math.max(0, (task.dailyActualTime[applyDateISO].subtasks[subtask.id] || 0) + delta);
   } else {
+    const oldOwn = task.ownActualTimeSeconds || 0;
     const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
     task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+    const delta = task.ownActualTimeSeconds - oldOwn;
+    if (!task.dailyActualTime[applyDateISO]) task.dailyActualTime[applyDateISO] = { ownSeconds: 0, subtasks: {} };
+    task.dailyActualTime[applyDateISO].ownSeconds =
+      Math.max(0, (task.dailyActualTime[applyDateISO].ownSeconds || 0) + delta);
   }
   syncTaskAggregateTimes(task);
 
@@ -2833,6 +3113,7 @@ function applyActualTime(minutes) {
     }
   }
   if (ctx.column) renderColumn(ctx.column);
+  rerenderGhostColumns(task);
 }
 
 function handleActualTimeEntry() {
@@ -2889,13 +3170,17 @@ function rerenderFocusModal(focusSubtaskId = null) {
 
 function closeCardPicker() {
   cardPickerState = null;
+  actualPickerDateScope = null;
   const existing = document.querySelector('[data-card-picker]');
   if (existing) existing.remove();
 }
 
 function openCardPicker(taskId, type, subtaskId = null) {
   closeChannelPicker();
+  // Save date scope before closeCardPicker resets it
+  const savedDateScope = actualPickerDateScope;
   closeCardPicker();
+  actualPickerDateScope = savedDateScope;
   cardPickerState = { taskId, type, editMode: false, subtaskId };
   renderCardPicker();
 }
@@ -2909,13 +3194,17 @@ function renderCardPicker() {
   const existing = document.querySelector('[data-card-picker]');
   if (existing) existing.remove();
 
+  // When date-scoped, find the card in the correct column (handles ghost + real card for same task)
+  const cardSelector = actualPickerDateScope
+    ? `.task-card[data-task-id="${taskId}"][data-column-date="${actualPickerDateScope}"]`
+    : `.task-card[data-task-id="${taskId}"]`;
   let metricEl;
   if (subtaskId) {
     const attrName = type === 'actual' ? 'data-card-subtask-actual' : 'data-card-subtask-planned';
-    metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${attrName}="${subtaskId}"]`);
+    metricEl = document.querySelector(`${cardSelector} [${attrName}="${subtaskId}"]`);
   } else {
     const btnAttr = type === 'actual' ? 'data-card-actual-picker-btn' : 'data-card-planned-picker-btn';
-    metricEl = document.querySelector(`.task-card[data-task-id="${taskId}"] [${btnAttr}]`);
+    metricEl = document.querySelector(`${cardSelector} [${btnAttr}]`);
   }
   if (!metricEl) return;
 
@@ -2925,17 +3214,32 @@ function renderCardPicker() {
     const subtask = findSubtask(task, subtaskId);
     if (!subtask) return;
     ensureSubtaskTimeState(subtask);
-    currentSeconds = subtask.actualTimeSeconds || 0;
+    if (isActual && actualPickerDateScope) {
+      // Show daily subtask time for date-scoped picker
+      ensureTaskRolloverState(task);
+      const dayEntry = task.dailyActualTime[actualPickerDateScope];
+      currentSeconds = dayEntry && dayEntry.subtasks ? (dayEntry.subtasks[subtaskId] || 0) : 0;
+    } else {
+      currentSeconds = subtask.actualTimeSeconds || 0;
+    }
     hasCurrentActual = isActual && hasActualTime(currentSeconds);
     currentMins = isActual ? Math.floor(currentSeconds / 60) : (subtask.plannedMinutes || 0);
   } else {
-    currentSeconds = task.actualTimeSeconds || 0;
+    if (isActual && actualPickerDateScope) {
+      // Show daily actual time for date-scoped picker
+      ensureTaskRolloverState(task);
+      currentSeconds = getTaskDailyActualSeconds(task, actualPickerDateScope);
+    } else {
+      currentSeconds = task.actualTimeSeconds || 0;
+    }
     hasCurrentActual = isActual && hasActualTime(currentSeconds);
     currentMins = isActual ? Math.floor(currentSeconds / 60) : (task.timeEstimateMinutes || 0);
   }
   const currentFormatted = (isActual ? hasCurrentActual : currentMins > 0) ? formatMinutes(currentMins) : '--:--';
   const options = isActual ? ACTUAL_TIME_OPTIONS : PLANNED_TIME_OPTIONS;
-  const label = isActual ? 'Actual' : 'Planned';
+  const label = isActual && actualPickerDateScope
+    ? `Actual (${getActualDateLabel(null, actualPickerDateScope)})`
+    : (isActual ? 'Actual' : 'Planned');
   const clearLabel = isActual ? 'Clear actual' : 'Clear planned';
 
   let html;
@@ -3011,19 +3315,52 @@ function applyCardPickerTime(minutes) {
   const task = findTaskById(taskId);
   if (!task) return;
 
+  const dateScope = actualPickerDateScope;
+
   if (subtaskId) {
     const subtask = findSubtask(task, subtaskId);
     if (!subtask) return;
     ensureSubtaskTimeState(subtask);
     if (type === 'actual') {
-      subtask.actualTimeSeconds = minutes * 60;
+      if (dateScope) {
+        // Date-scoped: update daily time for this subtask on that date
+        ensureTaskRolloverState(task);
+        const dayEntry = task.dailyActualTime[dateScope];
+        const oldSubtaskDaily = dayEntry && dayEntry.subtasks ? (dayEntry.subtasks[subtaskId] || 0) : 0;
+        const newSeconds = minutes * 60;
+        const delta = newSeconds - oldSubtaskDaily;
+        subtask.actualTimeSeconds = (subtask.actualTimeSeconds || 0) + delta;
+        if (subtask.actualTimeSeconds < 0) subtask.actualTimeSeconds = 0;
+        recordDailyTime(task, dateScope, delta, subtaskId);
+      } else {
+        subtask.actualTimeSeconds = minutes * 60;
+      }
     } else {
       subtask.plannedMinutes = minutes;
     }
   } else {
     if (type === 'actual') {
-      const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
-      task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+      if (dateScope) {
+        // Date-scoped: set daily own actual time for this date
+        ensureTaskRolloverState(task);
+        if (!task.dailyActualTime[dateScope]) {
+          task.dailyActualTime[dateScope] = { ownSeconds: 0, subtasks: {} };
+        }
+        const entry = task.dailyActualTime[dateScope];
+        const subtaskDailyTotal = entry.subtasks
+          ? Object.values(entry.subtasks).reduce((s, v) => s + (v || 0), 0)
+          : 0;
+        const newOwnSeconds = Math.max(0, minutes * 60 - subtaskDailyTotal);
+        const oldOwnSeconds = entry.ownSeconds || 0;
+        const delta = newOwnSeconds - oldOwnSeconds;
+        entry.ownSeconds = newOwnSeconds;
+        // Update aggregate
+        task.ownActualTimeSeconds = (task.ownActualTimeSeconds || 0) + delta;
+        if (task.ownActualTimeSeconds < 0) task.ownActualTimeSeconds = 0;
+      } else {
+        const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
+        task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+      }
     } else {
       const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
       task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
@@ -3031,9 +3368,16 @@ function applyCardPickerTime(minutes) {
   }
   syncTaskAggregateTimes(task);
 
+  // If clearing time on a past card, collapse the timer area
+  if (dateScope && type === 'actual' && minutes === 0) {
+    cardTimerExpanded.delete(taskId);
+  }
+
   closeCardPicker();
   const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
   if (col) renderColumn(col);
+  // Re-render ghost columns if date-scoped edit changed activity
+  if (dateScope) rerenderGhostColumns(task);
 }
 
 function handleCardPickerTimeEntry() {
@@ -3134,10 +3478,13 @@ function startFocusTimer() {
     const target = getFocusTarget(task);
     if (!target) { stopFocusTimer(); return; }
 
+    const tickDateISO = getTodayISO();
     if (target.type === 'subtask' && target.subtask) {
       target.subtask.actualTimeSeconds = (target.subtask.actualTimeSeconds || 0) + 1;
+      recordDailyTime(task, tickDateISO, 1, target.subtask.id);
     } else {
       task.ownActualTimeSeconds = (task.ownActualTimeSeconds || 0) + 1;
+      recordDailyTime(task, tickDateISO, 1, null);
     }
     syncTaskAggregateTimes(task);
 
@@ -3157,16 +3504,19 @@ function startFocusTimer() {
         if (subtaskMetric) subtaskMetric.textContent = formatSeconds(targetSeconds || 0);
       }
     }
-    // Update kanban card timer if visible
+    // Update kanban card timer if visible (show today's daily time)
     const cardTimerActual = document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-timer-actual]`);
-    if (cardTimerActual) cardTimerActual.textContent = formatSeconds(task.actualTimeSeconds);
+    if (cardTimerActual) cardTimerActual.textContent = formatSeconds(getTaskDailyActualSeconds(task, tickDateISO));
     // Update kanban card time badge only when minute changes
     if (task.actualTimeSeconds % 60 === 0) {
-      const cardBadge = document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-time-badge]`);
+      const todayCol = document.querySelector(`.day-column[data-iso-date="${tickDateISO}"]`);
+      const cardBadge = todayCol
+        ? todayCol.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-time-badge]`)
+        : document.querySelector(`.task-card[data-task-id="${focusState.taskId}"] [data-card-time-badge]`);
       if (cardBadge) {
-        const mins = Math.floor(task.actualTimeSeconds / 60);
+        const dailyMins = Math.floor(getTaskDailyActualSeconds(task, tickDateISO) / 60);
         const planned = task.timeEstimateMinutes;
-        cardBadge.textContent = planned ? `${formatMinutes(mins)} / ${formatMinutes(planned)}` : `${formatMinutes(mins)} / --:--`;
+        cardBadge.textContent = planned ? `${formatMinutes(dailyMins)} / ${formatMinutes(planned)}` : `${formatMinutes(dailyMins)} / --:--`;
       }
       // Update subtask time on kanban card when minute changes
       if (focusState.subtaskId && target.type === 'subtask' && target.subtask) {
@@ -3211,15 +3561,16 @@ function updateFocusModalValues(task) {
   const plannedMetric = el.querySelector('[data-focus-planned-metric]');
   const actualVal = el.querySelector('[data-focus-actual]');
   if (actualVal) {
+    const focusTodaySeconds = getTaskDailyActualSeconds(task, getTodayISO());
     if (focusState.running) {
-      actualVal.textContent = formatSeconds(task.actualTimeSeconds || 0);
+      actualVal.textContent = formatSeconds(focusTodaySeconds || 0);
       actualVal.classList.add('focus-modal__actual--running');
       actualVal.classList.remove('focus-modal__actual--placeholder');
       actualVal.classList.add('focus-modal__actual--set');
       actualMetric?.classList.add('focus-modal__metric--has-value');
     } else {
-      const hasActual = hasActualTime(task.actualTimeSeconds);
-      actualVal.textContent = formatActualDisplay(task.actualTimeSeconds || 0);
+      const hasActual = focusTodaySeconds > 0;
+      actualVal.textContent = hasActual ? formatMinutes(Math.floor(focusTodaySeconds / 60)) : '--:--';
       actualVal.classList.remove('focus-modal__actual--running');
       actualVal.classList.toggle('focus-modal__actual--set', hasActual);
       actualVal.classList.toggle('focus-modal__actual--placeholder', !hasActual);
@@ -3621,12 +3972,13 @@ function renderFocusModal(task, autoStart) {
   if (existing) existing.remove();
 
   const isRunning = autoStart || focusState.running;
-  const hasActual = isRunning || !!task.actualTimeSeconds;
+  const todaySeconds = getTaskDailyActualSeconds(task, getTodayISO());
+  const hasActual = isRunning || !!todaySeconds;
   const hasPlanned = !!task.timeEstimateMinutes;
   const plannedDisplay = hasPlanned ? formatMinutes(task.timeEstimateMinutes) : '--:--';
   const actualDisplay = isRunning
-    ? formatSeconds(task.actualTimeSeconds || 0)
-    : (task.actualTimeSeconds ? formatMinutes(Math.floor(task.actualTimeSeconds / 60)) : '--:--');
+    ? formatSeconds(todaySeconds || 0)
+    : (todaySeconds ? formatMinutes(Math.floor(todaySeconds / 60)) : '--:--');
 
   const el = document.createElement('div');
   el.id = 'focus-modal';
@@ -3746,6 +4098,20 @@ function renderFocusModal(task, autoStart) {
       if (!subtask) return;
       subtask.done = !subtask.done;
       subtask.deleteReady = false;
+      ensureTaskRolloverState(t);
+      const todayISO = getTodayISO();
+      if (subtask.done) {
+        if (!t.subtaskCompletionsByDate[todayISO]) t.subtaskCompletionsByDate[todayISO] = [];
+        if (!t.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
+          t.subtaskCompletionsByDate[todayISO].push(subtask.id);
+        }
+      } else {
+        for (const date in t.subtaskCompletionsByDate) {
+          const arr = t.subtaskCompletionsByDate[date];
+          const idx = arr.indexOf(subtask.id);
+          if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete t.subtaskCompletionsByDate[date]; }
+        }
+      }
       subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
       updateFocusModalValues(t);
       const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
@@ -3757,7 +4123,20 @@ function renderFocusModal(task, autoStart) {
       const t = findTaskById(focusState.taskId);
       if (!t) return;
       t.complete = !t.complete;
-      if (t.complete && t.subtasks) t.subtasks.forEach(s => { s.done = true; });
+      ensureTaskRolloverState(t);
+      t.completedOnDate = t.complete ? getTodayISO() : null;
+      if (t.complete && t.subtasks) {
+        const todayISO = getTodayISO();
+        t.subtasks.forEach(s => {
+          if (!s.done) {
+            s.done = true;
+            if (!t.subtaskCompletionsByDate[todayISO]) t.subtaskCompletionsByDate[todayISO] = [];
+            if (!t.subtaskCompletionsByDate[todayISO].includes(s.id)) {
+              t.subtaskCompletionsByDate[todayISO].push(s.id);
+            }
+          }
+        });
+      }
       const btn = el.querySelector('[data-focus-check]');
       if (btn) {
         btn.classList.toggle('task-modal__check--complete', t.complete);
@@ -4079,48 +4458,83 @@ function closeTaskDetailModal() {
   document.body.classList.remove('modal-open');
 }
 
-function renderTaskCard(task) {
+function renderTaskCard(task, columnIsoDate, isGhost) {
   ensureTaskTimeState(task);
+  const todayISO = getTodayISO();
+  const isPast = columnIsoDate && columnIsoDate < todayISO;
   const card = document.createElement('div');
-  card.className = 'task-card' + (task.complete ? ' task-card--complete' : '');
+  card.className = 'task-card'
+    + (task.complete ? ' task-card--complete' : '')
+    + (isGhost ? ' task-card--ghost' : '');
   card.dataset.taskId = task.id;
   card.draggable = false;
+  if (isGhost) card.dataset.ghostDate = columnIsoDate;
+  if (isPast) card.dataset.isPast = 'true';
+  if (columnIsoDate) card.dataset.columnDate = columnIsoDate;
 
-  const scheduledPill = task.scheduledTime
-    ? `<span class="task-card__scheduled-pill">${escapeHtml(task.scheduledTime)}</span>`
-    : '';
+  // Show scheduled pills for all timebox events on THIS column's date
+  const columnEvents = columnIsoDate
+    ? state.calendarEvents.filter(e => e.taskId === task.id && e.date === columnIsoDate).sort((a, b) => a.offset - b.offset)
+    : [];
+  let scheduledPills = '';
+  if (columnEvents.length > 0) {
+    const maxShow = 2;
+    const shown = columnEvents.slice(0, maxShow);
+    const overflow = columnEvents.length - maxShow;
+    scheduledPills = '<div class="task-card__pills-row">'
+      + shown.map(evt => `<span class="task-card__scheduled-pill">${escapeHtml(formatOffsetAsClock(evt.offset))}</span>`).join('')
+      + (overflow > 0 ? `<span class="task-card__scheduled-pill task-card__scheduled-pill--more">+${overflow}</span>` : '')
+      + '</div>';
+  } else if (!columnIsoDate && task.scheduledTime) {
+    scheduledPills = `<div class="task-card__pills-row"><span class="task-card__scheduled-pill">${escapeHtml(task.scheduledTime)}</span></div>`;
+  }
 
-  const isTimerRunning = focusState.running && focusState.taskId === task.id;
+  const isTimerRunning = focusState.running && focusState.taskId === task.id && !isPast;
   const showTimerDropdown = isTimerRunning || cardTimerExpanded.has(task.id);
   const badgeGreenClass = isTimerRunning ? ' task-card__time-badge--running' : '';
 
+  // Use daily actual time for the badge (per-column-date), aggregate for task detail
+  const dailySeconds = columnIsoDate ? getTaskDailyActualSeconds(task, columnIsoDate) : (task.actualTimeSeconds || 0);
+  const actualMins = dailySeconds ? Math.floor(dailySeconds / 60) : 0;
+  const showActualOnBadge = dailySeconds > 0 || isTimerRunning;
+
+  // For past cards, use sum of timebox durations as planned if timeboxed; otherwise use shared timeEstimateMinutes
+  const pastTimeboxes = (isPast && columnIsoDate) ? getTaskTimeboxesForDate(task, columnIsoDate) : [];
+  const hasPastTimebox = pastTimeboxes.length > 0;
+  const cardPlannedMins = hasPastTimebox
+    ? pastTimeboxes.reduce((sum, tb) => sum + Math.round(tb.duration * 60), 0)
+    : (task.timeEstimateMinutes || 0);
+
   let timeBadge = '';
-  const actualMins = task.actualTimeSeconds ? Math.floor(task.actualTimeSeconds / 60) : 0;
-  const showActualOnBadge = hasActualTime(task.actualTimeSeconds) || isTimerRunning;
-  if (showActualOnBadge && task.timeEstimateMinutes) {
-    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / ${formatMinutes(task.timeEstimateMinutes)}</span>`;
+  if (showActualOnBadge && cardPlannedMins) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / ${formatMinutes(cardPlannedMins)}</span>`;
   } else if (showActualOnBadge) {
     timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / --:--</span>`;
-  } else if (task.timeEstimateMinutes) {
-    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(task.timeEstimateMinutes)}</span>`;
+  } else if (cardPlannedMins) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(cardPlannedMins)}</span>`;
   }
 
-  const actualDisplay = isTimerRunning
-    ? formatSeconds(task.actualTimeSeconds || 0)
-    : formatActualDisplay(task.actualTimeSeconds || 0);
-  const plannedDisplay = task.timeEstimateMinutes ? formatMinutes(task.timeEstimateMinutes) : '--:--';
+  // For timer section: use daily time for past cards, aggregate for current
+  const timerActualDisplay = isPast
+    ? (dailySeconds ? formatMinutes(actualMins) : '--:--')
+    : (isTimerRunning ? formatSeconds(task.actualTimeSeconds || 0) : formatActualDisplay(task.actualTimeSeconds || 0));
+  const plannedDisplay = cardPlannedMins ? formatMinutes(cardPlannedMins) : '--:--';
+
+  // Timer play/pause button: hidden for past cards
+  const timerPlayBtn = isPast ? '' : `
+    <button class="task-card__timer-btn" type="button" data-card-timer-toggle>
+      <i data-lucide="${isTimerRunning ? 'pause' : 'play'}"></i>
+    </button>`;
 
   const timerSection = showTimerDropdown ? `
     <div class="task-card__timer" data-card-timer>
-      <button class="task-card__timer-btn" type="button" data-card-timer-toggle>
-        <i data-lucide="${isTimerRunning ? 'pause' : 'play'}"></i>
-      </button>
+      ${timerPlayBtn}
       <div class="task-card__timer-metrics">
         <div class="task-card__timer-metric${isTimerRunning ? '' : ' task-card__timer-metric--clickable'}" data-card-actual-picker-btn>
           <span class="task-card__timer-label">ACTUAL</span>
-          <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${actualDisplay}</span>
+          <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${timerActualDisplay}</span>
         </div>
-        <div class="task-card__timer-metric task-card__timer-metric--clickable" data-card-planned-picker-btn>
+        <div class="task-card__timer-metric${hasPastTimebox ? '' : ' task-card__timer-metric--clickable'}"${hasPastTimebox ? '' : ' data-card-planned-picker-btn'}>
           <span class="task-card__timer-label">PLANNED</span>
           <span class="task-card__timer-value">${plannedDisplay}</span>
         </div>
@@ -4128,27 +4542,56 @@ function renderTaskCard(task) {
     </div>
   ` : '';
 
+  // Rollover badge
+  const rolloverCount = columnIsoDate ? getRolloverCount(task, columnIsoDate) : 0;
+  const rolloverBadge = rolloverCount > 0
+    ? `<span class="task-card__rollover-badge" title="Rolled over ${rolloverCount} day${rolloverCount > 1 ? 's' : ''}">
+         <i data-lucide="rotate-cw" style="transform: rotate(105deg)"></i>
+         <span class="rollover-count">${rolloverCount}</span>
+       </span>`
+    : '';
+
+  // Complete button logic for past columns
+  let completeBtn;
+  if (isPast) {
+    if (task.completedOnDate === columnIsoDate) {
+      completeBtn = `<button class="task-card__complete-btn task-card__complete-btn--past-complete" aria-label="Uncomplete and move to today" data-past-uncomplete>
+        <span class="complete-circle complete-circle--done">${CHECK_SVG}</span>
+      </button>`;
+    } else {
+      completeBtn = '';
+    }
+  } else {
+    completeBtn = `<button class="task-card__complete-btn" aria-label="Mark complete">
+      <span class="complete-circle">${CHECK_SVG}</span>
+    </button>`;
+  }
+
+  // Hide hover icons for past columns
+  const hoverIcons = isPast ? '' : `
+    <button class="task-card__hover-icon" data-card-date-btn aria-label="Set start date" type="button">
+      <i data-lucide="calendar"></i>
+    </button>
+    <button class="task-card__hover-icon" data-card-clock-btn aria-label="Timer" type="button">
+      <i data-lucide="clock"></i>
+    </button>
+  `;
+
   card.innerHTML = `
     <div class="task-card__header">
       <div class="task-card__title-wrap">
-        ${scheduledPill}
+        ${scheduledPills}
         <span class="task-card__title">${escapeHtml(task.title)}</span>
       </div>
       ${timeBadge}
     </div>
     ${renderSubtasks(task.subtasks, task.id)}
     <div class="task-card__footer">
-      <button class="task-card__complete-btn" aria-label="Mark complete">
-        <span class="complete-circle">${CHECK_SVG}</span>
-      </button>
+      ${completeBtn}
+      ${rolloverBadge}
       ${renderIntegrationIcon(task.integrationColor)}
       ${task.dueDate ? `<span class="task-card__due${task.dueDate < getTodayISO() ? ' task-card__due--overdue' : ''}"><i data-lucide="flag"></i>${formatDateDisplay(task.dueDate)}</span>` : ''}
-      <button class="task-card__hover-icon" data-card-date-btn aria-label="Set start date" type="button">
-        <i data-lucide="calendar"></i>
-      </button>
-      <button class="task-card__hover-icon" data-card-clock-btn aria-label="Timer" type="button">
-        <i data-lucide="clock"></i>
-      </button>
+      ${hoverIcons}
       ${renderTaskTag(task.tag)}
     </div>
     ${timerSection}
@@ -4177,7 +4620,15 @@ function renderColumn(column) {
 
   const taskList = colEl.querySelector('.task-list');
   taskList.innerHTML = '';
-  column.tasks.forEach(task => taskList.appendChild(renderTaskCard(task)));
+  column.tasks.forEach(task => taskList.appendChild(renderTaskCard(task, column.isoDate, false)));
+
+  // Render ghost cards for past columns
+  const todayISO = getTodayISO();
+  if (column.isoDate < todayISO) {
+    const ghosts = getGhostTasksForDate(column.isoDate);
+    ghosts.forEach(task => taskList.appendChild(renderTaskCard(task, column.isoDate, true)));
+  }
+
   if (typeof lucide !== 'undefined') lucide.createIcons();
   if (dailyPlanningState.isActive) {
     renderDailyPlanningPanel();
@@ -4211,6 +4662,52 @@ function getCalendarEventsForDate(isoDate) {
   }
 
   return [...stored, ...dynamic];
+}
+
+// Find a calendar event by ID — checks stored events first, then dynamic (dyn-) events
+function findCalendarEventById(eventId) {
+  const stored = state.calendarEvents.find(ev => ev.id === eventId);
+  if (stored) return stored;
+  // Dynamic events have ids like 'dyn-<taskId>' and aren't stored in state
+  if (eventId && eventId.startsWith('dyn-')) {
+    const taskId = eventId.slice(4);
+    // Rebuild the dynamic event from the task's scheduledTime
+    for (const col of state.columns) {
+      const task = col.tasks.find(t => t.id === taskId);
+      if (task && task.scheduledTime) {
+        const offset = scheduledTimeToOffset(task.scheduledTime);
+        const duration = (task.timeEstimateMinutes || 30) / 60;
+        return {
+          id: eventId,
+          title: task.title,
+          colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+          offset,
+          duration,
+          taskId: task.id,
+          date: col.isoDate,
+          _dynamic: true
+        };
+      }
+    }
+  }
+  return null;
+}
+
+// Promote a dynamic event to a stored event in state.calendarEvents
+function promoteDynamicEvent(evt) {
+  if (!evt || !evt._dynamic) return evt;
+  const stored = {
+    id: 'evt-' + uid(),
+    title: evt.title,
+    colorClass: evt.colorClass,
+    offset: evt.offset,
+    duration: evt.duration,
+    taskId: evt.taskId,
+    date: evt.date,
+    zOrder: ++calZCounter
+  };
+  state.calendarEvents.push(stored);
+  return stored;
 }
 
 function renderCalendarEvents() {
@@ -4654,6 +5151,16 @@ function moveTaskToDate(taskId, targetIsoDate) {
   sourceCol.tasks.splice(ctx.index, 1);
   targetCol.tasks.push(ctx.task);
 
+  ensureTaskRolloverState(ctx.task);
+  ctx.task.startDate = targetIsoDate;
+
+  // Moving to a past date completes the task as of that date
+  const todayISO = getTodayISO();
+  if (targetIsoDate < todayISO) {
+    completeTaskAsOf(ctx.task, targetIsoDate);
+    moveCompletedTasksToBottom(targetCol);
+  }
+
   renderColumn(sourceCol);
   renderColumn(targetCol);
 }
@@ -4701,7 +5208,11 @@ function commitAddTask(colEl) {
     tag: null,
     integrationColor: null,
     subtasks: [],
-    showSubtasks: false
+    showSubtasks: false,
+    startDate: column.isoDate,
+    dailyActualTime: {},
+    subtaskCompletionsByDate: {},
+    completedOnDate: null
   });
 
   hideAddTaskInput(colEl);
@@ -4777,11 +5288,22 @@ function attachEvents() {
     clearCalendarDragState();
 
     dragState.taskId      = card.dataset.taskId;
-    dragState.sourceColId = colEl.dataset.colId;
+    dragState.isGhost     = card.dataset.ghostDate ? true : false;
+    dragState.ghostVisualColId = null;
 
-    const col = state.columns.find(c => c.id === dragState.sourceColId);
-    if (!col) return false;
-    dragState.sourceIndex = col.tasks.findIndex(t => t.id === dragState.taskId);
+    // For ghost cards, find the actual column where the task lives
+    if (dragState.isGhost) {
+      const ctx = findTaskContext(dragState.taskId);
+      if (!ctx) return false;
+      dragState.sourceColId = ctx.column.id;
+      dragState.sourceIndex = ctx.index;
+      dragState.ghostVisualColId = colEl.dataset.colId;
+    } else {
+      dragState.sourceColId = colEl.dataset.colId;
+      const col = state.columns.find(c => c.id === dragState.sourceColId);
+      if (!col) return false;
+      dragState.sourceIndex = col.tasks.findIndex(t => t.id === dragState.taskId);
+    }
 
     if (taskDropPlaceholder && taskDropPlaceholder.parentElement) {
       taskDropPlaceholder.remove();
@@ -4905,32 +5427,28 @@ function attachEvents() {
       ? task.timeEstimateMinutes / 60
       : 0.5;
     const offset = yToOffset(clientY, timeGrid, duration);
+    const visibleDate = getFirstVisibleDate();
 
-    task.scheduledTime = offsetToScheduledTime(offset);
+    // Always create a new stored timebox event (supports multiple per task per day)
+    state.calendarEvents.push({
+      id: 'evt-' + uid(),
+      title: task.title,
+      colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+      offset,
+      duration,
+      taskId: task.id,
+      date: visibleDate,
+      zOrder: ++calZCounter
+    });
 
-    const existing = state.calendarEvents.find(ev => ev.taskId === task.id);
-    if (existing) {
-      existing.offset = offset;
-      existing.duration = duration;
-      existing.title = task.title;
-      existing.colorClass = getTaskEventColorClass(task, existing.colorClass);
-      existing.zOrder = ++calZCounter;
-    } else {
-      const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
-      state.calendarEvents.push({
-        id: 'evt-' + uid(),
-        title: task.title,
-        colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
-        offset,
-        duration,
-        taskId: task.id,
-        date: col ? col.isoDate : getFirstVisibleDate(),
-        zOrder: ++calZCounter
-      });
-    }
+    // Clear scheduledTime since the task now has a committed stored event
+    task.scheduledTime = null;
 
-    const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
-    if (col) renderColumn(col);
+    const homeCol = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+
+    if (homeCol) renderColumn(homeCol);
+    // Re-render ghost columns — adding a calendar event may create a ghost card
+    rerenderGhostColumns(task);
     renderCalendarEvents();
     return true;
   }
@@ -4955,11 +5473,53 @@ function attachEvents() {
     if (taskIndex === -1) return false;
 
     const [task] = sourceCol.tasks.splice(taskIndex, 1);
+    const todayISO = getTodayISO();
+
+    // Dropping onto a past column → move there and mark complete as of that date
+    if (targetCol.isoDate < todayISO && sourceCol.isoDate >= todayISO) {
+      targetCol.tasks.push(task);
+      completeTaskAsOf(task, targetCol.isoDate);
+      task.startDate = targetCol.isoDate;
+      moveCompletedTasksToBottom(targetCol);
+      cleanupTaskDropVisuals();
+      renderColumn(sourceCol);
+      renderColumn(targetCol);
+      setTimeout(finalizeTaskDragState, 0);
+      return true;
+    }
+
+    // Dropping from past to current/future → uncomplete, set new startDate
+    if (sourceCol.isoDate < todayISO && targetCol.isoDate >= todayISO) {
+      targetCol.tasks.splice(insertIndex, 0, task);
+      ensureTaskRolloverState(task);
+      task.complete = false;
+      task.completedOnDate = null;
+      task.startDate = targetCol.isoDate;
+      // Clear scheduledTime so it doesn't create a phantom timebox on the new date
+      task.scheduledTime = null;
+      cleanupTaskDropVisuals();
+      renderColumn(sourceCol);
+      renderColumn(targetCol);
+      renderCalendarEvents();
+      setTimeout(finalizeTaskDragState, 0);
+      return true;
+    }
+
     targetCol.tasks.splice(insertIndex, 0, task);
+
+    if (sourceCol !== targetCol) {
+      ensureTaskRolloverState(task);
+      task.startDate = targetCol.isoDate;
+    }
 
     cleanupTaskDropVisuals();
     renderColumn(sourceCol);
     if (sourceCol !== targetCol) renderColumn(targetCol);
+    // Re-render ghost visual column if dragging a ghost card
+    if (dragState.ghostVisualColId) {
+      const ghostVisualCol = state.columns.find(c => c.id === dragState.ghostVisualColId);
+      if (ghostVisualCol && ghostVisualCol !== sourceCol && ghostVisualCol !== targetCol) renderColumn(ghostVisualCol);
+    }
     setTimeout(finalizeTaskDragState, 0);
     return true;
   }
@@ -4992,17 +5552,52 @@ function attachEvents() {
           const incompleteTasks = col.tasks.filter(t => !t.complete);
           task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
           task.complete = true;
-          if (task.subtasks) task.subtasks.forEach(s => { s.done = true; });
+          ensureTaskRolloverState(task);
+          task.completedOnDate = getTodayISO();
+          if (task.subtasks) {
+            task.subtasks.forEach(s => {
+              if (!s.done) {
+                s.done = true;
+                if (!task.subtaskCompletionsByDate[getTodayISO()]) task.subtaskCompletionsByDate[getTodayISO()] = [];
+                if (!task.subtaskCompletionsByDate[getTodayISO()].includes(s.id)) {
+                  task.subtaskCompletionsByDate[getTodayISO()].push(s.id);
+                }
+              }
+            });
+          }
           // Auto-set actual time to planned time when completing without actual time
           if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
             task.actualTimeSeconds = task.timeEstimateMinutes * 60;
           }
           moveCompletedTasksToBottom(col);
         } else {
+          // Handle past card uncomplete
+          if (btn.hasAttribute('data-past-uncomplete')) {
+            task.complete = false;
+            ensureTaskRolloverState(task);
+            task.completedOnDate = null;
+            // Clear scheduledTime so it doesn't create a phantom timebox on today
+            task.scheduledTime = null;
+            // Move to today
+            const taskIndex = col.tasks.findIndex(t => t.id === task.id);
+            if (taskIndex !== -1) {
+              col.tasks.splice(taskIndex, 1);
+              const todayCol = ensureColumnForDate(getTodayISO());
+              todayCol.tasks.push(task);
+              task.startDate = getTodayISO();
+              renderColumn(col);
+              renderColumn(todayCol);
+              renderCalendarEvents();
+            }
+            break;
+          }
+
           const taskIndex = col.tasks.findIndex(t => t.id === task.id);
           if (taskIndex === -1) break;
 
           task.complete = false;
+          ensureTaskRolloverState(task);
+          task.completedOnDate = null;
           const [uncompletedTask] = col.tasks.splice(taskIndex, 1);
 
           const firstCompletedIndex = col.tasks.findIndex(t => t.complete);
@@ -5041,6 +5636,20 @@ function attachEvents() {
 
     subtask.done = !subtask.done;
     subtask.deleteReady = false;
+    ensureTaskRolloverState(ctx.task);
+    const todayISO = getTodayISO();
+    if (subtask.done) {
+      if (!ctx.task.subtaskCompletionsByDate[todayISO]) ctx.task.subtaskCompletionsByDate[todayISO] = [];
+      if (!ctx.task.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
+        ctx.task.subtaskCompletionsByDate[todayISO].push(subtask.id);
+      }
+    } else {
+      for (const date in ctx.task.subtaskCompletionsByDate) {
+        const arr = ctx.task.subtaskCompletionsByDate[date];
+        const idx = arr.indexOf(subtask.id);
+        if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete ctx.task.subtaskCompletionsByDate[date]; }
+      }
+    }
     renderColumn(ctx.column);
   });
 
@@ -5173,14 +5782,30 @@ function attachEvents() {
     const card = badge.closest('.task-card');
     if (!card) return;
     const taskId = card.dataset.taskId;
+
+    const isPastCard = card.dataset.isPast === 'true';
+    const columnDate = card.dataset.columnDate;
+
     if (cardTimerExpanded.has(taskId)) {
+      if (cardPickerState) closeCardPicker();
       cardTimerExpanded.delete(taskId);
     } else {
       cardTimerExpanded.add(taskId);
     }
-    const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+    // Re-render the column that contains this card
+    const col = columnDate
+      ? state.columns.find(c => c.isoDate === columnDate)
+      : state.columns.find(c => c.tasks.some(t => t.id === taskId));
     if (col) renderColumn(col);
     if (typeof lucide !== 'undefined') lucide.createIcons();
+
+    // On past cards, also open the actual time picker after expanding
+    if (isPastCard && cardTimerExpanded.has(taskId) && columnDate) {
+      setTimeout(() => {
+        actualPickerDateScope = columnDate;
+        openCardPicker(taskId, 'actual');
+      }, 0);
+    }
   });
 
   // ── Kanban card timer pause/play ──────────
@@ -5230,6 +5855,10 @@ function attachEvents() {
       if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'actual') {
         closeCardPicker();
       } else {
+        // Scope actual picker to column date for past cards
+        if (card.dataset.isPast === 'true' && card.dataset.columnDate) {
+          actualPickerDateScope = card.dataset.columnDate;
+        }
         openCardPicker(taskId, 'actual');
       }
       return;
@@ -5260,6 +5889,9 @@ function attachEvents() {
       if (cardPickerState && cardPickerState.subtaskId === subtaskId && cardPickerState.type === 'actual') {
         closeCardPicker();
       } else {
+        if (card.dataset.isPast === 'true' && card.dataset.columnDate) {
+          actualPickerDateScope = card.dataset.columnDate;
+        }
         openCardPicker(taskId, 'actual', subtaskId);
       }
       return;
@@ -5707,6 +6339,20 @@ function attachTaskModalEvents() {
       if (!subtask) return;
       subtask.done = !subtask.done;
       subtask.deleteReady = false;
+      ensureTaskRolloverState(ctx.task);
+      const todayISO = getTodayISO();
+      if (subtask.done) {
+        if (!ctx.task.subtaskCompletionsByDate[todayISO]) ctx.task.subtaskCompletionsByDate[todayISO] = [];
+        if (!ctx.task.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
+          ctx.task.subtaskCompletionsByDate[todayISO].push(subtask.id);
+        }
+      } else {
+        for (const date in ctx.task.subtaskCompletionsByDate) {
+          const arr = ctx.task.subtaskCompletionsByDate[date];
+          const idx = arr.indexOf(subtask.id);
+          if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete ctx.task.subtaskCompletionsByDate[date]; }
+        }
+      }
       subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
       renderColumn(ctx.column);
       return;
@@ -5781,7 +6427,20 @@ function attachTaskModalEvents() {
       }
       if (!task) return;
       task.complete = !task.complete;
-      if (task.complete && task.subtasks) task.subtasks.forEach(s => { s.done = true; });
+      ensureTaskRolloverState(task);
+      task.completedOnDate = task.complete ? getTodayISO() : null;
+      if (task.complete && task.subtasks) {
+        const todayISO = getTodayISO();
+        task.subtasks.forEach(s => {
+          if (!s.done) {
+            s.done = true;
+            if (!task.subtaskCompletionsByDate[todayISO]) task.subtaskCompletionsByDate[todayISO] = [];
+            if (!task.subtaskCompletionsByDate[todayISO].includes(s.id)) {
+              task.subtaskCompletionsByDate[todayISO].push(s.id);
+            }
+          }
+        });
+      }
       // Auto-set actual time to planned time when completing without actual time
       if (task.complete && !task.actualTimeSeconds && task.timeEstimateMinutes) {
         task.ownActualTimeSeconds = task.timeEstimateMinutes * 60;
@@ -5964,6 +6623,45 @@ function attachTaskModalEvents() {
       }
       if (e.target.closest('[data-actual-clear]')) {
         applyActualTime(0);
+        return;
+      }
+      const historyDeleteBtn = e.target.closest('[data-delete-history]');
+      if (historyDeleteBtn) {
+        const dateToDelete = historyDeleteBtn.dataset.deleteHistory;
+        const ctx = findTaskContext(openModalTaskId);
+        if (ctx) {
+          ensureTaskRolloverState(ctx.task);
+          const entry = ctx.task.dailyActualTime[dateToDelete];
+          if (entry) {
+            // Subtract from aggregate totals
+            const subtask = actualPickerSubtaskId ? findSubtask(ctx.task, actualPickerSubtaskId) : null;
+            if (!subtask) {
+              ctx.task.ownActualTimeSeconds = Math.max(0, (ctx.task.ownActualTimeSeconds || 0) - (entry.ownSeconds || 0));
+              ctx.task.subtasks.forEach(s => {
+                if (entry.subtasks && entry.subtasks[s.id]) {
+                  s.actualTimeSeconds = Math.max(0, (s.actualTimeSeconds || 0) - (entry.subtasks[s.id] || 0));
+                }
+              });
+            }
+            delete ctx.task.dailyActualTime[dateToDelete];
+            syncTaskAggregateTimes(ctx.task);
+          }
+          renderActualPickerInModal();
+          // Update the actual metric display
+          const overlay = document.getElementById('task-modal-overlay');
+          const parentMetricEl = overlay.querySelector('[data-actual-btn] .task-modal__metric-value');
+          if (parentMetricEl) {
+            if (ctx.task.actualTimeSeconds) {
+              parentMetricEl.textContent = formatMinutes(Math.floor(ctx.task.actualTimeSeconds / 60));
+              parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--set';
+            } else {
+              parentMetricEl.textContent = '--:--';
+              parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--placeholder';
+            }
+          }
+          renderColumn(ctx.column);
+          rerenderGhostColumns(ctx.task);
+        }
         return;
       }
       return;
@@ -6528,7 +7226,7 @@ function attachCalendarEvents() {
   const calDragLine = document.getElementById('cal-drag-line');
 
   function bringEventToFront(eventId, el) {
-    const evt = state.calendarEvents.find(ev => ev.id === eventId);
+    const evt = findCalendarEventById(eventId);
     if (!evt) return;
     evt.zOrder = ++calZCounter;
     if (el) el.style.zIndex = String(evt.zOrder);
@@ -6555,8 +7253,16 @@ function attachCalendarEvents() {
     const evEl = e.target.closest('.cal-event--movable:not(#cal-event-ghost)');
     if (!evEl) return;
 
-    const evt = state.calendarEvents.find(ev => ev.id === evEl.dataset.eventId);
+    let evt = findCalendarEventById(evEl.dataset.eventId);
     if (!evt) return;
+
+    // Promote dynamic events so mutations persist
+    if (evt._dynamic) {
+      evt = promoteDynamicEvent(evt);
+      const task = findTaskById(evt.taskId);
+      if (task) task.scheduledTime = null;
+      evEl.dataset.eventId = evt.id;
+    }
 
     e.preventDefault();
     const gridTop = timeGrid.getBoundingClientRect().top;
@@ -6577,7 +7283,7 @@ function attachCalendarEvents() {
   document.addEventListener('mousemove', e => {
     if (!calPointerDrag) return;
 
-    const evt = state.calendarEvents.find(ev => ev.id === calPointerDrag.eventId);
+    const evt = findCalendarEventById(calPointerDrag.eventId);
     if (!evt) return;
 
     e.preventDefault();
@@ -6595,7 +7301,7 @@ function attachCalendarEvents() {
     calPointerDrag = null;
     if (sourceEl) sourceEl.classList.remove('cal-event--dragging');
 
-    const evt = state.calendarEvents.find(ev => ev.id === eventId);
+    const evt = findCalendarEventById(eventId);
     calDragLine.hidden = true;
     if (!evt) return;
 
@@ -6607,16 +7313,29 @@ function attachCalendarEvents() {
       evt.offset = offset;
       if (evt.taskId) {
         const task = findTaskById(evt.taskId);
-        if (task) task.scheduledTime = offsetToScheduledTime(offset);
-        const col = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
-        if (col) renderColumn(col);
+        if (task) {
+          // Only update scheduledTime if the event is on the task's home column date
+          const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
+          if (homeCol && evt.date === homeCol.isoDate) {
+            task.scheduledTime = offsetToScheduledTime(offset);
+          }
+          if (homeCol) renderColumn(homeCol);
+        }
       }
     } else if (evt.taskId) {
       const task = findTaskById(evt.taskId);
-      if (task) task.scheduledTime = null;
-      const col = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
-      if (col) renderColumn(col);
+      const removedEventDate = evt.date;
       state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
+      if (task) {
+        // Only clear scheduledTime if the removed event was on the task's home column date
+        const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
+        if (homeCol && removedEventDate === homeCol.isoDate) {
+          task.scheduledTime = null;
+        }
+        if (homeCol) renderColumn(homeCol);
+        // Re-render ghost columns — removing the event may remove a ghost card
+        rerenderGhostColumns(task);
+      }
     }
 
     renderCalendarEvents();
@@ -6680,10 +7399,16 @@ function attachCalendarEvents() {
       ? task.timeEstimateMinutes / 60
       : 0.5;
     const offset   = yToOffset(e.clientY, timeGrid, duration);
+    const visibleDate = getFirstVisibleDate();
 
-    task.scheduledTime = offsetToScheduledTime(offset);
+    const homeCol = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+    // Only set scheduledTime if the calendar is showing the task's home column date
+    if (homeCol && visibleDate === homeCol.isoDate) {
+      task.scheduledTime = offsetToScheduledTime(offset);
+    }
 
-    const existing = state.calendarEvents.find(ev => ev.taskId === task.id);
+    // Find existing event for this task on the visible date
+    const existing = state.calendarEvents.find(ev => ev.taskId === task.id && ev.date === visibleDate);
     if (existing) {
       existing.offset   = offset;
       existing.duration = duration;
@@ -6698,12 +7423,13 @@ function attachCalendarEvents() {
         offset,
         duration,
         taskId:     task.id,
+        date:       visibleDate,
         zOrder:     ++calZCounter
       });
     }
 
-    const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
-    if (col) renderColumn(col);
+    if (homeCol) renderColumn(homeCol);
+    rerenderGhostColumns(task);
 
     setTimeout(renderCalendarEvents, 0);
   });
@@ -6722,8 +7448,17 @@ function attachCalendarResizeEvents() {
     if (!handle) return;
     const eventEl = handle.closest('.cal-event');
     const eventId = eventEl.dataset.eventId;
-    const evt = state.calendarEvents.find(ev => ev.id === eventId);
+    let evt = findCalendarEventById(eventId);
     if (!evt) return;
+
+    // If this is a dynamic event, promote it to a stored event so mutations persist
+    if (evt._dynamic) {
+      evt = promoteDynamicEvent(evt);
+      // Clear scheduledTime since we now have a stored event
+      const task = findTaskById(evt.taskId);
+      if (task) task.scheduledTime = null;
+      eventEl.dataset.eventId = evt.id;
+    }
 
     e.preventDefault();
     e.stopPropagation();
@@ -6773,10 +7508,32 @@ function attachCalendarResizeEvents() {
       if (evt.taskId) {
         const task = findTaskById(evt.taskId);
         if (task) {
-          task.timeEstimateMinutes = Math.round(evt.duration * 60);
-          task.scheduledTime = offsetToScheduledTime(evt.offset);
-          const col = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
-          if (col) renderColumn(col);
+          const todayISO = getTodayISO();
+          const isPastEvent = evt.date < todayISO;
+
+          if (isPastEvent) {
+            // Past timebox resize: only update the event duration (already done above).
+            // The past card reads planned time from the timebox, so no need to touch ownPlannedMinutes.
+            // Just re-render the past column to reflect the new duration.
+            const eventCol = state.columns.find(c => c.isoDate === evt.date);
+            if (eventCol) renderColumn(eventCol);
+          } else {
+            // Current/future event: update ownPlannedMinutes to keep card in sync
+            ensureTaskTimeState(task);
+            const newTotalMinutes = Math.round(evt.duration * 60);
+            const subtaskPlanned = (task.subtasks || []).reduce((sum, s) => {
+              ensureSubtaskTimeState(s);
+              return sum + (s.plannedMinutes || 0);
+            }, 0);
+            task.ownPlannedMinutes = Math.max(0, newTotalMinutes - subtaskPlanned);
+            syncTaskAggregateTimes(task);
+            // Update scheduledTime only if event is on the task's current home column
+            const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
+            if (homeCol && evt.date === homeCol.isoDate) {
+              task.scheduledTime = offsetToScheduledTime(evt.offset);
+            }
+            if (homeCol) renderColumn(homeCol);
+          }
         }
       }
 
@@ -6951,6 +7708,7 @@ document.addEventListener('keydown', e => {
 document.addEventListener('DOMContentLoaded', () => {
   initializeDayWindow();
   initializeTaskTimeState();
+  performRollover();
   renderAllColumns();
   initializeTodayFirstColumnPosition();
   renderCalendarEvents();

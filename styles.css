@@ -753,6 +753,14 @@ button { cursor: pointer; }
   min-width: 0;
 }
 
+.task-card__pills-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
 .task-card__scheduled-pill {
   display: inline-flex;
   align-items: center;
@@ -764,6 +772,14 @@ button { cursor: pointer; }
   border-radius: 4px;
   white-space: nowrap;
   width: fit-content;
+}
+
+.task-card__scheduled-pill--more {
+  font-size: 10px;
+  font-weight: 600;
+  background: none;
+  color: #999;
+  padding: 2px 0;
 }
 
 .task-card__title {
@@ -846,11 +862,11 @@ button { cursor: pointer; }
   font-size: 12px;
   font-weight: 500;
   color: #787878;
-  font-variant-numeric: tabular-nums;
 }
 
 .task-card__timer-value--running {
   color: #4dcd7d;
+  font-variant-numeric: tabular-nums;
 }
 
 .task-card__timer-metric--clickable {
@@ -1002,6 +1018,37 @@ button { cursor: pointer; }
 
 .task-card--complete .task-card__complete-btn .complete-circle svg {
   color: #ffffff;
+}
+
+/* Completed past card checkmark (green filled) */
+.complete-circle--done {
+  background: var(--color-complete-fill);
+  border-color: var(--color-complete-fill);
+}
+
+.complete-circle--done svg {
+  color: #ffffff;
+}
+
+/* Rollover badge */
+.task-card__rollover-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: #b4b4b4;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.task-card__rollover-badge i,
+.task-card__rollover-badge svg {
+  width: 13px;
+  height: 13px;
+}
+
+.rollover-count {
+  line-height: 1;
 }
 
 /* Hover action icons (calendar, clock) */
@@ -2164,6 +2211,42 @@ body.is-workday-marker-dragging {
   flex-shrink: 0;
 }
 
+/* Timebox entries section */
+.task-modal__timebox-section {
+  padding: 16px 0 4px;
+  margin-left: 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.task-modal__timebox-heading {
+  font-size: 12px;
+  font-weight: 700;
+  color: #787878;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.task-modal__timebox-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.task-modal__timebox-date,
+.task-modal__timebox-time {
+  font-size: 14px;
+  font-weight: 500;
+  color: #413f39;
+}
+
+.task-modal__timebox-duration {
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+}
+
 .task-modal__timeline {
   padding-top: 18px;
   min-height: 0;
@@ -2618,6 +2701,40 @@ body.modal-open {
 
 .planned-picker__clear:hover {
   background: #f5f5f5;
+}
+
+/* Actual time history section */
+.actual-picker__history-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 15px;
+  font-size: 13px;
+}
+
+.actual-picker__history-time {
+  font-weight: 600;
+  color: #333;
+  min-width: 32px;
+}
+
+.actual-picker__history-date {
+  color: #999;
+  flex: 1;
+}
+
+.actual-picker__history-delete {
+  background: none;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.actual-picker__history-delete:hover {
+  color: #e74c3c;
 }
 
 /* Time entry mode */
