@@ -21,6 +21,11 @@ const DEFAULT_CALENDAR_TOTAL_HOURS = 24;
 const DEFAULT_HOUR_HEIGHT_PX = 60;
 const DEFAULT_WORKDAY_START_HOUR = 8;
 const DEFAULT_WORKDAY_END_HOUR = 17;
+const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
+const userSettings = {
+  // TODO: wire to user settings storage/UI
+  workingDays: DEFAULT_WORKING_DAYS.slice()
+};
 const WORKDAY_SCROLL_LEAD_HOURS = 1;
 const MIN_CALENDAR_ZOOM = 1;
 const MAX_CALENDAR_ZOOM = 3;
@@ -201,6 +206,11 @@ const state = {
     startOffset: DEFAULT_WORKDAY_START_HOUR,
     endOffset: DEFAULT_WORKDAY_END_HOUR
   },
+  workdayDefault: {
+    startOffset: DEFAULT_WORKDAY_START_HOUR,
+    endOffset: DEFAULT_WORKDAY_END_HOUR
+  },
+  workdayByDate: {},
 
   calendarZoom: DEFAULT_CALENDAR_ZOOM,
   dayWindow: {
@@ -227,7 +237,7 @@ const DAILY_PLANNING_DEFER_MODES = {
   NEXT_MONDAY: 'next_monday'
 };
 
-const DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME = '17:00';
+const DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME = '16:55';
 
 const dailyPlanningState = {
   isActive: false,
@@ -292,6 +302,41 @@ function daysBetween(isoA, isoB) {
   return Math.round((b - a) / (1000 * 60 * 60 * 24));
 }
 
+function getWorkingDaysSet() {
+  const raw = Array.isArray(userSettings.workingDays) ? userSettings.workingDays : DEFAULT_WORKING_DAYS;
+  const cleaned = raw.filter(d => Number.isInteger(d) && d >= 0 && d <= 6);
+  return new Set(cleaned.length > 0 ? cleaned : DEFAULT_WORKING_DAYS);
+}
+
+function isWorkingDay(isoDate) {
+  const day = parseISO(isoDate).getDay();
+  return getWorkingDaysSet().has(day);
+}
+
+function getNextWorkingDayOnOrAfter(isoDate) {
+  const workingDays = getWorkingDaysSet();
+  if (workingDays.size === 0) return isoDate;
+  let cursor = isoDate;
+  for (let i = 0; i < 14; i++) { // guard against malformed settings
+    if (workingDays.has(parseISO(cursor).getDay())) return cursor;
+    cursor = addDays(cursor, 1);
+  }
+  return isoDate;
+}
+
+function countWorkingDaysBetween(startISO, endISO) {
+  if (!startISO || !endISO || startISO >= endISO) return 0;
+  const workingDays = getWorkingDaysSet();
+  if (workingDays.size === 0) return Math.max(0, daysBetween(startISO, endISO));
+  let count = 0;
+  let cursor = addDays(startISO, 1);
+  while (cursor <= endISO) {
+    if (workingDays.has(parseISO(cursor).getDay())) count++;
+    cursor = addDays(cursor, 1);
+  }
+  return count;
+}
+
 function isIsoInRange(isoDate, startISO, endISO) {
   return isoDate >= startISO && isoDate <= endISO;
 }
@@ -335,6 +380,11 @@ function initializeDayWindow() {
   ensureColumnsForWindow(state.dayWindow.startISO, state.dayWindow.endISO);
 }
 
+function getRolloverTargetDate(task, todayISO) {
+  if (!isWorkTask(task)) return todayISO;
+  return getNextWorkingDayOnOrAfter(todayISO);
+}
+
 function performRollover() {
   const todayISO = getTodayISO();
   const todayCol = ensureColumnForDate(todayISO);
@@ -352,7 +402,9 @@ function performRollover() {
       task.scheduledTime = null;
       // Leave stored calendar events on the old date as-is (historical record)
       col.tasks.splice(i, 1);
-      todayCol.tasks.push(task);
+      const targetISO = getRolloverTargetDate(task, todayISO);
+      const targetCol = targetISO === todayISO ? todayCol : ensureColumnForDate(targetISO);
+      targetCol.tasks.push(task);
     }
   }
 }
@@ -523,7 +575,9 @@ function ensureTaskRolloverState(task) {
 function getRolloverCount(task, columnIsoDate) {
   ensureTaskRolloverState(task);
   if (!task.startDate || !columnIsoDate) return 0;
-  const count = daysBetween(task.startDate, columnIsoDate);
+  const count = isWorkTask(task)
+    ? countWorkingDaysBetween(task.startDate, columnIsoDate)
+    : daysBetween(task.startDate, columnIsoDate);
   return count > 0 ? count : 0;
 }
 
@@ -750,6 +804,51 @@ function getRelativeDateLabel(isoDate) {
   return formatDateDisplay(isoDate);
 }
 
+function getOrdinalSuffix(day) {
+  const mod100 = day % 100;
+  if (mod100 >= 11 && mod100 <= 13) return 'th';
+  switch (day % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
+}
+
+function formatMonthDayOrdinal(isoDate) {
+  const d = parseISO(isoDate);
+  const months = ['January','February','March','April','May','June',
+    'July','August','September','October','November','December'];
+  const day = d.getDate();
+  return `${months[d.getMonth()]} ${day}${getOrdinalSuffix(day)}`;
+}
+
+function getWeekStartISO(isoDate) {
+  const d = parseISO(isoDate);
+  const mondayIndex = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - mondayIndex);
+  return toISO(d);
+}
+
+function isSameWeek(isoDate, todayISO) {
+  return getWeekStartISO(isoDate) === getWeekStartISO(todayISO);
+}
+
+function getDailyPlanningDateLabel(isoDate) {
+  const todayISO = getTodayISO();
+  if (isoDate === todayISO) return 'Today';
+  if (isoDate === addDays(todayISO, 1)) return 'Tomorrow';
+  if (isSameWeek(isoDate, todayISO)) return getDayName(isoDate);
+  return formatMonthDayOrdinal(isoDate);
+}
+
+function getDailyPlanningDateLabelForSentence(isoDate) {
+  const label = getDailyPlanningDateLabel(isoDate);
+  if (label === 'Today') return 'today';
+  if (label === 'Tomorrow') return 'tomorrow';
+  return label;
+}
+
 function getNextMondayISO(isoDate) {
   const dayIndex = parseISO(isoDate).getDay(); // 0 = Sunday ... 6 = Saturday
   let delta = (8 - dayIndex) % 7;
@@ -772,26 +871,60 @@ function getDailyPlanningNextWeekDate(isoDate) {
   }
 }
 
+function getWorkdayBoundsForDate(isoDate) {
+  const override = state.workdayByDate[isoDate];
+  if (override) {
+    return {
+      startOffset: override.startOffset,
+      endOffset: override.endOffset
+    };
+  }
+  if (state.workdayDefault) {
+    return {
+      startOffset: state.workdayDefault.startOffset,
+      endOffset: state.workdayDefault.endOffset
+    };
+  }
+  return {
+    startOffset: state.workday.startOffset,
+    endOffset: state.workday.endOffset
+  };
+}
+
+function applyWorkdayBoundsForDate(isoDate) {
+  if (!isoDate) return;
+  const bounds = getWorkdayBoundsForDate(isoDate);
+  state.workday.startOffset = bounds.startOffset;
+  state.workday.endOffset = bounds.endOffset;
+  renderWorkdayMarkers();
+}
+
+function storeWorkdayOverrideForDate(isoDate) {
+  if (!isoDate) return;
+  state.workdayByDate[isoDate] = {
+    startOffset: state.workday.startOffset,
+    endOffset: state.workday.endOffset
+  };
+}
+
 function getDailyPlanningCapacityMinutes(isoDate) {
-  const draft = ensureDailyPlanningRunDraft();
   const specific = dailyPlanningState.capacityConfig.perDayOverrides[isoDate];
   if (Number.isFinite(specific) && specific > 0) return specific;
 
   if (dailyPlanningState.capacityConfig.mode === 'remaining_before_shutdown') {
-    const shutdownTime = getDailyPlanningShutdownTimeForDate(isoDate, draft.shutdownTime);
-    const [hRaw, mRaw] = shutdownTime.split(':').map(Number);
-    const shutdownHour = Math.max(0, Math.min(23, hRaw));
-    const shutdownMinute = Math.max(0, Math.min(59, mRaw));
+    const bounds = getWorkdayBoundsForDate(isoDate);
+    const startMinutes = Math.max(0, Math.round(bounds.startOffset * 60));
+    const endMinutes = Math.max(startMinutes, Math.round(bounds.endOffset * 60));
     const todayISO = getTodayISO();
 
     if (isoDate === todayISO) {
       const now = new Date();
-      const shutdown = new Date();
-      shutdown.setHours(shutdownHour, shutdownMinute, 0, 0);
-      return Math.max(0, Math.round((shutdown.getTime() - now.getTime()) / 60000));
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const effectiveStart = Math.max(startMinutes, nowMinutes);
+      return Math.max(0, endMinutes - effectiveStart);
     }
 
-    return Math.max(0, shutdownHour * 60 + shutdownMinute);
+    return Math.max(0, endMinutes - startMinutes);
   }
 
   return dailyPlanningState.capacityConfig.defaultMinutes;
@@ -823,11 +956,19 @@ function getDailyPlanningWorkloadSummary(isoDate) {
     return sum + (task.timeEstimateMinutes || 0);
   }, 0);
   const capacityMinutes = getDailyPlanningCapacityMinutes(isoDate);
+  const deltaMinutes = capacityMinutes - plannedWorkMinutes;
+  let status = 'ok';
+  if (plannedWorkMinutes >= capacityMinutes) {
+    status = 'over';
+  } else if (deltaMinutes <= 60) {
+    status = 'near';
+  }
   return {
     plannedWorkMinutes,
     plannedTotalMinutes,
     capacityMinutes,
-    overcommitted: plannedWorkMinutes > capacityMinutes
+    overcommitted: plannedWorkMinutes > capacityMinutes,
+    status
   };
 }
 
@@ -874,6 +1015,18 @@ function getDailyPlanningShutdownTimeForDate(isoDate, fallback = DAILY_PLANNING_
   return DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
 }
 
+function getShutdownTimeOptions() {
+  const options = [];
+  const startMinutes = 15 * 60; // 3:00 PM
+  const endMinutes = (23 * 60) + 55; // 11:55 PM
+  for (let total = startMinutes; total <= endMinutes; total += 5) {
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    options.push(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
+  }
+  return options;
+}
+
 function buildDailyPlanShareTemplate(isoDate) {
   const tasks = getDailyPlanningTaskList(isoDate);
   const taskLines = tasks.length
@@ -883,8 +1036,9 @@ function buildDailyPlanShareTemplate(isoDate) {
     }).join('\n')
     : '- No tasks planned';
 
+  const label = getDailyPlanningDateLabelForSentence(isoDate);
   return [
-    'Planned for today:',
+    `Planned for ${label}:`,
     taskLines,
     '',
     'Obstacles in my way:',
@@ -895,17 +1049,19 @@ function buildDailyPlanShareTemplate(isoDate) {
 function getDailyPlanningStepColumnDescriptors() {
   const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
   if (dailyPlanningState.step === DAILY_PLANNING_STEPS.WORKLOAD) {
+    const selectedHeading = getDailyPlanningDateLabel(selectedDate);
+    const tomorrowHeading = getDailyPlanningDateLabel(addDays(selectedDate, 1));
     return [
       {
         isoDate: selectedDate,
         bucket: 'today',
-        heading: 'Today',
+        heading: selectedHeading,
         subtitle: "Keep only what's essential"
       },
       {
         isoDate: addDays(selectedDate, 1),
         bucket: 'tomorrow',
-        heading: 'Tomorrow',
+        heading: tomorrowHeading,
         subtitle: 'Drag over tasks that can wait'
       },
       {
@@ -918,14 +1074,14 @@ function getDailyPlanningStepColumnDescriptors() {
   }
 
   return [
-    {
-      isoDate: selectedDate,
-      bucket: 'today',
-      heading: 'Today',
-      subtitle: getRelativeDateLabel(selectedDate)
-    }
-  ];
-}
+      {
+        isoDate: selectedDate,
+        bucket: 'today',
+        heading: getDailyPlanningDateLabel(selectedDate),
+        subtitle: 'Drag your first tasks to the top'
+      }
+    ];
+  }
 
 function getDailyPlanningVisibleIsoDates() {
   return getDailyPlanningStepColumnDescriptors().map(desc => desc.isoDate);
@@ -998,39 +1154,73 @@ function renderDailyPlanningPanelHtml() {
   const hasShutdownTask = !!getDailyShutdownTaskForDate(selectedDate);
   const shareText = draft.shareText || buildDailyPlanShareTemplate(selectedDate);
 
-  const workloadSummary = `${formatMinutes(workload.plannedWorkMinutes)} / ${formatMinutes(workload.capacityMinutes)} work planned`;
-  const workloadClass = workload.overcommitted ? ' daily-planning-panel__workload--warn' : '';
+  const workloadSummary = `${formatMinutes(workload.plannedWorkMinutes)} of ${formatMinutes(workload.capacityMinutes)} planned`;
+  let workloadClass = '';
+  if (workload.status === 'near') workloadClass = ' daily-planning-panel__workload--near';
+  if (workload.status === 'over') workloadClass = ' daily-planning-panel__workload--over';
 
   if (step === DAILY_PLANNING_STEPS.ADD_TASKS) {
+    const sentenceLabel = getDailyPlanningDateLabelForSentence(selectedDate);
+    const shutdownValue = draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+    const shutdownDisplay = formatTime24AsDisplay(shutdownValue);
+    const shutdownOptions = getShutdownTimeOptions().map(timeValue => {
+      const isSelected = timeValue === shutdownValue;
+      return `
+        <button class="daily-planning-panel__time-option${isSelected ? ' daily-planning-panel__time-option--selected' : ''}" type="button" data-dp-shutdown-option="${timeValue}">
+          <span>${escapeHtml(formatTime24AsDisplay(timeValue))}</span>
+          ${isSelected ? '<i data-lucide="check"></i>' : ''}
+        </button>
+      `;
+    }).join('');
     const shutdownCard = hasShutdownTask ? '' : `
-      <div class="daily-planning-panel__card">
+      <div class="daily-planning-panel__card daily-planning-panel__card--spaced">
         <h3>Shutdown time</h3>
         <p>What time would you like to wrap up work by?</p>
         <div class="daily-planning-panel__shutdown-row">
-          <input type="time" class="daily-planning-panel__time" data-dp-shutdown-input value="${escapeHtml(draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME)}">
-          <button class="daily-planning-panel__btn daily-planning-panel__btn--success" type="button" data-dp-add-shutdown>Add to calendar</button>
+          <div class="daily-planning-panel__time-select" data-dp-shutdown-select>
+            <button class="daily-planning-panel__time" type="button" data-dp-shutdown-toggle aria-expanded="false">
+              <span>${escapeHtml(shutdownDisplay)}</span>
+            </button>
+            <div class="daily-planning-panel__time-dropdown" data-dp-shutdown-dropdown hidden>
+              ${shutdownOptions}
+            </div>
+          </div>
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--success" type="button" data-dp-add-shutdown>
+            <i data-lucide="calendar"></i>
+            <span>Add to calendar</span>
+          </button>
         </div>
       </div>
     `;
 
     return `
       <div class="daily-planning-panel__inner">
-        <h2 class="daily-planning-panel__title">What do you want to get done today?</h2>
-        <p class="daily-planning-panel__subtitle">Add tasks you want to work on today.</p>
+        <h2 class="daily-planning-panel__title">What do you want to get done ${escapeHtml(sentenceLabel)}?</h2>
+        <p class="daily-planning-panel__subtitle">Add tasks you want to work on ${escapeHtml(sentenceLabel)}.</p>
         <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
         ${shutdownCard}
         <div class="daily-planning-panel__actions">
+          <span class="daily-planning-panel__btn-spacer" aria-hidden="true"></span>
           <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+        <div class="daily-planning-panel__prompt">
+          <p class="daily-planning-panel__prompt-text">What are the most high-impact things you could do ${escapeHtml(sentenceLabel)}?</p>
         </div>
       </div>
     `;
   }
 
   if (step === DAILY_PLANNING_STEPS.WORKLOAD) {
+    const sentenceLabel = getDailyPlanningDateLabelForSentence(selectedDate);
+    const cautionTitleClass = workload.status === 'near'
+      ? 'daily-planning-panel__caution-title daily-planning-panel__caution-title--near'
+      : workload.status === 'over'
+        ? 'daily-planning-panel__caution-title daily-planning-panel__caution-title--over'
+        : 'daily-planning-panel__caution-title';
     const caution = workload.overcommitted
       ? `
-        <div class="daily-planning-panel__card daily-planning-panel__card--warn">
-          <h3>Caution: Unrealistic workload</h3>
+        <div class="daily-planning-panel__card daily-planning-panel__card--warn daily-planning-panel__card--caution">
+          <h3 class="${cautionTitleClass}">Caution: Unrealistic workload</h3>
           <p>There's not enough time before shutdown for all your work tasks.</p>
         </div>
       `
@@ -1039,28 +1229,36 @@ function renderDailyPlanningPanelHtml() {
     return `
       <div class="daily-planning-panel__inner">
         <h2 class="daily-planning-panel__title">What can wait?</h2>
-        <p class="daily-planning-panel__subtitle">Move non-essential tasks to Tomorrow or Next week.</p>
+        <p class="daily-planning-panel__subtitle">Bump back tasks that aren't essential to work on ${escapeHtml(sentenceLabel)}.</p>
         <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
         ${caution}
-        <div class="daily-planning-panel__actions">
-          <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+        <div class="daily-planning-panel__actions daily-planning-panel__actions--spaced">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--ghost" type="button" data-dp-prev>
+            <i data-lucide="arrow-left"></i>
+          </button>
           <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+        <div class="daily-planning-panel__prompt">
+          <p class="daily-planning-panel__prompt-text">If a task is low-priority or doesn't need to be done ${escapeHtml(sentenceLabel)}, bump it back.</p>
         </div>
       </div>
     `;
   }
 
   if (step === DAILY_PLANNING_STEPS.FINALIZE) {
+    const sentenceLabel = getDailyPlanningDateLabelForSentence(selectedDate);
     return `
       <div class="daily-planning-panel__inner">
-        <h2 class="daily-planning-panel__title">Finalize your plan for today</h2>
-        <p class="daily-planning-panel__subtitle">Arrange tasks in your preferred work order and timebox if needed.</p>
+        <h2 class="daily-planning-panel__title">Finalize your plan for ${escapeHtml(sentenceLabel)}</h2>
+        <p class="daily-planning-panel__subtitle">Arrange your tasks in the order that you want to work on them.</p>
         <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
-        <div class="daily-planning-panel__card">
+        <div class="daily-planning-panel__card daily-planning-panel__card--caution">
           <p>Tip: drag tasks to reorder, then drag to the timeline to timebox your day.</p>
         </div>
-        <div class="daily-planning-panel__actions">
-          <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+        <div class="daily-planning-panel__actions daily-planning-panel__actions--spaced">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--ghost" type="button" data-dp-prev>
+            <i data-lucide="arrow-left"></i>
+          </button>
           <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Looks good</button>
         </div>
       </div>
@@ -1070,11 +1268,13 @@ function renderDailyPlanningPanelHtml() {
   return `
     <div class="daily-planning-panel__inner">
       <h2 class="daily-planning-panel__title">Daily plan</h2>
-      <p class="daily-planning-panel__subtitle">Review, reflect, and get started.</p>
+      <p class="daily-planning-panel__subtitle">Document and share your plan for ${escapeHtml(getDailyPlanningDateLabelForSentence(selectedDate))}.</p>
       <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
       <textarea class="daily-planning-panel__textarea daily-planning-panel__textarea--share" id="dp-share-text" data-dp-share-text>${escapeHtml(shareText)}</textarea>
-      <div class="daily-planning-panel__actions">
-        <button class="daily-planning-panel__btn" type="button" data-dp-prev>Back</button>
+      <div class="daily-planning-panel__actions daily-planning-panel__actions--final">
+        <button class="daily-planning-panel__btn daily-planning-panel__btn--ghost" type="button" data-dp-prev>
+          <i data-lucide="arrow-left"></i>
+        </button>
         <button class="daily-planning-panel__btn" type="button" data-dp-copy>Copy</button>
         <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-finish>Get started</button>
       </div>
@@ -1094,6 +1294,27 @@ function renderDailyPlanningPanel() {
 
   panel.hidden = false;
   panel.innerHTML = renderDailyPlanningPanelHtml();
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function closeDailyPlanningShutdownDropdown() {
+  const dropdown = document.querySelector('[data-dp-shutdown-dropdown]');
+  if (dropdown) dropdown.hidden = true;
+  const toggle = document.querySelector('[data-dp-shutdown-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function toggleDailyPlanningShutdownDropdown() {
+  const dropdown = document.querySelector('[data-dp-shutdown-dropdown]');
+  if (!dropdown) return;
+  const nextOpen = dropdown.hidden;
+  dropdown.hidden = !nextOpen;
+  const toggle = document.querySelector('[data-dp-shutdown-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', String(nextOpen));
+  if (nextOpen) {
+    const selected = dropdown.querySelector('.daily-planning-panel__time-option--selected');
+    if (selected) dropdown.scrollTop = selected.offsetTop;
+  }
 }
 
 function applyDailyPlanningColumnPresentation(colEl, descriptor) {
@@ -1200,14 +1421,34 @@ function goToPrevDailyPlanningStep() {
   setDailyPlanningStep(DAILY_PLANNING_STEP_ORDER[idx - 1]);
 }
 
+function setDailyPlanningSelectedDate(nextIsoDate, options = {}) {
+  if (!dailyPlanningState.isActive) return;
+  if (!nextIsoDate) return;
+  const todayISO = getTodayISO();
+  const { resetStep = true } = options;
+  const clampedDate = nextIsoDate < todayISO ? todayISO : nextIsoDate;
+  if (dailyPlanningState.selectedDate === clampedDate) {
+    updateTodayButtonLabel(clampedDate);
+    return;
+  }
+  dailyPlanningState.selectedDate = clampedDate;
+  if (resetStep) dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
+  dailyPlanningState.runDraft = createDailyPlanningRunDraft(clampedDate);
+  dailyPlanningState.runDraft.shareText = '';
+  applyWorkdayBoundsForDate(clampedDate);
+  renderDailyPlanningMode();
+}
+
 function enterDailyPlanningMode() {
-  const selectedDate = getFirstVisibleDate();
+  const returnDate = getFirstVisibleDate();
+  const selectedDate = getTodayISO();
   dailyPlanningState.isActive = true;
   dailyPlanningState.selectedDate = selectedDate;
-  dailyPlanningState.returnToDate = selectedDate;
+  dailyPlanningState.returnToDate = returnDate;
   dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(selectedDate);
   dailyPlanningState.runDraft.shareText = '';
+  applyWorkdayBoundsForDate(selectedDate);
   setSidebarActiveNav('daily-planning');
   closeTopbarTodayPicker();
   renderDailyPlanningMode();
@@ -1875,8 +2116,9 @@ function renderTaskDetailModal(task, column) {
 
 /* ── Shared Calendar Grid ──────────────────── */
 
-function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth) {
+function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth, options = {}) {
   const todayISO = getTodayISO();
+  const minIsoDate = options.minIsoDate || null;
   const monthNames = ['January','February','March','April','May','June',
                       'July','August','September','October','November','December'];
 
@@ -1898,7 +2140,10 @@ function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth) {
       if (!inMonth) cls += ' sdp-cal__day--outside';
       if (iso === todayISO) cls += ' sdp-cal__day--today';
       if (iso === selectedIsoDate) cls += ' sdp-cal__day--selected';
-      tds.push(`<td><button class="${cls}" type="button" data-date="${iso}">${d.getDate()}</button></td>`);
+      const isDisabled = minIsoDate && iso < minIsoDate;
+      if (isDisabled) cls += ' sdp-cal__day--disabled';
+      const disabledAttr = isDisabled ? ' disabled' : '';
+      tds.push(`<td><button class="${cls}" type="button" data-date="${iso}"${disabledAttr}>${d.getDate()}</button></td>`);
     }
     if (row > 4 && allOutside) break;
     calendarRows.push(`<tr>${tds.join('')}</tr>`);
@@ -1957,6 +2202,9 @@ function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth) {
 }
 
 function renderTopbarTodayDropdown(selectedIsoDate, viewYear, viewMonth) {
+  const isDailyPlanning = dailyPlanningState.isActive;
+  const minIsoDate = isDailyPlanning ? getTodayISO() : null;
+  const disablePrev = isDailyPlanning;
   return `
     <div class="start-date-picker topbar-date-picker" data-topbar-sdp>
       <div class="sdp__arrow"></div>
@@ -1967,13 +2215,13 @@ function renderTopbarTodayDropdown(selectedIsoDate, viewYear, viewMonth) {
         <button class="sdp__menu-item" data-action="go-next-day" type="button">
           <span>Go to next day</span>
         </button>
-        <button class="sdp__menu-item" data-action="go-previous-day" type="button">
+        <button class="sdp__menu-item" data-action="go-previous-day" type="button"${disablePrev ? ' disabled' : ''}>
           <span>Go to previous day</span>
         </button>
       </div>
       <div class="sdp__divider"></div>
       <div class="sdp__section">
-        ${renderCalendarGrid(selectedIsoDate, viewYear, viewMonth)}
+        ${renderCalendarGrid(selectedIsoDate, viewYear, viewMonth, { minIsoDate })}
       </div>
     </div>
   `;
@@ -4498,11 +4746,11 @@ function renderTaskCard(task, columnIsoDate, isGhost) {
   const actualMins = dailySeconds ? Math.floor(dailySeconds / 60) : 0;
   const showActualOnBadge = dailySeconds > 0 || isTimerRunning;
 
-  // For past cards, use sum of timebox durations as planned if timeboxed; otherwise use shared timeEstimateMinutes
-  const pastTimeboxes = (isPast && columnIsoDate) ? getTaskTimeboxesForDate(task, columnIsoDate) : [];
-  const hasPastTimebox = pastTimeboxes.length > 0;
-  const cardPlannedMins = hasPastTimebox
-    ? pastTimeboxes.reduce((sum, tb) => sum + Math.round(tb.duration * 60), 0)
+  // Use sum of timebox durations as planned if timeboxed on this date; otherwise use shared timeEstimateMinutes
+  const columnTimeboxes = columnIsoDate ? getTaskTimeboxesForDate(task, columnIsoDate) : [];
+  const hasColumnTimebox = columnTimeboxes.length > 0;
+  const cardPlannedMins = hasColumnTimebox
+    ? columnTimeboxes.reduce((sum, tb) => sum + Math.round(tb.duration * 60), 0)
     : (task.timeEstimateMinutes || 0);
 
   let timeBadge = '';
@@ -4534,7 +4782,7 @@ function renderTaskCard(task, columnIsoDate, isGhost) {
           <span class="task-card__timer-label">ACTUAL</span>
           <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${timerActualDisplay}</span>
         </div>
-        <div class="task-card__timer-metric${hasPastTimebox ? '' : ' task-card__timer-metric--clickable'}"${hasPastTimebox ? '' : ' data-card-planned-picker-btn'}>
+        <div class="task-card__timer-metric${isPast && hasColumnTimebox ? '' : ' task-card__timer-metric--clickable'}"${isPast && hasColumnTimebox ? '' : ' data-card-planned-picker-btn'}>
           <span class="task-card__timer-label">PLANNED</span>
           <span class="task-card__timer-value">${plannedDisplay}</span>
         </div>
@@ -4546,8 +4794,10 @@ function renderTaskCard(task, columnIsoDate, isGhost) {
   const rolloverCount = columnIsoDate ? getRolloverCount(task, columnIsoDate) : 0;
   const rolloverBadge = rolloverCount > 0
     ? `<span class="task-card__rollover-badge" title="Rolled over ${rolloverCount} day${rolloverCount > 1 ? 's' : ''}">
-         <i data-lucide="rotate-cw" style="transform: rotate(105deg)"></i>
-         <span class="rollover-count">${rolloverCount}</span>
+         <span class="rollover-icon">
+           <i data-lucide="rotate-cw" style="transform: rotate(105deg)"></i>
+           <span class="rollover-count">${rolloverCount}</span>
+         </span>
        </span>`
     : '';
 
@@ -4910,6 +5160,11 @@ function attachWorkdayMarkerEvents() {
     workdayMarkerDrag = null;
     document.body.classList.remove('is-workday-marker-dragging');
     renderWorkdayMarkers();
+    const activeDate = getFirstVisibleDate();
+    if (activeDate) {
+      storeWorkdayOverrideForDate(activeDate);
+      if (dailyPlanningState.isActive) renderDailyPlanningPanel();
+    }
   });
 }
 
@@ -6979,7 +7234,9 @@ function updateTodayButtonLabel(overrideDate) {
   const todayISO = getTodayISO();
   const isToday = firstDate === todayISO;
   let label;
-  if (isToday) {
+  if (dailyPlanningState.isActive) {
+    label = getDailyPlanningDateLabel(firstDate);
+  } else if (isToday) {
     label = 'Today';
   } else if (firstDate === addDays(todayISO, 1)) {
     label = 'Tomorrow';
@@ -7009,6 +7266,10 @@ function updateTodayButtonLabel(overrideDate) {
 
   // Update calendar timeline header and events when date changes
   updateCalendarDayHeader(firstDate);
+  if (updateTodayButtonLabel._lastWorkdayDate !== firstDate) {
+    updateTodayButtonLabel._lastWorkdayDate = firstDate;
+    applyWorkdayBoundsForDate(firstDate);
+  }
   if (updateTodayButtonLabel._lastCalDate !== firstDate) {
     updateTodayButtonLabel._lastCalDate = firstDate;
     renderCalendarEvents._overrideDate = firstDate;
@@ -7031,6 +7292,33 @@ function handleTopbarTodayAction(action, data) {
   if (!topbarTodayPickerState) return;
   const todayISO = getTodayISO();
   let targetIsoDate = null;
+
+  if (dailyPlanningState.isActive) {
+    switch (action) {
+      case 'go-today':
+        targetIsoDate = todayISO;
+        break;
+      case 'go-next-day':
+        targetIsoDate = addDays(getFirstVisibleDate(), 1);
+        break;
+      case 'select-date':
+        targetIsoDate = data;
+        break;
+      case 'go-previous-day':
+      default:
+        break;
+    }
+
+    if (targetIsoDate && targetIsoDate < todayISO) {
+      targetIsoDate = todayISO;
+    }
+
+    if (targetIsoDate) {
+      setDailyPlanningSelectedDate(targetIsoDate, { resetStep: true });
+      closeTopbarTodayPicker();
+    }
+    return;
+  }
 
   switch (action) {
     case 'go-today':
@@ -7067,7 +7355,11 @@ function attachBoardTopbarEvents() {
       e.preventDefault();
       e.stopPropagation();
       closeTopbarTodayPicker();
-      scrollToDateColumn(getTodayISO(), { behavior: 'smooth' });
+      if (dailyPlanningState.isActive) {
+        setDailyPlanningSelectedDate(getTodayISO(), { resetStep: true });
+      } else {
+        scrollToDateColumn(getTodayISO(), { behavior: 'smooth' });
+      }
       return;
     }
     e.preventDefault();
@@ -7132,6 +7424,25 @@ function attachDailyPlanningEvents() {
     if (!(e.target instanceof Element)) return;
     const draft = ensureDailyPlanningRunDraft();
 
+    const shutdownToggle = e.target.closest('[data-dp-shutdown-toggle]');
+    if (shutdownToggle) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleDailyPlanningShutdownDropdown();
+      return;
+    }
+
+    const shutdownOption = e.target.closest('[data-dp-shutdown-option]');
+    if (shutdownOption) {
+      e.preventDefault();
+      const nextTime = shutdownOption.dataset.dpShutdownOption || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      draft.shutdownTime = nextTime;
+      draft.updatedAt = new Date().toISOString();
+      closeDailyPlanningShutdownDropdown();
+      renderDailyPlanningPanel();
+      return;
+    }
+
     if (e.target.closest('[data-dp-prev]')) {
       e.preventDefault();
       goToPrevDailyPlanningStep();
@@ -7168,9 +7479,8 @@ function attachDailyPlanningEvents() {
 
     if (e.target.closest('[data-dp-add-shutdown]')) {
       e.preventDefault();
-      const timeInput = panel.querySelector('[data-dp-shutdown-input]');
-      const nextTime = timeInput ? timeInput.value : DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
-      draft.shutdownTime = nextTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      const nextTime = draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      draft.shutdownTime = nextTime;
       draft.updatedAt = new Date().toISOString();
       upsertDailyShutdownForDate(dailyPlanningState.selectedDate || getTodayISO(), draft.shutdownTime);
     }
@@ -7183,10 +7493,6 @@ function attachDailyPlanningEvents() {
       draft.shareText = e.target.value;
       draft.updatedAt = new Date().toISOString();
       return;
-    }
-    if (e.target.matches('[data-dp-shutdown-input]')) {
-      draft.shutdownTime = e.target.value || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
-      draft.updatedAt = new Date().toISOString();
     }
   });
 }
@@ -7579,12 +7885,14 @@ document.addEventListener('click', e => {
     }
     const dayCell = e.target.closest('[data-date]');
     if (dayCell) {
+      if (dayCell.disabled) return;
       topbarTodayPickerState.selectedIsoDate = dayCell.dataset.date || topbarTodayPickerState.selectedIsoDate;
       handleTopbarTodayAction('select-date', dayCell.dataset.date);
       return;
     }
     const actionBtn = e.target.closest('[data-action]');
     if (actionBtn) {
+      if (actionBtn.disabled) return;
       handleTopbarTodayAction(actionBtn.dataset.action);
       return;
     }
@@ -7595,6 +7903,14 @@ document.addEventListener('click', e => {
   if (e.target.closest('[data-view="today"]')) return;
 
   closeTopbarTodayPicker();
+});
+
+// Daily planning shutdown time dropdown: close on outside click
+document.addEventListener('click', e => {
+  if (!dailyPlanningState.isActive) return;
+  if (!(e.target instanceof Element)) { closeDailyPlanningShutdownDropdown(); return; }
+  if (e.target.closest('[data-dp-shutdown-select]')) return;
+  closeDailyPlanningShutdownDropdown();
 });
 
 // Escape key for topbar today picker

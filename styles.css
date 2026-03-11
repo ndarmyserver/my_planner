@@ -296,6 +296,24 @@ button { cursor: pointer; }
   padding-left: calc(var(--sidebar-width) + var(--daily-planning-panel-width) + 36px);
 }
 
+.board--daily-planning[data-dp-step="4"] {
+  --daily-planning-panel-width: calc(var(--column-width) * 2 + var(--column-gap));
+}
+
+.board--daily-planning[data-dp-step="4"] .day-column__header,
+.board--daily-planning[data-dp-step="4"] .add-task-row,
+.board--daily-planning[data-dp-step="4"] .add-task-input-wrap {
+  display: none;
+}
+
+.board--daily-planning[data-dp-step="4"] .day-column {
+  padding-top: 93px;
+}
+
+.board--daily-planning[data-dp-step="4"] .progress-bar {
+  display: none;
+}
+
 .main-card--hide-calendar .calendar-panel {
   display: none;
 }
@@ -326,33 +344,38 @@ button { cursor: pointer; }
 }
 
 .daily-planning-panel__title {
-  font-size: 36px;
-  font-weight: 700;
-  letter-spacing: -0.6px;
-  line-height: 1.05;
-  color: #2b2b2b;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.2;
+  color: #413f39;
 }
 
 .daily-planning-panel__subtitle {
   font-size: 14px;
-  color: #6b6b6b;
+  font-weight: 500;
+  color: #787878;
   line-height: 1.35;
 }
 
 .daily-planning-panel__metric {
   font-size: 12px;
   font-weight: 600;
-  color: #6f6f6f;
+  color: #787878;
   letter-spacing: 0.02em;
 }
 
-.daily-planning-panel__workload--warn {
-  color: #b83f2f;
+.daily-planning-panel__workload--near {
+  color: #fdbd5b;
+}
+
+.daily-planning-panel__workload--over {
+  color: #eb8063;
 }
 
 .daily-planning-panel__card {
-  border: 1px solid #d7d7d7;
-  border-radius: 6px;
+  border: 1px solid #dcdcdc;
+  border-radius: 4px;
   background: #ffffff;
   padding: 12px;
   display: flex;
@@ -361,27 +384,49 @@ button { cursor: pointer; }
 }
 
 .daily-planning-panel__card h3 {
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.05;
-  letter-spacing: -0.3px;
-  color: #2e2e2e;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0;
+  color: #413f39;
 }
 
 .daily-planning-panel__card p {
   font-size: 14px;
-  color: #6e6e6e;
+  font-weight: 500;
+  color: #787878;
+  font-style: italic;
   line-height: 1.35;
 }
 
+.daily-planning-panel__caution-title {
+  color: #787878;
+}
+
+.daily-planning-panel__card .daily-planning-panel__caution-title--near {
+  color: #fdbd5b;
+}
+
+.daily-planning-panel__card .daily-planning-panel__caution-title--over {
+  color: #eb8063;
+}
+
 .daily-planning-panel__card--warn {
-  background: #fff7f2;
-  border-color: #f0c7b0;
+  background: #ffffff;
+  border-color: #dcdcdc;
 }
 
 .daily-planning-panel__card--ok {
   background: #f1fbf3;
   border-color: #b6dcbc;
+}
+
+.daily-planning-panel__card--spaced {
+  margin: 24px 0;
+}
+
+.daily-planning-panel__card--caution {
+  margin-top: 24px;
 }
 
 .daily-planning-panel__shutdown-row {
@@ -390,49 +435,176 @@ button { cursor: pointer; }
   gap: 8px;
 }
 
+.daily-planning-panel__time-select {
+  position: relative;
+  flex: 1;
+}
+
 .daily-planning-panel__time {
-  border: 1px solid #d9d9d9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #787878;
   border-radius: 4px;
   font-family: inherit;
-  font-size: 13px;
-  color: #3d3d3d;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2e2e2e;
   background: #ffffff;
-  padding: 6px 8px;
+  padding: 5px 8px;
   min-width: 106px;
+  cursor: pointer;
+  text-align: center;
+  width: 100%;
+  height: 36px;
+}
+
+.daily-planning-panel__time-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 190px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: #ffffff;
+  border: 1px solid #dcdcdc;
+  border-radius: 4px;
+  box-shadow: 0 6px 12px #0003;
+  z-index: 40;
+  padding: 6px 0;
+}
+
+.daily-planning-panel__time-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: #413f39;
+  cursor: pointer;
+  text-align: left;
+}
+
+.daily-planning-panel__time-option:hover {
+  background: #f5f5f5;
+}
+
+.daily-planning-panel__time-option--selected {
+  font-weight: 500;
+}
+
+.daily-planning-panel__time-option i {
+  width: 18px;
+  height: 18px;
+}
+
+.daily-planning-panel__time-option svg {
+  width: 18px;
+  height: 18px;
 }
 
 .daily-planning-panel__btn {
-  border: 1px solid #d0d0d0;
-  border-radius: 5px;
+  border: 1px solid #c8c8c8;
+  border-radius: 4px;
   background: #ffffff;
-  color: #4e4e4e;
+  color: #413f39;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1;
-  padding: 8px 11px;
+  padding: 6px 12px;
+  opacity: 0.8;
+  transition: opacity 0.15s ease;
+  height: 36px;
 }
 
 .daily-planning-panel__btn:hover {
-  background: #f3f3f3;
+  opacity: 1;
 }
 
 .daily-planning-panel__btn--primary {
-  background: #ececec;
-  border-color: #d3d3d3;
-  color: #3a3a3a;
+  flex: 1;
+  text-align: center;
 }
 
 .daily-planning-panel__btn--success {
-  background: #e9f9ee;
-  border-color: #78ce8e;
-  color: #2b8c49;
+  background: #ffffff;
+  border: 1px solid #4dcd7d;
+  border-radius: 4px;
+  color: #4dcd7d;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  opacity: 1;
+  height: 36px;
+}
+
+.daily-planning-panel__btn--success i,
+.daily-planning-panel__btn--success svg {
+  width: 16px;
+  height: 16px;
 }
 
 .daily-planning-panel__actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  width: 100%;
+}
+
+.daily-planning-panel__actions--spaced {
+  margin-top: 24px;
+}
+
+.daily-planning-panel__actions--secondary {
+  justify-content: flex-start;
+}
+
+.daily-planning-panel__actions--final .daily-planning-panel__btn--primary {
+  flex: 0 0 auto;
+}
+
+.daily-planning-panel__btn--ghost {
+  width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+}
+
+.daily-planning-panel__btn--ghost i,
+.daily-planning-panel__btn--ghost svg {
+  width: 18px;
+  height: 18px;
+}
+
+.daily-planning-panel__btn-spacer {
+  width: 44px;
+  display: inline-block;
+  height: 36px;
+}
+
+.daily-planning-panel__prompt {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.daily-planning-panel__prompt-text {
+  font-size: 12px;
+  font-weight: 500;
+  font-style: italic;
+  color: #b4b4b4;
 }
 
 .daily-planning-panel__task-preview {
@@ -474,6 +646,9 @@ button { cursor: pointer; }
 }
 
 .day-date--daily-hint {
+  font-size: 14px;
+  font-weight: 500;
+  color: #787878;
   font-style: italic;
 }
 
@@ -505,11 +680,11 @@ button { cursor: pointer; }
 
 .day-name {
   display: block;
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--color-text-primary);
-  line-height: 1.15;
-  letter-spacing: -0.4px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #413f39;
+  line-height: 1.2;
+  letter-spacing: 0;
 }
 
 .day-name--link {
@@ -1034,21 +1209,36 @@ button { cursor: pointer; }
 .task-card__rollover-badge {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
   color: #b4b4b4;
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
 }
 
+.task-card__rollover-badge .rollover-icon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .task-card__rollover-badge i,
 .task-card__rollover-badge svg {
-  width: 13px;
-  height: 13px;
+  width: 18px;
+  height: 18px;
 }
 
 .rollover-count {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   line-height: 1;
+  font-size: 9px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 /* Hover action icons (calendar, clock) */
@@ -2462,6 +2652,15 @@ body.modal-open {
   background: #f5f5f5;
 }
 
+.sdp__menu-item:disabled {
+  color: #b4b4b4;
+  cursor: not-allowed;
+}
+
+.sdp__menu-item:disabled:hover {
+  background: transparent;
+}
+
 .sdp__shortcut {
   font-size: 11px;
   color: #b4b4b4;
@@ -2575,6 +2774,18 @@ body.modal-open {
 .sdp-cal__day--selected:not(.sdp-cal__day--today) {
   background: #d0e7fb;
   color: #2ca7ff;
+}
+
+.sdp-cal__day--disabled,
+.sdp-cal__day:disabled {
+  color: #d0d0d0;
+  background: transparent;
+  cursor: not-allowed;
+}
+
+.sdp-cal__day--disabled:hover,
+.sdp-cal__day:disabled:hover {
+  background: transparent;
 }
 
 /* ═══════════════════════════════════════════════
