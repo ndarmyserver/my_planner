@@ -190,7 +190,7 @@ button { cursor: pointer; }
   font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
-  color: var(--color-text-muted);
+  color: #787878;
   padding: 14px 10px 4px;
 }
 
@@ -641,9 +641,7 @@ button { cursor: pointer; }
   background: #ffffff;
 }
 
-.daily-planning-panel__textarea--share {
-  min-height: 360px;
-}
+/* textarea--share replaced by share-editor (Quill) */
 
 .day-date--daily-hint {
   font-size: 14px;
@@ -676,6 +674,7 @@ button { cursor: pointer; }
 .day-column__header {
   flex-shrink: 0;
   padding-bottom: 2px;
+  position: relative;
 }
 
 .day-name {
@@ -704,6 +703,40 @@ button { cursor: pointer; }
   font-size: 12px;
   color: var(--color-text-muted);
   margin-top: 2px;
+}
+
+/* Plan button — hidden by default, shown on header hover */
+.day-column__plan-btn {
+  position: absolute;
+  top: 5px;
+  right: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #b4b4b4;
+  padding: 7px 5px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.day-column__header:hover .day-column__plan-btn {
+  opacity: 1;
+}
+
+.day-column__plan-btn:hover {
+  background-color: #4dcd7d;
+  color: #ffffff;
+  box-shadow: 0 2px 4px #0003;
+  opacity: 1;
+}
+
+/* Hide plan button during daily planning */
+.board--daily-planning .day-column__plan-btn {
+  display: none;
 }
 
 /* Progress bar */
@@ -981,6 +1014,49 @@ button { cursor: pointer; }
 .task-card__time-badge--running {
   background-color: #4dcd7d;
   color: #fff;
+}
+
+/* Daily planning: unplanned / at-capacity warning badge */
+.task-card__time-badge--dp-warning {
+  background-color: #fdbd5b;
+  color: #7e5f30;
+}
+
+/* Daily planning: over-capacity badge */
+.task-card__time-badge--dp-over {
+  background-color: #eb8063;
+  color: #341006;
+}
+
+/* Lucide warning icon inside time badge */
+.task-card__time-badge-icon {
+  width: 10px !important;
+  height: 10px !important;
+  margin-left: 3px;
+  vertical-align: middle;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+
+/* Daily planning time badge tooltip */
+.task-card__time-badge[data-dp-tooltip] {
+  position: relative;
+}
+.task-card__time-badge[data-dp-tooltip]:hover::after {
+  content: attr(data-dp-tooltip);
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: #fff;
+  color: #333;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
 }
 
 /* Card timer dropdown */
@@ -2378,22 +2454,9 @@ body.is-workday-marker-dragging {
   color: #2ca7ff;
 }
 
-.task-modal__notes {
-  margin-top: 24px;
-  margin-left: 36px;
-  min-height: 130px;
-  color: #413f39;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.2;
-  outline: none;
-  white-space: pre-wrap;
-}
+/* task-modal__notes replaced by task-modal__notes-editor (Quill) */
 
-.task-modal__notes:empty::before {
-  content: attr(data-placeholder);
-  color: #b4b4b4;
-}
+/* placeholder now handled by Quill's ql-blank::before */
 
 .task-modal__divider {
   margin: 12px 0 0;
@@ -2517,10 +2580,7 @@ body.modal-open {
     font-size: 12px;
   }
 
-  .task-modal__notes {
-    font-size: 15px;
-    min-height: 100px;
-  }
+  /* task-modal__notes responsive override now in Quill section */
 
   .task-modal__timeline-item {
     font-size: 13px;
@@ -3453,22 +3513,9 @@ body.modal-open {
   color: #2ca7ff;
 }
 
-.focus-modal__notes {
-  margin-top: 24px;
-  margin-left: 36px;
-  font-size: 16px;
-  font-weight: 500;
-  color: #413f39;
-  line-height: 1.25;
-  outline: none;
-  min-height: 130px;
-  white-space: pre-wrap;
-}
+/* focus-modal__notes replaced by focus-modal__notes-editor (Quill) */
 
-.focus-modal__notes:empty::before {
-  content: attr(data-placeholder);
-  color: #b4b4b4;
-}
+/* placeholder now handled by Quill's ql-blank::before */
 
 @media (max-width: 1200px) {
   .focus-modal__content {
@@ -3605,4 +3652,108 @@ body.modal-open {
 /* Remove transition during resize to avoid lag */
 .cal-event--resizing {
   transition: none !important;
+}
+
+/* ═══════════════════════════════════════════════
+   QUILL EDITOR OVERRIDES
+═══════════════════════════════════════════════ */
+
+/* ── Task Modal Notes Editor ── */
+.task-modal__notes-editor {
+  margin-top: 24px;
+  margin-left: 36px;
+}
+.task-modal__notes-editor.ql-container.ql-snow {
+  border: none;
+  height: auto;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+}
+.task-modal__notes-editor .ql-editor {
+  padding: 0;
+  min-height: 100px;
+  color: #413f39;
+  font-weight: 500;
+  line-height: 1.2;
+}
+.task-modal__notes-editor .ql-editor.ql-blank::before {
+  color: #b4b4b4;
+  font-style: normal;
+  left: 0;
+  padding: 0;
+}
+
+/* ── Focus Modal Notes Editor ── */
+.focus-modal__notes-editor {
+  margin-top: 24px;
+  margin-left: 36px;
+}
+.focus-modal__notes-editor.ql-container.ql-snow {
+  border: none;
+  font-family: 'Inter', sans-serif;
+  font-size: 16px;
+}
+.focus-modal__notes-editor .ql-editor {
+  padding: 0;
+  min-height: 130px;
+  color: #413f39;
+  font-weight: 500;
+  line-height: 1.25;
+}
+.focus-modal__notes-editor .ql-editor.ql-blank::before {
+  color: #b4b4b4;
+  font-style: normal;
+  left: 0;
+  padding: 0;
+}
+
+/* ── Daily Planning Share Editor ── */
+.daily-planning-panel__share-editor {
+  width: 100%;
+}
+.daily-planning-panel__share-editor.ql-container.ql-snow {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  min-height: 360px;
+  font-family: 'Inter', sans-serif;
+  font-size: 16px;
+  font-weight: 500;
+  color: #413f39;
+  line-height: 1.45;
+  background: #ffffff;
+  box-shadow: 0 3px 5px #0000000d;
+}
+.daily-planning-panel__share-editor .ql-editor {
+  padding: 16px 18px;
+  min-height: 360px;
+}
+.daily-planning-panel__share-editor .ql-editor h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #413f39;
+  margin-bottom: 4px;
+}
+.daily-planning-panel__share-editor .ql-editor ul {
+  padding-left: 20px;
+  margin-bottom: 8px;
+}
+.daily-planning-panel__share-editor .ql-editor li {
+  padding-left: 4px;
+}
+.daily-planning-panel__share-editor .ql-editor em {
+  color: #8a8a8a;
+  font-style: italic;
+}
+.daily-planning-panel__share-editor .ql-editor.ql-blank::before {
+  color: #b4b4b4;
+  font-style: normal;
+}
+
+@media (min-width: 2000px) {
+  .task-modal__notes-editor .ql-container {
+    font-size: 15px;
+  }
+  .task-modal__notes-editor .ql-editor {
+    min-height: 100px;
+  }
 }

@@ -1,4 +1,82 @@
 /* ═══════════════════════════════════════════════
+   QUILL EDITOR INSTANCES (module-level)
+═══════════════════════════════════════════════ */
+let taskModalQuill = null;
+let focusModalQuill = null;
+let dpShareQuill = null;
+
+const QUILL_EDITOR_CONFIG = {
+  theme: 'snow',
+  modules: {
+    toolbar: false,
+    markdownShortcuts: {}
+  }
+};
+
+function initQuillEditor(container, placeholder, initialHtml) {
+  const quill = new Quill(container, {
+    ...QUILL_EDITOR_CONFIG,
+    placeholder: placeholder || 'Notes...'
+  });
+  if (initialHtml && initialHtml !== '<p><br></p>') {
+    quill.clipboard.dangerouslyPasteHTML(initialHtml);
+  }
+  quill.blur();
+  // On tab-focus (not click), place cursor at end of text
+  let mouseDown = false;
+  quill.root.addEventListener('mousedown', () => { mouseDown = true; });
+  quill.root.addEventListener('focus', () => {
+    if (!mouseDown && quill.getLength() > 1) {
+      requestAnimationFrame(() => quill.setSelection(quill.getLength() - 1, 0));
+    }
+    mouseDown = false;
+  });
+  return quill;
+}
+
+function getQuillHtml(quill) {
+  if (!quill) return '';
+  const html = quill.root.innerHTML.trim();
+  return html === '<p><br></p>' ? '' : html;
+}
+
+function shareTextToHtml(text) {
+  if (!text) return '';
+  // If it already looks like HTML, return as-is
+  if (text.startsWith('<')) return text;
+  // Convert legacy plain-text share template to HTML
+  const lines = text.split('\n');
+  let html = '';
+  let inList = false;
+  for (const line of lines) {
+    if (line.startsWith('- ')) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += `<li>${escapeHtml(line.slice(2))}</li>`;
+    } else {
+      if (inList) { html += '</ul>'; inList = false; }
+      if (line.trim() === '') {
+        html += '<p><br></p>';
+      } else if (line.endsWith(':')) {
+        html += `<h2>${escapeHtml(line)}</h2>`;
+      } else {
+        html += `<p>${escapeHtml(line)}</p>`;
+      }
+    }
+  }
+  if (inList) html += '</ul>';
+  return html;
+}
+
+function initTaskModalQuill(task) {
+  const container = document.querySelector('[data-task-notes-editor]');
+  if (!container) return;
+  taskModalQuill = initQuillEditor(container, 'Notes...', task.notes || '');
+  taskModalQuill.on('text-change', () => {
+    task.notes = getQuillHtml(taskModalQuill);
+  });
+}
+
+/* ═══════════════════════════════════════════════
    DRAG CONTEXT (module-level)
 ═══════════════════════════════════════════════ */
 
@@ -972,6 +1050,46 @@ function getDailyPlanningWorkloadSummary(isoDate) {
   };
 }
 
+/**
+ * Compute per-task badge status for the planned-day column during daily planning steps 2-4.
+ * Returns a Map<taskId, { status, availableMinutes }>.
+ */
+function getDailyPlanningBadgeStatuses(tasks, isoDate) {
+  const capacityMinutes = getDailyPlanningCapacityMinutes(isoDate);
+  const result = new Map();
+  let runningTotal = 0;
+  let overflowed = false;
+
+  for (const task of tasks) {
+    if (isDailyPlanningArtifactTask(task)) continue;
+    const planned = getPlannedMinutesForDate(task, isoDate);
+
+    if (planned === 0) {
+      result.set(task.id, { status: 'unplanned', availableMinutes: 0 });
+      continue;
+    }
+
+    if (overflowed) {
+      result.set(task.id, { status: 'over', availableMinutes: 0 });
+      runningTotal += planned;
+      continue;
+    }
+
+    const prevTotal = runningTotal;
+    runningTotal += planned;
+
+    if (runningTotal > capacityMinutes) {
+      const available = Math.max(0, capacityMinutes - prevTotal);
+      result.set(task.id, { status: 'overflow', availableMinutes: available });
+      overflowed = true;
+    } else {
+      result.set(task.id, { status: 'normal', availableMinutes: 0 });
+    }
+  }
+
+  return result;
+}
+
 function createDailyPlanningRunDraft(dateISO) {
   const shutdownTask = getDailyShutdownTaskForDate(dateISO);
   const shutdownTime = shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))
@@ -1029,21 +1147,15 @@ function getShutdownTimeOptions() {
 
 function buildDailyPlanShareTemplate(isoDate) {
   const tasks = getDailyPlanningTaskList(isoDate);
-  const taskLines = tasks.length
+  const taskItems = tasks.length
     ? tasks.map(task => {
       const estimate = task.timeEstimateMinutes > 0 ? formatMinutes(task.timeEstimateMinutes) : '--:--';
-      return `- ${task.title} (${estimate})`;
-    }).join('\n')
-    : '- No tasks planned';
+      return `<li>${escapeHtml(task.title)} <em>(${escapeHtml(estimate)})</em></li>`;
+    }).join('')
+    : '<li>No tasks planned</li>';
 
   const label = getDailyPlanningDateLabelForSentence(isoDate);
-  return [
-    `Planned for ${label}:`,
-    taskLines,
-    '',
-    'Obstacles in my way:',
-    '- '
-  ].join('\n');
+  return `<h2>Planned for ${escapeHtml(label)}:</h2><ul>${taskItems}</ul><p><br></p><h2>Obstacles in my way:</h2><ul><li><br></li></ul>`;
 }
 
 function getDailyPlanningStepColumnDescriptors() {
@@ -1152,7 +1264,6 @@ function renderDailyPlanningPanelHtml() {
   const workload = getDailyPlanningWorkloadSummary(selectedDate);
   const step = dailyPlanningState.step;
   const hasShutdownTask = !!getDailyShutdownTaskForDate(selectedDate);
-  const shareText = draft.shareText || buildDailyPlanShareTemplate(selectedDate);
 
   const workloadSummary = `${formatMinutes(workload.plannedWorkMinutes)} of ${formatMinutes(workload.capacityMinutes)} planned`;
   let workloadClass = '';
@@ -1270,7 +1381,7 @@ function renderDailyPlanningPanelHtml() {
       <h2 class="daily-planning-panel__title">Daily plan</h2>
       <p class="daily-planning-panel__subtitle">Document and share your plan for ${escapeHtml(getDailyPlanningDateLabelForSentence(selectedDate))}.</p>
       <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
-      <textarea class="daily-planning-panel__textarea daily-planning-panel__textarea--share" id="dp-share-text" data-dp-share-text>${escapeHtml(shareText)}</textarea>
+      <div class="daily-planning-panel__share-editor" data-dp-share-editor></div>
       <div class="daily-planning-panel__actions daily-planning-panel__actions--final">
         <button class="daily-planning-panel__btn daily-planning-panel__btn--ghost" type="button" data-dp-prev>
           <i data-lucide="arrow-left"></i>
@@ -1286,6 +1397,13 @@ function renderDailyPlanningPanel() {
   const panel = document.getElementById('daily-planning-panel');
   if (!panel) return;
 
+  // Save Quill content before re-render destroys the instance
+  if (dpShareQuill) {
+    const draft = ensureDailyPlanningRunDraft();
+    draft.shareText = getQuillHtml(dpShareQuill);
+    dpShareQuill = null;
+  }
+
   if (!dailyPlanningState.isActive) {
     panel.hidden = true;
     panel.innerHTML = '';
@@ -1295,6 +1413,20 @@ function renderDailyPlanningPanel() {
   panel.hidden = false;
   panel.innerHTML = renderDailyPlanningPanelHtml();
   if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  // Init Quill on the SHARE step editor
+  const editorContainer = panel.querySelector('[data-dp-share-editor]');
+  if (editorContainer) {
+    const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+    const draft = ensureDailyPlanningRunDraft();
+    const shareText = draft.shareText || buildDailyPlanShareTemplate(selectedDate);
+    const htmlContent = shareTextToHtml(shareText);
+    dpShareQuill = initQuillEditor(editorContainer, 'Your daily plan...', htmlContent);
+    dpShareQuill.on('text-change', () => {
+      draft.shareText = getQuillHtml(dpShareQuill);
+      draft.updatedAt = new Date().toISOString();
+    });
+  }
 }
 
 function closeDailyPlanningShutdownDropdown() {
@@ -1392,6 +1524,8 @@ function renderDailyPlanningMode() {
 function setDailyPlanningStep(nextStep) {
   if (!dailyPlanningState.isActive) return;
   if (!DAILY_PLANNING_STEP_ORDER.includes(nextStep)) return;
+  // Collapse all timer areas except tasks with an active timer
+  collapseAllCardTimers();
   const draft = ensureDailyPlanningRunDraft();
   dailyPlanningState.step = nextStep;
   if (nextStep === DAILY_PLANNING_STEPS.SHARE && !String(draft.shareText || '').trim()) {
@@ -1439,9 +1573,9 @@ function setDailyPlanningSelectedDate(nextIsoDate, options = {}) {
   renderDailyPlanningMode();
 }
 
-function enterDailyPlanningMode() {
+function enterDailyPlanningMode(targetDate) {
   const returnDate = getFirstVisibleDate();
-  const selectedDate = getTodayISO();
+  const selectedDate = targetDate || getTodayISO();
   dailyPlanningState.isActive = true;
   dailyPlanningState.selectedDate = selectedDate;
   dailyPlanningState.returnToDate = returnDate;
@@ -1456,6 +1590,8 @@ function enterDailyPlanningMode() {
 
 function exitDailyPlanningMode(options = {}) {
   const { restoreTodayFirstColumn = false } = options;
+  // Collapse all timer areas except tasks with an active timer
+  collapseAllCardTimers();
   const returnDate = dailyPlanningState.returnToDate || getTodayISO();
   dailyPlanningState.isActive = false;
   dailyPlanningState.selectedDate = null;
@@ -1552,18 +1688,25 @@ function buildDailyPlanningSnapshot() {
   };
 }
 
-function formatDailyPlanningSnapshotEntry(snapshot) {
-  const formattedShareText = String(snapshot.shareText || '').trim()
-    || buildDailyPlanShareTemplate(snapshot.dateISO);
+function stripHtmlToText(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return div.textContent || div.innerText || '';
+}
 
-  return [
-    'DAILY PLANNING',
-    `Created at: ${formatSnapshotTimestamp(snapshot.completedAt)}`,
-    `Date: ${snapshot.dateISO}`,
-    `Workload: ${formatMinutes(snapshot.plannedWorkMinutes)} / ${formatMinutes(snapshot.capacityMinutes)} (${snapshot.overcommitted ? 'Overcommitted' : 'Within capacity'})`,
-    '',
-    formattedShareText
-  ].join('\n');
+function formatDailyPlanningSnapshotEntry(snapshot) {
+  const rawShareText = String(snapshot.shareText || '').trim()
+    || buildDailyPlanShareTemplate(snapshot.dateISO);
+  const shareHtml = rawShareText.startsWith('<') ? rawShareText : shareTextToHtml(rawShareText);
+
+  const workloadLabel = `${formatMinutes(snapshot.plannedWorkMinutes)} / ${formatMinutes(snapshot.capacityMinutes)} (${snapshot.overcommitted ? 'Overcommitted' : 'Within capacity'})`;
+
+  return `<h2>Daily Planning</h2>`
+    + `<p>Created at: ${escapeHtml(formatSnapshotTimestamp(snapshot.completedAt))}</p>`
+    + `<p>Date: ${escapeHtml(snapshot.dateISO)}</p>`
+    + `<p>Workload: ${escapeHtml(workloadLabel)}</p>`
+    + `<p><br></p>`
+    + shareHtml;
 }
 
 function getOrCreateDailyPlanningTask(isoDate) {
@@ -1604,7 +1747,7 @@ function appendDailyPlanningSnapshotToTask(snapshot) {
   const { task, column } = getOrCreateDailyPlanningTask(snapshot.dateISO);
   const entry = formatDailyPlanningSnapshotEntry(snapshot);
   const prior = String(task.notes || '').trim();
-  task.notes = prior ? `${prior}\n\n----------\n\n${entry}` : entry;
+  task.notes = prior ? `${prior}<p><br></p><hr><p><br></p>${entry}` : entry;
   renderColumn(column);
 }
 
@@ -1612,7 +1755,9 @@ function buildDailyPlanningCopyText() {
   const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
   const draft = ensureDailyPlanningRunDraft();
   const workload = getDailyPlanningWorkloadSummary(selectedDate);
-  const shareText = String(draft.shareText || '').trim() || buildDailyPlanShareTemplate(selectedDate);
+  const shareText = dpShareQuill
+    ? dpShareQuill.getText().trim()
+    : String(draft.shareText || '').trim() || buildDailyPlanShareTemplate(selectedDate);
 
   return [
     `Daily plan (${selectedDate})`,
@@ -2098,7 +2243,7 @@ function renderTaskDetailModal(task, column) {
 
         ${renderTaskDetailSubtasks(task)}
 
-        <div class="task-modal__notes" contenteditable="true" data-placeholder="Notes..." aria-label="Task notes">${task.notes ? escapeHtml(task.notes) : ''}</div>
+        <div class="task-modal__notes-editor" data-task-notes-editor></div>
 
         ${renderTaskTimeboxEntries(task)}
 
@@ -3381,6 +3526,15 @@ function handleActualTimeEntry() {
 ═══════════════════════════════════════════════ */
 let focusState = { taskId: null, subtaskId: null, running: false, intervalId: null, enteredFrom: null };
 let cardTimerExpanded = new Set(); // taskIds with expanded timer dropdown on kanban card
+function collapseAllCardTimers() {
+  if (focusState.running && focusState.taskId) {
+    const activeId = focusState.taskId;
+    cardTimerExpanded.clear();
+    cardTimerExpanded.add(activeId);
+  } else {
+    cardTimerExpanded.clear();
+  }
+}
 let cardPickerState = null; // { taskId, type: 'actual'|'planned', editMode: false }
 let focusPickerState = null; // { type: 'actual'|'planned', editMode: false, subtaskId: string|null }
 let focusEscKeyHandler = null;
@@ -3410,6 +3564,11 @@ function rerenderFocusModal(focusSubtaskId = null) {
   if (!focusState.taskId) return;
   const task = findTaskById(focusState.taskId);
   if (!task) return;
+  // Save Quill content before re-render destroys the instance
+  if (focusModalQuill) {
+    task.notes = getQuillHtml(focusModalQuill);
+    focusModalQuill = null;
+  }
   renderFocusModal(task, focusState.running);
   if (focusSubtaskId) {
     requestAnimationFrame(() => focusSubtaskTitleInput(focusSubtaskId));
@@ -3621,6 +3780,11 @@ function applyCardPickerTime(minutes) {
     cardTimerExpanded.delete(taskId);
   }
 
+  // Collapse timer area after selecting/clearing planned time (unless timer is running)
+  if (type === 'planned' && !(focusState.running && focusState.taskId === taskId)) {
+    cardTimerExpanded.delete(taskId);
+  }
+
   closeCardPicker();
   const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
   if (col) renderColumn(col);
@@ -3687,6 +3851,7 @@ function closeFocusMode() {
       overlay.hidden = false;
       document.body.classList.add('modal-open');
       if (typeof lucide !== 'undefined') lucide.createIcons();
+      initTaskModalQuill(ctx.task);
       if (focusState.running) {
         updateCardDetailTimerState();
       }
@@ -4012,9 +4177,9 @@ function saveFocusModalEdits() {
       task.title = newTitle;
     }
   }
-  const notesEl = el.querySelector('.focus-modal__notes');
-  if (notesEl) {
-    task.notes = notesEl.textContent.trim() || '';
+  if (focusModalQuill) {
+    task.notes = getQuillHtml(focusModalQuill);
+    focusModalQuill = null;
   }
   el.querySelectorAll('[data-focus-subtask-title]').forEach(titleEl => {
     const subtaskId = titleEl.getAttribute('data-focus-subtask-title');
@@ -4269,13 +4434,22 @@ function renderFocusModal(task, autoStart) {
           <i data-lucide="plus-circle"></i>
           <span>Add subtask</span>
         </button>
-        <div class="focus-modal__notes" contenteditable="true" data-placeholder="Notes...">${task.notes ? escapeHtml(task.notes) : ''}</div>
+        <div class="focus-modal__notes-editor" data-focus-notes-editor></div>
       </div>
     </div>
   `;
 
   document.body.appendChild(el);
   if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  // Init Quill editor for focus modal notes
+  const focusNotesContainer = el.querySelector('[data-focus-notes-editor]');
+  if (focusNotesContainer) {
+    focusModalQuill = initQuillEditor(focusNotesContainer, 'Notes...', task.notes || '');
+    focusModalQuill.on('text-change', () => {
+      task.notes = getQuillHtml(focusModalQuill);
+    });
+  }
 
   // Attach focus mode events
   el.addEventListener('click', e => {
@@ -4451,14 +4625,7 @@ function renderFocusModal(task, autoStart) {
   });
 
   el.addEventListener('input', e => {
-    const notesEl = e.target instanceof Element ? e.target.closest('.focus-modal__notes') : null;
-    if (notesEl) {
-      const cleanNotes = notesEl.textContent.replace(/\n/g, '').trim();
-      if (!cleanNotes && notesEl.innerHTML !== '') {
-        notesEl.textContent = '';
-      }
-      return;
-    }
+    // Notes are now handled by Quill editor — skip old contenteditable cleanup
 
     const titleEl = e.target instanceof Element ? e.target.closest('[data-focus-subtask-title]') : null;
     if (!titleEl) return;
@@ -4661,6 +4828,7 @@ function openTaskDetailModal(taskId) {
   if (typeof lucide !== 'undefined') {
     lucide.createIcons();
   }
+  initTaskModalQuill(context.task);
 
   // If timer is running for this task, update card detail to show STOP state
   if (focusState.running && focusState.taskId === taskId) {
@@ -4687,9 +4855,9 @@ function closeTaskDetailModal() {
           ctx.task.title = newTitle;
         }
       }
-      const notesEl = overlay.querySelector('.task-modal__notes');
-      if (notesEl) {
-        ctx.task.notes = notesEl.textContent.trim() || '';
+      if (taskModalQuill) {
+        ctx.task.notes = getQuillHtml(taskModalQuill);
+        taskModalQuill = null;
       }
       syncTaskAggregateTimes(ctx.task);
       // If timer is running for this task, show timer on kanban card
@@ -4706,7 +4874,7 @@ function closeTaskDetailModal() {
   document.body.classList.remove('modal-open');
 }
 
-function renderTaskCard(task, columnIsoDate, isGhost) {
+function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus) {
   ensureTaskTimeState(task);
   const todayISO = getTodayISO();
   const isPast = columnIsoDate && columnIsoDate < todayISO;
@@ -4753,13 +4921,35 @@ function renderTaskCard(task, columnIsoDate, isGhost) {
     ? columnTimeboxes.reduce((sum, tb) => sum + Math.round(tb.duration * 60), 0)
     : (task.timeEstimateMinutes || 0);
 
+  // Determine daily-planning badge modifier class, icon, and tooltip
+  let dpBadgeClass = '';
+  let dpBadgeIcon = '';
+  let dpBadgeTooltip = '';
+  if (dpBadgeStatus) {
+    const st = dpBadgeStatus.status;
+    if (st === 'unplanned' || st === 'overflow') {
+      dpBadgeClass = ' task-card__time-badge--dp-warning';
+      dpBadgeIcon = '<i data-lucide="triangle-alert" class="task-card__time-badge-icon"></i>';
+      dpBadgeTooltip = st === 'unplanned'
+        ? ' data-dp-tooltip="Missing planned time"'
+        : ` data-dp-tooltip="Only ${formatMinutes(dpBadgeStatus.availableMinutes)} available"`;
+    } else if (st === 'over') {
+      dpBadgeClass = ' task-card__time-badge--dp-over';
+      dpBadgeIcon = '<i data-lucide="triangle-alert" class="task-card__time-badge-icon"></i>';
+      dpBadgeTooltip = ' data-dp-tooltip="No time available"';
+    }
+  }
+
   let timeBadge = '';
-  if (showActualOnBadge && cardPlannedMins) {
-    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / ${formatMinutes(cardPlannedMins)}</span>`;
+  if (dpBadgeStatus && dpBadgeStatus.status === 'unplanned' && !showActualOnBadge) {
+    // Force a badge for unplanned tasks during daily planning
+    timeBadge = `<span class="task-card__time-badge${dpBadgeClass}"${dpBadgeTooltip} data-card-time-badge>--:--${dpBadgeIcon}</span>`;
+  } else if (showActualOnBadge && cardPlannedMins) {
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}${dpBadgeClass}"${dpBadgeTooltip} data-card-time-badge>${formatMinutes(actualMins)} / ${formatMinutes(cardPlannedMins)}${dpBadgeIcon}</span>`;
   } else if (showActualOnBadge) {
-    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(actualMins)} / --:--</span>`;
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}${dpBadgeClass}"${dpBadgeTooltip} data-card-time-badge>${formatMinutes(actualMins)} / --:--${dpBadgeIcon}</span>`;
   } else if (cardPlannedMins) {
-    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}" data-card-time-badge>${formatMinutes(cardPlannedMins)}</span>`;
+    timeBadge = `<span class="task-card__time-badge${badgeGreenClass}${dpBadgeClass}"${dpBadgeTooltip} data-card-time-badge>${formatMinutes(cardPlannedMins)}${dpBadgeIcon}</span>`;
   }
 
   // For timer section: use daily time for past cards, aggregate for current
@@ -4870,7 +5060,18 @@ function renderColumn(column) {
 
   const taskList = colEl.querySelector('.task-list');
   taskList.innerHTML = '';
-  column.tasks.forEach(task => taskList.appendChild(renderTaskCard(task, column.isoDate, false)));
+
+  // Compute daily-planning badge statuses for the planned-day column (steps 2-4)
+  const dpBadgeMap = dailyPlanningState.isActive
+    && dailyPlanningState.step >= DAILY_PLANNING_STEPS.WORKLOAD
+    && column.isoDate === dailyPlanningState.selectedDate
+    ? getDailyPlanningBadgeStatuses(column.tasks, column.isoDate)
+    : null;
+
+  column.tasks.forEach(task => {
+    const dpStatus = dpBadgeMap ? dpBadgeMap.get(task.id) || null : null;
+    taskList.appendChild(renderTaskCard(task, column.isoDate, false, dpStatus));
+  });
 
   // Render ghost cards for past columns
   const todayISO = getTodayISO();
@@ -5182,6 +5383,7 @@ function createColumnElement(column) {
     <div class="day-column__header">
       <a href="#" class="day-name day-name--link" data-day-header-link>${escapeHtml(column.dayName)}</a>
       <span class="day-date">${escapeHtml(column.date)}</span>
+      ${!isPast ? '<button class="day-column__plan-btn" type="button" data-plan-btn>Plan</button>' : ''}
     </div>
     <div class="progress-bar${isToday ? '' : ' progress-bar--hidden'}">
       <div class="progress-bar__fill" style="width:0%"></div>
@@ -5931,6 +6133,17 @@ function attachEvents() {
     scrollToDateColumn(isoDate, { behavior: 'smooth' });
   });
 
+  // ── Plan button: enter daily planning for column date ──
+  container.addEventListener('click', e => {
+    const planBtn = closestFromTarget(e.target, '[data-plan-btn]');
+    if (!planBtn) return;
+    e.stopPropagation();
+    const colEl = planBtn.closest('.day-column');
+    if (!colEl) return;
+    const isoDate = colEl.dataset.isoDate;
+    if (isoDate) enterDailyPlanningMode(isoDate);
+  });
+
   // ── Confirm add task ────────────────────────
   container.addEventListener('click', e => {
     if (!closestFromTarget(e.target, '.add-task-confirm')) return;
@@ -6422,8 +6635,15 @@ function rerenderOpenTaskDetailModal(focusSubtaskId = null) {
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
+  // Save Quill content before re-render destroys the instance
+  if (taskModalQuill) {
+    ctx.task.notes = getQuillHtml(taskModalQuill);
+    taskModalQuill = null;
+  }
+
   overlay.innerHTML = renderTaskDetailModal(ctx.task, ctx.column);
   if (typeof lucide !== 'undefined') lucide.createIcons();
+  initTaskModalQuill(ctx.task);
   if (focusState.running && focusState.taskId === openModalTaskId) {
     updateCardDetailTimerState();
   }
@@ -6959,14 +7179,7 @@ function attachTaskModalEvents() {
   overlay.addEventListener('input', e => {
     const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
     if (!(targetEl instanceof Element)) return;
-    const notesEl = targetEl.closest('.task-modal__notes');
-    if (notesEl) {
-      const cleanNotes = notesEl.textContent.replace(/\n/g, '').trim();
-      if (!cleanNotes && notesEl.innerHTML !== '') {
-        notesEl.textContent = '';
-      }
-      return;
-    }
+    // Notes are now handled by Quill editor — skip old contenteditable cleanup
     const labelEl = targetEl.closest('[data-modal-subtask-label]');
     if (!labelEl) return;
     if (!openModalTaskId) return;
@@ -7486,15 +7699,7 @@ function attachDailyPlanningEvents() {
     }
   });
 
-  panel.addEventListener('input', e => {
-    if (!(e.target instanceof Element) || !dailyPlanningState.isActive) return;
-    const draft = ensureDailyPlanningRunDraft();
-    if (e.target.matches('[data-dp-share-text]')) {
-      draft.shareText = e.target.value;
-      draft.updatedAt = new Date().toISOString();
-      return;
-    }
-  });
+  // Share text input is now handled by Quill editor's text-change event
 }
 
 function attachDailyPlanningEscapeEvents() {

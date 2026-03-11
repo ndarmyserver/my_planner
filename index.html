@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
   <link rel="stylesheet" href="styles.css?v=20260306-04">
 </head>
 <body>
@@ -25,7 +26,7 @@
           <span class="nav-label">Home</span>
         </a>
         <a href="#" class="nav-item">
-          <i data-lucide="list" class="nav-icon"></i>
+          <i data-lucide="list-checks" class="nav-icon"></i>
           <span class="nav-label">Today</span>
         </a>
         <a href="#" class="nav-item" data-sidebar-focus>
@@ -35,29 +36,29 @@
       </nav>
 
       <div class="sidebar__section">
-        <span class="section-label">DAY</span>
+        <span class="section-label">DAILY RITUALS</span>
         <a href="#" class="nav-item" data-sidebar-daily-planning>
-          <i data-lucide="book-open" class="nav-icon"></i>
+          <i data-lucide="clipboard-list" class="nav-icon"></i>
           <span class="nav-label">Daily planning</span>
         </a>
         <a href="#" class="nav-item">
-          <i data-lucide="moon" class="nav-icon"></i>
+          <i data-lucide="book" class="nav-icon"></i>
           <span class="nav-label">Daily shutdown</span>
         </a>
         <a href="#" class="nav-item">
-          <i data-lucide="pencil" class="nav-icon"></i>
+          <i data-lucide="highlighter" class="nav-icon"></i>
           <span class="nav-label">Daily highlights</span>
         </a>
       </div>
 
       <div class="sidebar__section">
-        <span class="section-label">WEEK</span>
+        <span class="section-label">WEEKLY RITUALS</span>
         <a href="#" class="nav-item">
-          <i data-lucide="calendar" class="nav-icon"></i>
+          <i data-lucide="clipboard-list" class="nav-icon"></i>
           <span class="nav-label">Weekly planning</span>
         </a>
         <a href="#" class="nav-item">
-          <i data-lucide="clipboard-list" class="nav-icon"></i>
+          <i data-lucide="book" class="nav-icon"></i>
           <span class="nav-label">Weekly review</span>
         </a>
       </div>
@@ -157,6 +158,9 @@
   <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
 
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
+  <script>window.quill = window.Quill;</script>
+  <script src="https://unpkg.com/quill-markdown-shortcuts@latest/dist/markdownShortcuts.js"></script>
   <script src="app.js?v=20260306-04"></script>
 </body>
 </html>
