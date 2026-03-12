@@ -16,8 +16,13 @@
     <!-- ═══ LEFT SIDEBAR ═══ -->
     <aside class="sidebar">
       <div class="sidebar__logo">
-        <span class="logo-text">Sunsama</span>
-        <i data-lucide="chevron-down" class="logo-caret"></i>
+        <span class="logo-main">
+          <span class="logo-text">Sunsama</span>
+          <i data-lucide="chevron-down" class="logo-caret"></i>
+        </span>
+        <button class="sidebar__collapse-btn" type="button" aria-label="Collapse sidebar" data-sidebar-collapse>
+          <i data-lucide="chevrons-left"></i>
+        </button>
       </div>
 
       <nav class="sidebar__nav">
@@ -41,7 +46,7 @@
           <i data-lucide="clipboard-list" class="nav-icon"></i>
           <span class="nav-label">Daily planning</span>
         </a>
-        <a href="#" class="nav-item">
+        <a href="#" class="nav-item" data-sidebar-daily-shutdown>
           <i data-lucide="book" class="nav-icon"></i>
           <span class="nav-label">Daily shutdown</span>
         </a>
@@ -68,13 +73,19 @@
       <!-- ═══ MAIN BOARD ═══ -->
       <main class="board">
         <div class="board__topbar">
-          <button class="view-btn view-btn--active" data-view="today">
-            <i data-lucide="calendar-days" class="view-icon"></i>
-            Today
-          </button>
+          <div class="board__topbar-left">
+            <button class="sidebar-expand-btn" type="button" aria-label="Expand sidebar" data-sidebar-expand>
+              <i data-lucide="chevrons-right"></i>
+            </button>
+            <button class="view-btn view-btn--active" data-view="today">
+              <i data-lucide="calendar-days" class="view-icon"></i>
+              Today
+            </button>
+          </div>
         </div>
 
         <section class="daily-planning-panel" id="daily-planning-panel" hidden></section>
+        <section class="daily-shutdown-panel" id="daily-shutdown-panel" hidden></section>
 
         <div class="board__columns" id="day-columns">
           <!-- Day columns are rendered by app.js -->
