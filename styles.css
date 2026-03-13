@@ -124,12 +124,19 @@ button { cursor: pointer; }
   display: flex;
   flex-direction: column;
   padding: 12px 12px 16px;
-  overflow-y: auto;
+  overflow: visible;
   flex-shrink: 0;
   transition: width 0.22s ease, min-width 0.22s ease, padding 0.22s ease, opacity 0.22s ease, border-color 0.22s ease;
 }
 
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .sidebar__logo {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -151,17 +158,41 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 6px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
 .logo-text {
   color: #787878;
 }
 
+.logo-main:focus-visible {
+  outline: 2px solid #c8c8c8;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .logo-caret {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   color: #787878;
   flex-shrink: 0;
+}
+
+.logo-caret--up {
+  display: none;
+}
+
+.logo-main[aria-expanded="true"] .logo-caret--down {
+  display: none;
+}
+
+.logo-main[aria-expanded="true"] .logo-caret--up {
+  display: inline-flex;
 }
 
 .sidebar__collapse-btn {
@@ -3311,6 +3342,32 @@ body.modal-open {
   height: 1px;
   background: #ebebeb;
   margin: 4px 0;
+}
+
+.workspace-menu {
+  top: calc(100% + 8px);
+  left: 0;
+  width: max-content;
+  min-width: 200px;
+  z-index: 6000;
+}
+
+.workspace-menu .ellipsis-menu__item-content {
+  white-space: nowrap;
+}
+
+.workspace-menu__meta {
+  padding: 4px 14px 2px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+}
+
+.workspace-menu__email {
+  padding: 0 14px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #413f39;
 }
 
 .sdp-cal {

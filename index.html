@@ -16,56 +16,89 @@
     <!-- ═══ LEFT SIDEBAR ═══ -->
     <aside class="sidebar">
       <div class="sidebar__logo">
-        <span class="logo-main">
+        <button class="logo-main" type="button" data-workspace-menu-toggle aria-expanded="false">
           <span class="logo-text">Sunsama</span>
-          <i data-lucide="chevron-down" class="logo-caret"></i>
-        </span>
+          <i data-lucide="chevron-down" class="logo-caret logo-caret--down"></i>
+          <i data-lucide="chevron-up" class="logo-caret logo-caret--up"></i>
+        </button>
+        <div class="start-date-picker workspace-menu" data-workspace-menu hidden>
+          <div class="sdp__arrow"></div>
+          <button class="sdp__menu-item" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="settings" class="ellipsis-menu__icon"></i>
+              <span>Settings</span>
+            </span>
+          </button>
+          <button class="sdp__menu-item" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="chart-line" class="ellipsis-menu__icon"></i>
+              <span>Analytics</span>
+            </span>
+          </button>
+          <button class="sdp__menu-item" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="keyboard" class="ellipsis-menu__icon"></i>
+              <span>Keyboard shortcuts</span>
+            </span>
+          </button>
+          <div class="sdp__divider"></div>
+          <div class="workspace-menu__meta">Logged in as</div>
+          <div class="workspace-menu__email">thendarmyserver@gmail.com</div>
+          <button class="sdp__menu-item" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="door-closed" class="ellipsis-menu__icon"></i>
+              <span>Log out</span>
+            </span>
+          </button>
+        </div>
         <button class="sidebar__collapse-btn" type="button" aria-label="Collapse sidebar" data-sidebar-collapse>
           <i data-lucide="chevrons-left"></i>
         </button>
       </div>
 
-      <nav class="sidebar__nav">
-        <a href="#" class="nav-item nav-item--active" data-sidebar-home>
-          <i data-lucide="home" class="nav-icon"></i>
-          <span class="nav-label">Home</span>
-        </a>
-        <a href="#" class="nav-item">
-          <i data-lucide="list-checks" class="nav-icon"></i>
-          <span class="nav-label">Today</span>
-        </a>
-        <a href="#" class="nav-item" data-sidebar-focus>
-          <i data-lucide="coffee" class="nav-icon"></i>
-          <span class="nav-label">Focus</span>
-        </a>
-      </nav>
+      <div class="sidebar__scroll">
+        <nav class="sidebar__nav">
+          <a href="#" class="nav-item nav-item--active" data-sidebar-home>
+            <i data-lucide="home" class="nav-icon"></i>
+            <span class="nav-label">Home</span>
+          </a>
+          <a href="#" class="nav-item">
+            <i data-lucide="list-checks" class="nav-icon"></i>
+            <span class="nav-label">Today</span>
+          </a>
+          <a href="#" class="nav-item" data-sidebar-focus>
+            <i data-lucide="coffee" class="nav-icon"></i>
+            <span class="nav-label">Focus</span>
+          </a>
+        </nav>
 
-      <div class="sidebar__section">
-        <span class="section-label">DAILY RITUALS</span>
-        <a href="#" class="nav-item" data-sidebar-daily-planning>
-          <i data-lucide="clipboard-list" class="nav-icon"></i>
-          <span class="nav-label">Daily planning</span>
-        </a>
-        <a href="#" class="nav-item" data-sidebar-daily-shutdown>
-          <i data-lucide="book" class="nav-icon"></i>
-          <span class="nav-label">Daily shutdown</span>
-        </a>
-        <a href="#" class="nav-item">
-          <i data-lucide="highlighter" class="nav-icon"></i>
-          <span class="nav-label">Daily highlights</span>
-        </a>
-      </div>
+        <div class="sidebar__section">
+          <span class="section-label">DAILY RITUALS</span>
+          <a href="#" class="nav-item" data-sidebar-daily-planning>
+            <i data-lucide="clipboard-list" class="nav-icon"></i>
+            <span class="nav-label">Daily planning</span>
+          </a>
+          <a href="#" class="nav-item" data-sidebar-daily-shutdown>
+            <i data-lucide="book" class="nav-icon"></i>
+            <span class="nav-label">Daily shutdown</span>
+          </a>
+          <a href="#" class="nav-item">
+            <i data-lucide="highlighter" class="nav-icon"></i>
+            <span class="nav-label">Daily highlights</span>
+          </a>
+        </div>
 
-      <div class="sidebar__section">
-        <span class="section-label">WEEKLY RITUALS</span>
-        <a href="#" class="nav-item">
-          <i data-lucide="clipboard-list" class="nav-icon"></i>
-          <span class="nav-label">Weekly planning</span>
-        </a>
-        <a href="#" class="nav-item">
-          <i data-lucide="book" class="nav-icon"></i>
-          <span class="nav-label">Weekly review</span>
-        </a>
+        <div class="sidebar__section">
+          <span class="section-label">WEEKLY RITUALS</span>
+          <a href="#" class="nav-item">
+            <i data-lucide="clipboard-list" class="nav-icon"></i>
+            <span class="nav-label">Weekly planning</span>
+          </a>
+          <a href="#" class="nav-item">
+            <i data-lucide="book" class="nav-icon"></i>
+            <span class="nav-label">Weekly review</span>
+          </a>
+        </div>
       </div>
     </aside>
 

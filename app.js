@@ -9085,6 +9085,22 @@ function setSidebarCollapsed(isCollapsed) {
   if (focusModal) focusModal.classList.toggle('focus-modal--sidebar-collapsed', isCollapsed);
 }
 
+function closeWorkspaceMenu() {
+  const menu = document.querySelector('[data-workspace-menu]');
+  if (menu) menu.hidden = true;
+  const toggle = document.querySelector('[data-workspace-menu-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function toggleWorkspaceMenu() {
+  const menu = document.querySelector('[data-workspace-menu]');
+  if (!menu) return;
+  const nextOpen = menu.hidden;
+  menu.hidden = !nextOpen;
+  const toggle = document.querySelector('[data-workspace-menu-toggle]');
+  if (toggle) toggle.setAttribute('aria-expanded', String(nextOpen));
+}
+
 function attachSidebarToggleEvents() {
   const collapseBtn = document.querySelector('[data-sidebar-collapse]');
   const expandBtn = document.querySelector('[data-sidebar-expand]');
@@ -9145,6 +9161,37 @@ function attachSidebarEvents() {
     e.preventDefault();
     const firstTaskId = getTopTodayTaskId();
     if (firstTaskId) openFocusMode(firstTaskId, false, 'sidebar');
+  });
+}
+
+function attachWorkspaceMenuEvents() {
+  const toggle = document.querySelector('[data-workspace-menu-toggle]');
+  const menu = document.querySelector('[data-workspace-menu]');
+  if (!toggle || !menu) return;
+
+  toggle.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleWorkspaceMenu();
+  });
+
+  menu.addEventListener('click', e => {
+    const item = e.target.closest('.sdp__menu-item');
+    if (item) closeWorkspaceMenu();
+  });
+
+  document.addEventListener('click', e => {
+    if (!(e.target instanceof Element)) { closeWorkspaceMenu(); return; }
+    if (e.target.closest('[data-workspace-menu]')) return;
+    if (e.target.closest('[data-workspace-menu-toggle]')) return;
+    closeWorkspaceMenu();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    if (menu.hidden) return;
+    e.preventDefault();
+    closeWorkspaceMenu();
   });
 }
 
@@ -9896,6 +9943,7 @@ document.addEventListener('DOMContentLoaded', () => {
   attachBoardTopbarEvents();
   attachSidebarToggleEvents();
   attachSidebarEvents();
+  attachWorkspaceMenuEvents();
   attachDailyPlanningEvents();
   attachDailyPlanningEscapeEvents();
   attachDailyShutdownEvents();
