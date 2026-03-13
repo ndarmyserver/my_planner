@@ -2381,10 +2381,21 @@ body.is-workday-marker-dragging {
   font-weight: 400;
 }
 
-.cal-event--blue   { background: var(--color-event-blue); }
-.cal-event--orange { background: var(--color-event-orange); }
-.cal-event--green  { background: var(--color-event-green); }
-.cal-event--purple { background: var(--color-event-purple); }
+.cal-event--blue   { background-color: var(--color-event-blue); }
+.cal-event--orange { background-color: var(--color-event-orange); }
+.cal-event--green  { background-color: var(--color-event-green); }
+.cal-event--purple { background-color: var(--color-event-purple); }
+
+/* Actual-time event diagonal stripe overlay */
+.cal-event--actual {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 3px,
+    rgba(255, 255, 255, 0.22) 3px,
+    rgba(255, 255, 255, 0.22) 5px
+  );
+}
 
 /* ═══════════════════════════════════════════════
    DRAG AND DROP
@@ -3247,9 +3258,9 @@ body.modal-open {
 
 .sdp__section-label {
   display: block;
-  font-size: 11px;
-  font-weight: 500;
-  color: #999999;
+  font-size: 12px;
+  font-weight: 400;
+  color: #787878;
   padding: 4px 14px;
 }
 
@@ -3262,8 +3273,9 @@ body.modal-open {
   border: none;
   background: transparent;
   font-family: inherit;
-  font-size: 13px;
-  color: #3c3c3c;
+  font-size: 14px;
+  font-weight: 500;
+  color: #413f39;
   cursor: pointer;
   transition: background 0.1s ease;
   text-align: left;
@@ -3316,7 +3328,7 @@ body.modal-open {
   border: none;
   background: transparent;
   cursor: pointer;
-  color: #999999;
+  color: #787878;
   padding: 2px;
   border-radius: 4px;
   display: inline-flex;
@@ -3337,7 +3349,7 @@ body.modal-open {
 .sdp-cal__month-label {
   font-size: 13px;
   font-weight: 600;
-  color: #3c3c3c;
+  color: #413f39;
 }
 
 .sdp-cal__grid {
@@ -3370,7 +3382,7 @@ body.modal-open {
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
-  color: #3c3c3c;
+  color: #413f39;
   cursor: pointer;
   transition: background 0.1s ease;
 }
@@ -3410,6 +3422,44 @@ body.modal-open {
 }
 
 /* ═══════════════════════════════════════════════
+   ELLIPSIS MENU (Task Detail)
+═══════════════════════════════════════════════ */
+.ellipsis-menu-wrap {
+  position: relative;
+}
+
+.ellipsis-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: -16px;
+  width: 200px;
+  background: #ffffff;
+  border: 1px solid #dcdcdc;
+  border-radius: 4px;
+  box-shadow: 0 6px 12px #0003;
+  z-index: 5000;
+  padding: 8px 0;
+}
+
+.ellipsis-menu .sdp__arrow {
+  left: auto;
+  right: 21px;
+}
+
+.ellipsis-menu__item-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ellipsis-menu__icon {
+  width: 16px !important;
+  height: 16px !important;
+  color: #b4b4b4;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════
    PLANNED TIME PICKER
 ═══════════════════════════════════════════════ */
 .task-modal__metric--planned,
@@ -3443,6 +3493,7 @@ body.modal-open {
   box-shadow: 0 6px 12px #0003;
   z-index: 5000;
   padding: 12px 0 8px;
+  text-align: left;
 }
 
 .planned-picker__arrow {
@@ -3539,35 +3590,40 @@ body.modal-open {
 .actual-picker__history-entry {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   padding: 4px 15px;
   font-size: 13px;
 }
 
 .actual-picker__history-time {
-  font-weight: 600;
-  color: #333;
+  font-size: 14px;
+  font-weight: 500;
+  color: #413f39;
   min-width: 32px;
 }
 
 .actual-picker__history-date {
-  color: #999;
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
   flex: 1;
 }
 
 .actual-picker__history-delete {
   background: none;
   border: none;
-  color: #ccc;
+  color: #f25a43;
   cursor: pointer;
-  padding: 0 2px;
+  padding: 0;
+  width: 14px;
+  height: 14px;
   font-size: 14px;
   line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.actual-picker__history-delete:hover {
-  color: #e74c3c;
-}
 
 /* Time entry mode */
 .planned-picker__time-entry {
@@ -3622,18 +3678,32 @@ body.modal-open {
   padding: 6px 15px 4px;
 }
 
+.planned-picker__calculated-hint {
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+  padding: 8px 15px 4px;
+  cursor: default;
+}
+
 /* ═══════════════════════════════════════════════
    FOCUS MODE
 ═══════════════════════════════════════════════ */
 .focus-modal {
   position: fixed;
   inset: 8px;
+  left: var(--sidebar-width);
   background: #ffffff;
   border-radius: 4px;
   z-index: 9000;
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+  transition: left 0.2s ease;
+}
+
+.focus-modal--sidebar-collapsed {
+  left: 8px;
 }
 
 .focus-modal__topbar {
@@ -3641,6 +3711,38 @@ body.modal-open {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
+}
+
+.focus-modal__sidebar-expand {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #787878;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+
+.focus-modal__sidebar-expand svg {
+  width: 12px;
+  height: 12px;
+}
+
+.focus-modal__sidebar-expand:hover {
+  color: #413f39;
+}
+
+.focus-modal--sidebar-collapsed .focus-modal__sidebar-expand {
+  display: inline-flex;
+}
+
+.focus-modal__close {
+  margin-left: auto;
 }
 
 .focus-modal__tab {
@@ -4326,4 +4428,36 @@ body.modal-open {
   .task-modal__notes-editor .ql-editor {
     min-height: 100px;
   }
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 210px;
+  padding: 10px 20px;
+  background: #ffb74d;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 4px;
+  box-shadow: 0 6px 20px #00000080;
+  z-index: 99999;
+  text-align: center;
+  pointer-events: none;
+  animation: toast-lifecycle 2.6s ease forwards;
+}
+
+.toast--dark {
+  background: #282828;
+  color: #e6e6e6;
+}
+
+@keyframes toast-lifecycle {
+  0%   { opacity: 0; }
+  11%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { opacity: 0; }
 }

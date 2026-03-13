@@ -295,7 +295,9 @@ const state = {
   dayWindow: {
     startISO: null,
     endISO: null
-  }
+  },
+
+  trash: []
 };
 
 const DAILY_PLANNING_STEPS = {
@@ -742,9 +744,9 @@ function recordDailyTime(task, isoDate, deltaSeconds, subtaskId) {
   }
   const entry = task.dailyActualTime[isoDate];
   if (subtaskId) {
-    entry.subtasks[subtaskId] = (entry.subtasks[subtaskId] || 0) + deltaSeconds;
+    entry.subtasks[subtaskId] = Math.max(0, (entry.subtasks[subtaskId] || 0) + deltaSeconds);
   } else {
-    entry.ownSeconds = (entry.ownSeconds || 0) + deltaSeconds;
+    entry.ownSeconds = Math.max(0, (entry.ownSeconds || 0) + deltaSeconds);
   }
 }
 
@@ -769,7 +771,7 @@ function hasShutdownActivityOnDate(task, isoDate) {
 // Get all timebox events for a task on a specific date
 function getTaskTimeboxesForDate(task, isoDate) {
   if (!task || !isoDate) return [];
-  return state.calendarEvents.filter(e => e.taskId === task.id && e.date === isoDate);
+  return state.calendarEvents.filter(e => e.taskId === task.id && e.date === isoDate && e.systemType !== 'actual');
 }
 
 function hasTimeboxForDate(task, isoDate) {
@@ -794,7 +796,7 @@ function getAggregatePlannedMinutes(task) {
   const todayISO = getTodayISO();
   let totalTimeboxMinutes = 0;
   for (const evt of state.calendarEvents) {
-    if (evt.taskId === task.id && evt.date < todayISO) {
+    if (evt.taskId === task.id && evt.date < todayISO && evt.systemType !== 'actual') {
       totalTimeboxMinutes += Math.round(evt.duration * 60);
     }
   }
@@ -890,8 +892,97 @@ function syncTaskAggregateTimes(task) {
     return sum + (subtask.actualTimeSeconds || 0);
   }, 0);
 
-  task.timeEstimateMinutes = Math.max(0, (task.ownPlannedMinutes || 0) + subtaskPlanned);
-  task.actualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) + subtaskActual);
+  // When subtasks have planned time, parent planned = subtask total only (own is preserved but not counted)
+  // Exception: if task has a timebox, planned time reflects the timebox (handled by calendar resize)
+  if (subtaskPlanned > 0) {
+    const homeCol = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+    const homeDate = homeCol ? homeCol.isoDate : null;
+    const hasTimebox = homeDate && getTaskTimeboxesForDate(task, homeDate).length > 0;
+    task.timeEstimateMinutes = hasTimebox
+      ? Math.max(0, (task.ownPlannedMinutes || 0) + subtaskPlanned)
+      : subtaskPlanned;
+  } else {
+    task.timeEstimateMinutes = Math.max(0, (task.ownPlannedMinutes || 0) + subtaskPlanned);
+  }
+  // When subtasks have actual time, parent actual = subtask total only (own is discarded)
+  if (subtaskActual > 0) {
+    if (task.ownActualTimeSeconds > 0) {
+      // Clear parent's own actual time and remove parent-level actual events from timeline
+      task.ownActualTimeSeconds = 0;
+      removeActualTimeEventsForTask(task.id, null, null);
+    }
+    // Also clear dailyActualTime ownSeconds across all dates so getTaskDailyActualSeconds stays consistent
+    ensureTaskRolloverState(task);
+    for (const dateKey in task.dailyActualTime) {
+      if (task.dailyActualTime[dateKey].ownSeconds) {
+        task.dailyActualTime[dateKey].ownSeconds = 0;
+      }
+    }
+    task.actualTimeSeconds = subtaskActual;
+  } else {
+    task.actualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0));
+  }
+}
+
+/* ── Actual-time calendar event helpers ── */
+
+function taskHasSubtaskActualTime(task) {
+  if (!task || !Array.isArray(task.subtasks)) return false;
+  return task.subtasks.some(s => (s.actualTimeSeconds || 0) > 0);
+}
+
+function taskHasSubtaskPlannedTime(task) {
+  if (!task || !Array.isArray(task.subtasks)) return false;
+  return task.subtasks.some(s => (s.plannedMinutes || 0) > 0);
+}
+
+function timestampToOffset(ts) {
+  const d = new Date(ts);
+  return d.getHours() + d.getMinutes() / 60 + d.getSeconds() / 3600;
+}
+
+function createActualTimeEvent(task, subtaskId, isoDate, offset, duration, source) {
+  const subtask = subtaskId ? findSubtask(task, subtaskId) : null;
+  const title = subtask ? `${task.title}: ${subtask.label}` : task.title;
+  const evt = {
+    id: 'act-' + uid(),
+    title,
+    colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+    offset,
+    duration: Math.max(duration, 1 / SNAP_STEPS_PER_HOUR),
+    taskId: task.id,
+    subtaskId: subtaskId || null,
+    date: isoDate,
+    systemType: 'actual',
+    source,
+    zOrder: ++calZCounter
+  };
+  state.calendarEvents.push(evt);
+  renderCalendarEvents();
+  return evt;
+}
+
+function getActualTimeEventsForTask(taskId, date, subtaskId) {
+  return state.calendarEvents.filter(e =>
+    e.systemType === 'actual' &&
+    e.taskId === taskId &&
+    (!date || e.date === date) &&
+    (subtaskId === undefined || e.subtaskId === subtaskId)
+  );
+}
+
+function removeActualTimeEventsForTask(taskId, date, subtaskId) {
+  let removedSeconds = 0;
+  state.calendarEvents = state.calendarEvents.filter(e => {
+    if (e.systemType === 'actual' && e.taskId === taskId &&
+        (!date || e.date === date) &&
+        (subtaskId === undefined || e.subtaskId === subtaskId)) {
+      removedSeconds += Math.round(e.duration * 3600);
+      return false;
+    }
+    return true;
+  });
+  return removedSeconds;
 }
 
 function findSubtask(task, subtaskId) {
@@ -1364,17 +1455,33 @@ function getDailyShutdownChannelBreakdown(isoDate) {
 
 function buildDailyShutdownShareTemplate(isoDate, tasks) {
   const taskItems = tasks.length
-    ? tasks.map(task => {
+    ? tasks.flatMap(task => {
       const isCompleted = task.completedOnDate === isoDate || task.complete;
       const actualSeconds = getTaskDailyActualSeconds(task, isoDate);
-      let detailLabel = '';
+      const items = [];
+      const completedSubIds = (task.subtaskCompletionsByDate && task.subtaskCompletionsByDate[isoDate]) || [];
+      // Show parent task bullet only if the parent itself is completed
       if (isCompleted) {
         const actualLabel = formatActualMinutesForShare(actualSeconds);
-        detailLabel = actualLabel !== '--:--' ? `${actualLabel} - Completed` : 'Completed';
-      } else {
-        detailLabel = formatActualMinutesForShare(actualSeconds);
+        const detailLabel = actualLabel !== '--:--' ? `${actualLabel} - Completed` : 'Completed';
+        items.push(`<li>${escapeHtml(task.title)} <em>(${escapeHtml(detailLabel)})</em></li>`);
+      } else if (completedSubIds.length === 0) {
+        // Parent not completed and no subtasks completed today — show parent with time only
+        const detailLabel = formatActualMinutesForShare(actualSeconds);
+        items.push(`<li>${escapeHtml(task.title)} <em>(${escapeHtml(detailLabel)})</em></li>`);
       }
-      return `<li>${escapeHtml(task.title)} <em>(${escapeHtml(detailLabel)})</em></li>`;
+      // Show subtasks completed on this date
+      if (Array.isArray(task.subtasks) && completedSubIds.length > 0) {
+        const dailySubtasks = task.dailyActualTime && task.dailyActualTime[isoDate] && task.dailyActualTime[isoDate].subtasks || {};
+        for (const sub of task.subtasks) {
+          if (!completedSubIds.includes(sub.id)) continue;
+          const subSeconds = dailySubtasks[sub.id] || sub.actualTimeSeconds || 0;
+          const subActualLabel = formatActualMinutesForShare(subSeconds);
+          const subDetail = subActualLabel !== '--:--' ? `${subActualLabel} - Completed` : 'Completed';
+          items.push(`<li>${escapeHtml(sub.label)} - <em>subtask of ${escapeHtml(task.title)}</em> <em>(${escapeHtml(subDetail)})</em></li>`);
+        }
+      }
+      return items;
     }).join('')
     : '<li>No tasks recorded</li>';
 
@@ -2934,7 +3041,7 @@ function renderTaskDetailModal(task, column) {
           <div class="task-modal__top-actions">
             ${!task.dueDate ? '<div class="task-modal__due-wrap"><button class="task-modal__top-action" type="button" data-due-btn><i data-lucide="calendar"></i><span>Due</span></button></div>' : ''}
             <button class="task-modal__top-action" type="button" data-modal-add-two-subtasks><i data-lucide="plus"></i><span>Subtasks</span></button>
-            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More"><i data-lucide="ellipsis"></i></button>
+            <div class="ellipsis-menu-wrap"><button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More" data-ellipsis-btn><i data-lucide="ellipsis"></i></button></div>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand" data-expand-btn><i data-lucide="maximize-2"></i></button>
             <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close details" data-task-modal-close><i data-lucide="x"></i></button>
           </div>
@@ -3123,6 +3230,139 @@ function renderDueDateDropdown(currentDueDate, viewYear, viewMonth) {
 
 let startDatePickerState = null;
 let topbarTodayPickerState = null; // { selectedIsoDate, viewYear, viewMonth }
+let ellipsisMenuState = null; // { taskId }
+
+function openEllipsisMenu(taskId) {
+  ellipsisMenuState = { taskId };
+  renderEllipsisMenuInModal();
+}
+
+function closeEllipsisMenu() {
+  ellipsisMenuState = null;
+  const existing = document.querySelector('[data-ellipsis-menu]');
+  if (existing) existing.remove();
+}
+
+function renderEllipsisMenuInModal() {
+  if (!ellipsisMenuState) return;
+
+  const existing = document.querySelector('[data-ellipsis-menu]');
+  if (existing) existing.remove();
+
+  const overlay = document.getElementById('task-modal-overlay');
+  const wrap = overlay.querySelector('.ellipsis-menu-wrap');
+  if (!wrap) return;
+
+  const html = `
+    <div class="ellipsis-menu" data-ellipsis-menu>
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Other actions:</span>
+        <button class="sdp__menu-item" data-action="duplicate-task" type="button">
+          <span class="ellipsis-menu__item-content">
+            <i data-lucide="files" class="ellipsis-menu__icon"></i>
+            <span>Duplicate</span>
+          </span>
+        </button>
+        <button class="sdp__menu-item" data-action="delete-task" type="button">
+          <span class="ellipsis-menu__item-content">
+            <i data-lucide="trash" class="ellipsis-menu__icon"></i>
+            <span>Delete</span>
+          </span>
+        </button>
+      </div>
+    </div>
+  `;
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = html;
+  const dropdown = wrapper.firstElementChild;
+  wrap.appendChild(dropdown);
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+/* ── Duplicate & Delete Handlers ─────────────── */
+
+function handleDuplicateTask(taskId) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+  const task = ctx.task;
+  ensureTaskTimeState(task);
+
+  const todayISO = getTodayISO();
+  const newTask = {
+    id: uid(),
+    title: task.title,
+    timeEstimateMinutes: task.timeEstimateMinutes || 0,
+    actualTimeSeconds: 0,
+    ownPlannedMinutes: task.ownPlannedMinutes || 0,
+    ownActualTimeSeconds: 0,
+    scheduledTime: null,
+    complete: false,
+    tag: task.tag || null,
+    integrationColor: task.integrationColor || null,
+    subtasks: (task.subtasks || []).map(st => ({
+      id: uid(),
+      label: st.label,
+      done: false,
+      plannedMinutes: st.plannedMinutes || 0,
+      actualTimeSeconds: 0
+    })),
+    showSubtasks: (task.subtasks || []).length > 0,
+    startDate: task.startDate || null,
+    dueDate: task.dueDate || null,
+    dailyActualTime: {},
+    subtaskCompletionsByDate: {},
+    completedOnDate: null,
+    notes: task.notes || ''
+  };
+
+  // Determine target column
+  const startDate = newTask.startDate;
+  let targetCol;
+  if (!startDate || startDate <= todayISO) {
+    targetCol = ensureColumnForDate(todayISO);
+  } else {
+    targetCol = ensureColumnForDate(startDate);
+  }
+
+  targetCol.tasks.unshift(newTask);
+  closeEllipsisMenu();
+  closeTaskDetailModal();
+  renderColumn(targetCol);
+  if (ctx.column.id !== targetCol.id) {
+    renderColumn(ctx.column);
+  }
+  showToast('Duplicated', 'dark');
+}
+
+function handleDeleteTask(taskId) {
+  const ctx = findTaskContext(taskId);
+  if (!ctx) return;
+
+  const task = ctx.task;
+  const column = ctx.column;
+
+  // Remove from column
+  column.tasks.splice(ctx.index, 1);
+
+  // Remove all associated calendar events
+  state.calendarEvents = state.calendarEvents.filter(e => e.taskId !== taskId);
+
+  // Add to trash
+  state.trash.push({
+    task,
+    deletedFrom: { columnId: column.id, isoDate: column.isoDate },
+    deletedAt: new Date().toISOString()
+  });
+
+  closeEllipsisMenu();
+  closeTaskDetailModal();
+  renderColumn(column);
+  renderCalendarEvents();
+  showToast('Deleted', 'dark');
+}
 
 function openStartDatePicker(taskId) {
   closeDueDatePicker();
@@ -3918,8 +4158,23 @@ function renderPlannedPickerInModal() {
   const currentFormatted = currentMins ? formatMinutes(currentMins) : '--:--';
   const dateLabel = getPlannedDateLabel(ctx.column);
 
+  // Check if parent planned is locked out by subtask planned time
+  // Exception: if task has a timebox on the calendar, parent planned reflects the timebox
+  const hasTimebox = ctx.column && getTaskTimeboxesForDate(task, ctx.column.isoDate).length > 0;
+  const parentPlannedLocked = !subtask && !hasTimebox && taskHasSubtaskPlannedTime(task);
+
   let html;
-  if (plannedPickerEditMode) {
+  if (parentPlannedLocked) {
+    html = `
+      <div class="planned-picker" data-planned-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Planned (${escapeHtml(dateLabel)}):</div>
+        <button class="planned-picker__time-display" type="button" style="cursor:default">${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        <div class="planned-picker__calculated-hint">Calculated from subtasks. To update, edit subtasks.</div>
+      </div>
+    `;
+  } else if (plannedPickerEditMode) {
     // Time entry mode
     const h = Math.floor(currentMins / 60);
     const m = currentMins % 60;
@@ -3986,6 +4241,10 @@ function applyPlannedTime(minutes) {
   if (!ctx) return;
   const task = ctx.task;
   const subtask = plannedPickerSubtaskId ? findSubtask(task, plannedPickerSubtaskId) : null;
+
+  // Guard: parent-level planned time is read-only when subtasks have planned time (unless timeboxed)
+  const hasPlannedTimebox = ctx.column && getTaskTimeboxesForDate(task, ctx.column.isoDate).length > 0;
+  if (!subtask && !hasPlannedTimebox && taskHasSubtaskPlannedTime(task)) return;
 
   if (subtask) {
     subtask.plannedMinutes = minutes;
@@ -4110,7 +4369,18 @@ function renderActualPickerInModal() {
   const dateLabel = getActualDateLabel(null, effectiveDate);
 
   let html;
-  if (actualPickerEditMode) {
+  // Parent-level lock-out: when subtasks have actual time, parent is read-only
+  if (!subtask && taskHasSubtaskActualTime(task)) {
+    html = `
+      <div class="planned-picker" data-actual-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">Actual (${escapeHtml(dateLabel)}):</div>
+        <button class="planned-picker__time-display" type="button" style="cursor:default">${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        <div class="planned-picker__calculated-hint">Calculated from subtasks. To update, edit subtasks.</div>
+      </div>
+    `;
+  } else if (actualPickerEditMode) {
     const h = Math.floor(currentMins / 60);
     const m = currentMins % 60;
     const hasVal = hasCurrentActual;
@@ -4143,7 +4413,7 @@ function renderActualPickerInModal() {
 
     // Build history section from dailyActualTime
     ensureTaskRolloverState(task);
-    const historyEntries = Object.entries(task.dailyActualTime)
+    const allDailyEntries = Object.entries(task.dailyActualTime)
       .map(([date, entry]) => {
         let total = entry.ownSeconds || 0;
         if (entry.subtasks) {
@@ -4154,14 +4424,18 @@ function renderActualPickerInModal() {
       .filter(e => e.total > 0)
       .sort((a, b) => b.date.localeCompare(a.date));
 
+    // Only show history if there are entries on dates other than the current effective date
+    const hasOtherDates = allDailyEntries.some(e => e.date !== effectiveDate);
+    const historyEntries = hasOtherDates ? allDailyEntries : [];
+
     const historyHtml = historyEntries.length > 0
-      ? `<div class="planned-picker__divider"></div>
-         <div class="planned-picker__header" style="margin-top:4px">History:</div>
+      ? `<div class="planned-picker__header" style="margin-top:8px">History:</div>
          ${historyEntries.map(e => `<div class="actual-picker__history-entry">
            <span class="actual-picker__history-time">${formatMinutes(Math.floor(e.total / 60))}</span>
            <span class="actual-picker__history-date">${formatDateDisplay(e.date)}</span>
            <button class="actual-picker__history-delete" type="button" data-delete-history="${e.date}">×</button>
-         </div>`).join('')}`
+         </div>`).join('')}
+         <div class="planned-picker__divider"></div>`
       : '';
 
     html = `
@@ -4170,9 +4444,9 @@ function renderActualPickerInModal() {
         <div class="planned-picker__header">Actual (${escapeHtml(dateLabel)}):</div>
         <button class="planned-picker__time-display" type="button" data-actual-edit-mode>${currentFormatted}</button>
         <div class="planned-picker__divider"></div>
+        ${historyHtml}
         ${optionsHtml}
         ${clearHtml}
-        ${historyHtml}
       </div>
     `;
   }
@@ -4200,27 +4474,57 @@ function applyActualTime(minutes) {
   const task = ctx.task;
   const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
 
+  // Guard: parent-level actual time is read-only when subtasks have actual time
+  if (!subtask && taskHasSubtaskActualTime(task)) return;
+
   const applyDateISO = actualPickerDateScope || getTodayISO();
   ensureTaskRolloverState(task);
 
   if (subtask) {
-    const oldSeconds = subtask.actualTimeSeconds || 0;
-    subtask.actualTimeSeconds = minutes * 60;
     subtask.deleteReady = false;
-    const delta = subtask.actualTimeSeconds - oldSeconds;
     if (!task.dailyActualTime[applyDateISO]) task.dailyActualTime[applyDateISO] = { ownSeconds: 0, subtasks: {} };
-    task.dailyActualTime[applyDateISO].subtasks[subtask.id] =
-      Math.max(0, (task.dailyActualTime[applyDateISO].subtasks[subtask.id] || 0) + delta);
+    if (!task.dailyActualTime[applyDateISO].subtasks) task.dailyActualTime[applyDateISO].subtasks = {};
+    task.dailyActualTime[applyDateISO].subtasks[subtask.id] = minutes * 60;
+    // Recompute subtask aggregate from all daily entries
+    let totalSubtaskSeconds = 0;
+    for (const dateKey in task.dailyActualTime) {
+      const de = task.dailyActualTime[dateKey];
+      if (de.subtasks && de.subtasks[subtask.id]) totalSubtaskSeconds += de.subtasks[subtask.id];
+    }
+    subtask.actualTimeSeconds = totalSubtaskSeconds;
   } else {
-    const oldOwn = task.ownActualTimeSeconds || 0;
-    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
-    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
-    const delta = task.ownActualTimeSeconds - oldOwn;
     if (!task.dailyActualTime[applyDateISO]) task.dailyActualTime[applyDateISO] = { ownSeconds: 0, subtasks: {} };
-    task.dailyActualTime[applyDateISO].ownSeconds =
-      Math.max(0, (task.dailyActualTime[applyDateISO].ownSeconds || 0) + delta);
+    const entry = task.dailyActualTime[applyDateISO];
+    const subtaskDailyTotal = entry.subtasks
+      ? Object.values(entry.subtasks).reduce((s, v) => s + (v || 0), 0)
+      : 0;
+    entry.ownSeconds = Math.max(0, minutes * 60 - subtaskDailyTotal);
+    // Recompute own aggregate from all daily entries
+    let totalOwnSeconds = 0;
+    for (const dateKey in task.dailyActualTime) {
+      totalOwnSeconds += task.dailyActualTime[dateKey].ownSeconds || 0;
+    }
+    task.ownActualTimeSeconds = totalOwnSeconds;
   }
   syncTaskAggregateTimes(task);
+
+  // Actual-time calendar events: create/remove for today only
+  const todayForPicker = getTodayISO();
+  if (applyDateISO === todayForPicker) {
+    const pickSubId = actualPickerSubtaskId || null;
+    removeActualTimeEventsForTask(task.id, todayForPicker, pickSubId);
+    if (minutes > 0) {
+      const nowOffset = timestampToOffset(Date.now());
+      const durationHours = minutes / 60;
+      const startOffset = Math.max(0, nowOffset - durationHours);
+      createActualTimeEvent(task, pickSubId, todayForPicker, startOffset, nowOffset - startOffset, 'picker');
+    } else {
+      renderCalendarEvents();
+    }
+    // Reset timer merge state since manual edit replaces timer events
+    focusState.lastTimerEventId = null;
+    focusState.lastTimerStopTimestamp = null;
+  }
 
   closeActualPicker();
   const overlay = document.getElementById('task-modal-overlay');
@@ -4266,7 +4570,7 @@ function handleActualTimeEntry() {
 /* ═══════════════════════════════════════════════
    FOCUS MODE
 ═══════════════════════════════════════════════ */
-let focusState = { taskId: null, subtaskId: null, running: false, intervalId: null, enteredFrom: null };
+let focusState = { taskId: null, subtaskId: null, running: false, intervalId: null, enteredFrom: null, timerStartTimestamp: null, lastTimerStopTimestamp: null, lastTimerEventId: null };
 let cardTimerExpanded = new Set(); // keys for expanded timer dropdowns on kanban cards
 const cardTimerAutoCollapseTimers = new Map(); // key -> timeout id
 function getCardTimerKey(taskId, columnIsoDate) {
@@ -4460,7 +4764,24 @@ function renderCardPicker() {
   const clearLabel = isActual ? 'Clear actual' : 'Clear planned';
 
   let html;
-  if (editMode) {
+  // Parent-level lock-out for card picker (actual or planned)
+  const cardColDate = actualPickerDateScope || (metricEl.closest('.day-column') || {}).dataset?.isoDate;
+  const cardHasTimebox = cardColDate && getTaskTimeboxesForDate(task, cardColDate).length > 0;
+  const cardParentLocked = !subtaskId && (
+    (isActual && taskHasSubtaskActualTime(task)) ||
+    (!isActual && !cardHasTimebox && taskHasSubtaskPlannedTime(task))
+  );
+  if (cardParentLocked) {
+    html = `
+      <div class="planned-picker" data-card-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <button class="planned-picker__time-display" type="button" style="cursor:default">${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        <div class="planned-picker__calculated-hint">Calculated from subtasks. To update, edit subtasks.</div>
+      </div>
+    `;
+  } else if (editMode) {
     const h = Math.floor(currentMins / 60);
     const m = currentMins % 60;
     const hasVal = isActual ? hasCurrentActual : currentMins > 0;
@@ -4532,6 +4853,15 @@ function applyCardPickerTime(minutes) {
   const task = findTaskById(taskId);
   if (!task) return;
 
+  // Guard: parent-level time is read-only when subtasks have time
+  if (type === 'actual' && !subtaskId && taskHasSubtaskActualTime(task)) return;
+  if (type === 'planned' && !subtaskId && taskHasSubtaskPlannedTime(task)) {
+    // Exception: allow if task has a timebox
+    const guardCol = state.columns.find(c => c.tasks.some(t => t.id === taskId));
+    const guardDate = guardCol ? guardCol.isoDate : null;
+    if (!guardDate || getTaskTimeboxesForDate(task, guardDate).length === 0) return;
+  }
+
   const dateScope = actualPickerDateScope;
   const applyDateScope = type === 'actual'
     ? (dateScope || getTodayISO())
@@ -4588,6 +4918,26 @@ function applyCardPickerTime(minutes) {
   }
   syncTaskAggregateTimes(task);
 
+  // Actual-time calendar events: create/remove for today only
+  if (type === 'actual') {
+    const todayForCardPicker = getTodayISO();
+    const effectiveDate = applyDateScope || todayForCardPicker;
+    if (effectiveDate === todayForCardPicker) {
+      const cardPickSubId = subtaskId || null;
+      removeActualTimeEventsForTask(taskId, todayForCardPicker, cardPickSubId);
+      if (minutes > 0) {
+        const nowOffset = timestampToOffset(Date.now());
+        const durationHours = minutes / 60;
+        const startOffset = Math.max(0, nowOffset - durationHours);
+        createActualTimeEvent(task, cardPickSubId, todayForCardPicker, startOffset, nowOffset - startOffset, 'picker');
+      } else {
+        renderCalendarEvents();
+      }
+      focusState.lastTimerEventId = null;
+      focusState.lastTimerStopTimestamp = null;
+    }
+  }
+
   // If clearing time on a past card, collapse the timer area
   if (applyDateScope && type === 'actual' && minutes === 0) {
     const key = getCardTimerKey(taskId, applyDateScope);
@@ -4630,12 +4980,35 @@ function formatSeconds(totalSeconds) {
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function showToast(message, variant) {
+  const existing = document.querySelector('.toast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.className = 'toast' + (variant === 'dark' ? ' toast--dark' : '');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  toast.addEventListener('animationend', () => toast.remove());
+}
+
 function openFocusMode(taskId, autoStart, from, subtaskId = null) {
   const ctx = findTaskContext(taskId);
   if (!ctx) return;
 
+  const todayISO = getTodayISO();
+  const isInToday = state.columns.some(col => col.isoDate === todayISO && col.tasks.some(t => t.id === taskId));
+  if (!isInToday) {
+    showToast('Must focus on today');
+    return;
+  }
+
   focusState.taskId = taskId;
-  focusState.subtaskId = subtaskId;
+  // Route parent START to last active subtask when subtasks have actual time
+  if (!subtaskId && taskHasSubtaskActualTime(ctx.task)) {
+    const lastActiveSubtask = [...(ctx.task.subtasks || [])].reverse().find(s => (s.actualTimeSeconds || 0) > 0);
+    focusState.subtaskId = lastActiveSubtask ? lastActiveSubtask.id : null;
+  } else {
+    focusState.subtaskId = subtaskId;
+  }
   focusState.enteredFrom = from || 'kanban';
   // Hide card detail modal but keep it in DOM for returning later
   const overlay = document.getElementById('task-modal-overlay');
@@ -4695,6 +5068,7 @@ function closeFocusMode() {
 function startFocusTimer() {
   if (focusState.running) return;
   focusState.running = true;
+  focusState.timerStartTimestamp = Date.now();
 
   // Immediately show H:MM:SS format
   const task = findTaskById(focusState.taskId);
@@ -4766,6 +5140,44 @@ function stopFocusTimer() {
     clearInterval(focusState.intervalId);
     focusState.intervalId = null;
   }
+
+  // Create actual-time calendar event for this timer session (today only)
+  const now = Date.now();
+  const todayISO = getTodayISO();
+  if (focusState.timerStartTimestamp && focusState.taskId) {
+    const timerTask = findTaskById(focusState.taskId);
+    if (timerTask) {
+      const startDateISO = new Date(focusState.timerStartTimestamp).toISOString().slice(0, 10);
+      // Clamp start to midnight if timer started before today
+      const startOffset = startDateISO === todayISO
+        ? timestampToOffset(focusState.timerStartTimestamp)
+        : 0;
+      const endOffset = timestampToOffset(now);
+      const duration = Math.max(endOffset - startOffset, 1 / SNAP_STEPS_PER_HOUR);
+
+      // Same-minute merge: if restarted within 60s of last stop, extend previous event
+      const shouldMerge = focusState.lastTimerStopTimestamp
+        && (now - focusState.lastTimerStopTimestamp) < 60000
+        && focusState.lastTimerEventId
+        && focusState.subtaskId === (state.calendarEvents.find(e => e.id === focusState.lastTimerEventId) || {}).subtaskId;
+
+      if (shouldMerge) {
+        const prevEvt = state.calendarEvents.find(e => e.id === focusState.lastTimerEventId);
+        if (prevEvt) {
+          prevEvt.duration = endOffset - prevEvt.offset;
+          renderCalendarEvents();
+        } else {
+          const evt = createActualTimeEvent(timerTask, focusState.subtaskId, todayISO, startOffset, duration, 'timer');
+          focusState.lastTimerEventId = evt.id;
+        }
+      } else {
+        const evt = createActualTimeEvent(timerTask, focusState.subtaskId, todayISO, startOffset, duration, 'timer');
+        focusState.lastTimerEventId = evt.id;
+      }
+      focusState.lastTimerStopTimestamp = now;
+    }
+  }
+  focusState.timerStartTimestamp = null;
   focusState.running = false;
 
   const task = findTaskById(focusState.taskId);
@@ -5066,7 +5478,22 @@ function renderFocusPicker() {
   const clearLabel = isActual ? 'Clear actual' : 'Clear planned';
 
   let html;
-  if (editMode) {
+  // Parent-level lock-out for focus picker (actual or planned)
+  const focusParentLocked = !subtask && (
+    (isActual && taskHasSubtaskActualTime(task)) ||
+    (!isActual && taskHasSubtaskPlannedTime(task))
+  );
+  if (focusParentLocked) {
+    html = `
+      <div class="planned-picker" data-focus-picker>
+        <div class="planned-picker__arrow"></div>
+        <div class="planned-picker__header">${label}:</div>
+        <button class="planned-picker__time-display" type="button" style="cursor:default">${currentFormatted}</button>
+        <div class="planned-picker__divider"></div>
+        <div class="planned-picker__calculated-hint">Calculated from subtasks. To update, edit subtasks.</div>
+      </div>
+    `;
+  } else if (editMode) {
     const h = Math.floor(currentMins / 60);
     const m = currentMins % 60;
     const hasVal = isActual ? hasCurrentActual : currentMins > 0;
@@ -5130,20 +5557,64 @@ function applyFocusPickerTime(minutes) {
   const subtask = subtaskId ? findSubtask(task, subtaskId) : null;
   if (subtaskId && !subtask) return;
 
+  // Guard: parent-level time is read-only when subtasks have time
+  if (type === 'actual' && !subtask && taskHasSubtaskActualTime(task)) return;
+  if (type === 'planned' && !subtask && taskHasSubtaskPlannedTime(task)) return;
+
+  const focusApplyDateISO = getTodayISO();
   if (subtask) {
     if (type === 'actual') {
-      subtask.actualTimeSeconds = Math.max(0, minutes * 60);
+      ensureTaskRolloverState(task);
+      if (!task.dailyActualTime[focusApplyDateISO]) task.dailyActualTime[focusApplyDateISO] = { ownSeconds: 0, subtasks: {} };
+      if (!task.dailyActualTime[focusApplyDateISO].subtasks) task.dailyActualTime[focusApplyDateISO].subtasks = {};
+      task.dailyActualTime[focusApplyDateISO].subtasks[subtask.id] = minutes * 60;
+      // Recompute subtask aggregate from all daily entries
+      let totalSubtaskSeconds = 0;
+      for (const dateKey in task.dailyActualTime) {
+        const de = task.dailyActualTime[dateKey];
+        if (de.subtasks && de.subtasks[subtask.id]) totalSubtaskSeconds += de.subtasks[subtask.id];
+      }
+      subtask.actualTimeSeconds = totalSubtaskSeconds;
     } else {
       subtask.plannedMinutes = Math.max(0, minutes);
     }
   } else if (type === 'actual') {
-    const subtaskActual = task.subtasks.reduce((sum, s) => sum + (s.actualTimeSeconds || 0), 0);
-    task.ownActualTimeSeconds = Math.max(0, minutes * 60 - subtaskActual);
+    ensureTaskRolloverState(task);
+    if (!task.dailyActualTime[focusApplyDateISO]) task.dailyActualTime[focusApplyDateISO] = { ownSeconds: 0, subtasks: {} };
+    const entry = task.dailyActualTime[focusApplyDateISO];
+    const subtaskDailyTotal = entry.subtasks
+      ? Object.values(entry.subtasks).reduce((s, v) => s + (v || 0), 0)
+      : 0;
+    entry.ownSeconds = Math.max(0, minutes * 60 - subtaskDailyTotal);
+    // Recompute own aggregate from all daily entries
+    let totalOwnSeconds = 0;
+    for (const dateKey in task.dailyActualTime) {
+      totalOwnSeconds += task.dailyActualTime[dateKey].ownSeconds || 0;
+    }
+    task.ownActualTimeSeconds = totalOwnSeconds;
   } else {
     const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
     task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
   }
   syncTaskAggregateTimes(task);
+
+  // Actual-time calendar events: create/remove for today only
+  if (type === 'actual') {
+    const todayForFocusPicker = getTodayISO();
+    const focusPickSubId = subtaskId || null;
+    removeActualTimeEventsForTask(task.id, todayForFocusPicker, focusPickSubId);
+    if (minutes > 0) {
+      const nowOffset = timestampToOffset(Date.now());
+      const durationHours = minutes / 60;
+      const startOffset = Math.max(0, nowOffset - durationHours);
+      createActualTimeEvent(task, focusPickSubId, todayForFocusPicker, startOffset, nowOffset - startOffset, 'picker');
+    } else {
+      renderCalendarEvents();
+    }
+    focusState.lastTimerEventId = null;
+    focusState.lastTimerStopTimestamp = null;
+  }
+
   closeFocusPicker();
   updateFocusModalValues(task);
   updateCardDetailTimerState();
@@ -5216,13 +5687,15 @@ function renderFocusModal(task, autoStart) {
 
   const el = document.createElement('div');
   el.id = 'focus-modal';
-  el.className = 'focus-modal';
+  el.className = 'focus-modal focus-modal--sidebar-collapsed';
   el.innerHTML = `
     <div class="focus-modal__topbar">
+      <button class="focus-modal__sidebar-expand" type="button" aria-label="Expand sidebar" data-focus-sidebar-expand><i data-lucide="chevrons-right"></i></button>
       <button class="focus-modal__tab" type="button">
         <i data-lucide="timer"></i>
         <span>Focus</span>
       </button>
+      <button class="task-modal__top-action task-modal__top-action--icon focus-modal__close" type="button" aria-label="Close focus" data-focus-close><i data-lucide="x"></i></button>
     </div>
     <div class="focus-modal__content">
       <div class="focus-modal__task-row">
@@ -5285,6 +5758,10 @@ function renderFocusModal(task, autoStart) {
         return;
       }
       if (e.target.closest('[data-focus-picker-clear]')) { applyFocusPickerTime(0); return; }
+      return;
+    }
+    if (e.target.closest('[data-focus-sidebar-expand]')) {
+      setSidebarCollapsed(false);
       return;
     }
     if (e.target.closest('[data-focus-close]')) {
@@ -5723,7 +6200,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus) {
 
   // Show scheduled pills for all timebox events on THIS column's date
   const columnEvents = columnIsoDate
-    ? state.calendarEvents.filter(e => e.taskId === task.id && e.date === columnIsoDate).sort((a, b) => a.offset - b.offset)
+    ? state.calendarEvents.filter(e => e.taskId === task.id && e.date === columnIsoDate && e.systemType !== 'actual').sort((a, b) => a.offset - b.offset)
     : [];
   let scheduledPills = '';
   if (columnEvents.length > 0) {
@@ -6031,6 +6508,7 @@ function renderCalendarEvents() {
 
     const el = document.createElement('div');
     el.className = `cal-event ${eventColorClass}`;
+    if (evt.systemType === 'actual') el.classList.add('cal-event--actual');
     if (evt.taskId) el.classList.add('cal-event--movable');
     el.dataset.eventId = evt.id;
     el.style.setProperty('--offset',   evt.offset);
@@ -7520,6 +7998,7 @@ function closeAnyPicker() {
   if (dueDatePickerState) { closeDueDatePicker(); return true; }
   if (focusPickerState) { closeFocusPicker(); return true; }
   if (modalChannelPickerState) { closeModalChannelPicker(); return true; }
+  if (ellipsisMenuState) { closeEllipsisMenu(); return true; }
   return false;
 }
 
@@ -7712,6 +8191,36 @@ function attachTaskModalEvents() {
       return;
     }
 
+    // Ellipsis menu toggle
+    if (e.target.closest('[data-ellipsis-btn]')) {
+      closeStartDatePicker();
+      closeDueDatePicker();
+      closeModalChannelPicker();
+      closePlannedPicker();
+      closeActualPicker();
+      if (ellipsisMenuState) {
+        closeEllipsisMenu();
+      } else if (openModalTaskId) {
+        openEllipsisMenu(openModalTaskId);
+      }
+      return;
+    }
+
+    // Inside ellipsis menu
+    const ellMenu = e.target.closest('[data-ellipsis-menu]');
+    if (ellMenu) {
+      const menuItem = e.target.closest('.sdp__menu-item');
+      if (menuItem && menuItem.dataset.action && openModalTaskId) {
+        const action = menuItem.dataset.action;
+        if (action === 'duplicate-task') {
+          handleDuplicateTask(openModalTaskId);
+        } else if (action === 'delete-task') {
+          handleDeleteTask(openModalTaskId);
+        }
+      }
+      return;
+    }
+
     // Add subtask row button
     if (e.target.closest('[data-modal-add-subtask]')) {
       if (!openModalTaskId) return;
@@ -7805,9 +8314,8 @@ function attachTaskModalEvents() {
       return;
     }
 
-    // Expand button → enter focus mode without starting timer
+    // Expand button → handled by mousedown above; skip here
     if (e.target.closest('[data-expand-btn]')) {
-      if (openModalTaskId) openFocusMode(openModalTaskId, false, 'card-detail');
       return;
     }
 
@@ -7858,7 +8366,21 @@ function attachTaskModalEvents() {
           cb.classList.add('task-modal__check--complete');
         });
       }
-      if (col) renderColumn(col);
+      const todayISO = getTodayISO();
+      // Uncompleting a task in a past column → move it to today (ghost will show in past)
+      if (!task.complete && col && col.isoDate < todayISO) {
+        task.scheduledTime = null;
+        const taskIndex = col.tasks.findIndex(t => t.id === task.id);
+        if (taskIndex !== -1) col.tasks.splice(taskIndex, 1);
+        const todayCol = ensureColumnForDate(todayISO);
+        todayCol.tasks.push(task);
+        task.startDate = todayISO;
+        renderColumn(col);
+        renderColumn(todayCol);
+        renderCalendarEvents();
+      } else {
+        if (col) renderColumn(col);
+      }
       return;
     }
 
@@ -7868,6 +8390,7 @@ function attachTaskModalEvents() {
       closeDueDatePicker();
       closePlannedPicker();
       closeActualPicker();
+      closeEllipsisMenu();
       if (modalChannelPickerState) {
         closeModalChannelPicker();
       } else if (openModalTaskId) {
@@ -7894,6 +8417,7 @@ function attachTaskModalEvents() {
       closeModalChannelPicker();
       closePlannedPicker();
       closeActualPicker();
+      closeEllipsisMenu();
       if (dueDatePickerState) {
         closeDueDatePicker();
       } else if (openModalTaskId) {
@@ -7908,6 +8432,7 @@ function attachTaskModalEvents() {
       closeModalChannelPicker();
       closePlannedPicker();
       closeActualPicker();
+      closeEllipsisMenu();
       if (startDatePickerState) {
         closeStartDatePicker();
       } else if (openModalTaskId) {
@@ -7980,6 +8505,7 @@ function attachTaskModalEvents() {
       closeStartDatePicker();
       closeDueDatePicker();
       closeActualPicker();
+      closeEllipsisMenu();
       if (plannedPickerOpen) {
         closePlannedPicker();
       } else {
@@ -8068,6 +8594,7 @@ function attachTaskModalEvents() {
       closeStartDatePicker();
       closeDueDatePicker();
       closePlannedPicker();
+      closeEllipsisMenu();
       if (actualPickerOpen) {
         closeActualPicker();
       } else {
@@ -8554,6 +9081,8 @@ function setSidebarCollapsed(isCollapsed) {
   if (!shell || !sidebar) return;
   shell.classList.toggle('sidebar-collapsed', isCollapsed);
   sidebar.setAttribute('aria-hidden', isCollapsed ? 'true' : 'false');
+  const focusModal = document.getElementById('focus-modal');
+  if (focusModal) focusModal.classList.toggle('focus-modal--sidebar-collapsed', isCollapsed);
 }
 
 function attachSidebarToggleEvents() {
@@ -8906,7 +9435,7 @@ function attachCalendarEvents() {
     if (droppedOnTimeline) {
       const offset = eventOffsetFromPointer(e.clientY, evt.duration, grabOffsetHours);
       evt.offset = offset;
-      if (evt.taskId) {
+      if (evt.taskId && evt.systemType !== 'actual') {
         const task = findTaskById(evt.taskId);
         if (task) {
           // Only update scheduledTime if the event is on the task's home column date
@@ -8918,6 +9447,28 @@ function attachCalendarEvents() {
           if (homeCol) renderColumn(homeCol);
           if (eventCol && eventCol !== homeCol) renderColumn(eventCol);
         }
+      }
+    } else if (evt.systemType === 'actual' && evt.taskId) {
+      // Drag actual event off timeline: delete event and subtract actual time
+      const task = findTaskById(evt.taskId);
+      const durationSeconds = Math.round(evt.duration * 3600);
+      state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
+      if (task) {
+        if (evt.subtaskId) {
+          const dragSubtask = findSubtask(task, evt.subtaskId);
+          if (dragSubtask) {
+            dragSubtask.actualTimeSeconds = Math.max(0, (dragSubtask.actualTimeSeconds || 0) - durationSeconds);
+            recordDailyTime(task, evt.date, -durationSeconds, evt.subtaskId);
+          }
+        } else {
+          task.ownActualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) - durationSeconds);
+          recordDailyTime(task, evt.date, -durationSeconds, null);
+        }
+        syncTaskAggregateTimes(task);
+        const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+        if (col) renderColumn(col);
+        updateFocusModalValues(task);
+        updateCardDetailTimerState();
       }
     } else if (evt.taskId) {
       const task = findTaskById(evt.taskId);
@@ -9103,35 +9654,53 @@ function attachCalendarResizeEvents() {
       eventEl.classList.remove('cal-event--resizing');
       calResizeInProgress = false;
 
-      // Keep linked task estimate in sync with resized calendar duration.
+      // Keep linked task data in sync with resized calendar duration.
       if (evt.taskId) {
         const task = findTaskById(evt.taskId);
         if (task) {
-          const todayISO = getTodayISO();
-          const isPastEvent = evt.date < todayISO;
-
-          if (isPastEvent) {
-            // Past timebox resize: only update the event duration (already done above).
-            // The past card reads planned time from the timebox, so no need to touch ownPlannedMinutes.
-            // Just re-render the past column to reflect the new duration.
-            const eventCol = state.columns.find(c => c.isoDate === evt.date);
-            if (eventCol) renderColumn(eventCol);
-          } else {
-            // Current/future event: update ownPlannedMinutes to keep card in sync
-            ensureTaskTimeState(task);
-            const newTotalMinutes = Math.round(evt.duration * 60);
-            const subtaskPlanned = (task.subtasks || []).reduce((sum, s) => {
-              ensureSubtaskTimeState(s);
-              return sum + (s.plannedMinutes || 0);
-            }, 0);
-            task.ownPlannedMinutes = Math.max(0, newTotalMinutes - subtaskPlanned);
-            syncTaskAggregateTimes(task);
-            // Update scheduledTime only if event is on the task's current home column
-            const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
-            if (homeCol && evt.date === homeCol.isoDate) {
-              task.scheduledTime = offsetToScheduledTime(evt.offset);
+          if (evt.systemType === 'actual') {
+            // Actual-time event resize: adjust actual time by the duration delta
+            const durationDeltaSeconds = Math.round((evt.duration - startDuration) * 3600);
+            if (evt.subtaskId) {
+              const resizeSubtask = findSubtask(task, evt.subtaskId);
+              if (resizeSubtask) {
+                resizeSubtask.actualTimeSeconds = Math.max(0, (resizeSubtask.actualTimeSeconds || 0) + durationDeltaSeconds);
+                recordDailyTime(task, evt.date, durationDeltaSeconds, evt.subtaskId);
+              }
+            } else {
+              task.ownActualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) + durationDeltaSeconds);
+              recordDailyTime(task, evt.date, durationDeltaSeconds, null);
             }
-            if (homeCol) renderColumn(homeCol);
+            syncTaskAggregateTimes(task);
+            const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+            if (col) renderColumn(col);
+            updateFocusModalValues(task);
+            updateCardDetailTimerState();
+          } else {
+            const todayISO = getTodayISO();
+            const isPastEvent = evt.date < todayISO;
+
+            if (isPastEvent) {
+              // Past timebox resize: only update the event duration (already done above).
+              const eventCol = state.columns.find(c => c.isoDate === evt.date);
+              if (eventCol) renderColumn(eventCol);
+            } else {
+              // Current/future event: update ownPlannedMinutes to keep card in sync
+              ensureTaskTimeState(task);
+              const newTotalMinutes = Math.round(evt.duration * 60);
+              const subtaskPlanned = (task.subtasks || []).reduce((sum, s) => {
+                ensureSubtaskTimeState(s);
+                return sum + (s.plannedMinutes || 0);
+              }, 0);
+              task.ownPlannedMinutes = Math.max(0, newTotalMinutes - subtaskPlanned);
+              syncTaskAggregateTimes(task);
+              // Update scheduledTime only if event is on the task's current home column
+              const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
+              if (homeCol && evt.date === homeCol.isoDate) {
+                task.scheduledTime = offsetToScheduledTime(evt.offset);
+              }
+              if (homeCol) renderColumn(homeCol);
+            }
           }
         }
       }
