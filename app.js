@@ -84,7 +84,9 @@ function initTaskModalQuill(task) {
 const dragState = {
   taskId:      null,
   sourceColId: null,
-  sourceIndex: null
+  sourceIndex: null,
+  fromTrash:   false,
+  sourceIsoDate: null
 };
 let taskDropPlaceholder = null;
 let taskDragClassRaf = null;
@@ -101,9 +103,46 @@ const DEFAULT_HOUR_HEIGHT_PX = 60;
 const DEFAULT_WORKDAY_START_HOUR = 8;
 const DEFAULT_WORKDAY_END_HOUR = 17;
 const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
+const settings = {
+  // General
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  timeFormat: 'device',              // 'device' | '12' | '24'
+  startOfWeek: 'monday',             // 'monday' | 'sunday'
+  countPlannedAsActual: true,
+  taskRolloverPosition: 'top',       // 'top' | 'bottom'
+  workloadThresholdHours: 8,
+  // Display
+  darkMode: 'light',                 // 'light' | 'dark'
+  // Timeboxing
+  defaultTimeboxDurationMinutes: 30,  // 15 | 30 | 45 | 60
+  // Schedule (Sun=0 through Sat=6)
+  schedule: [
+    { day: 0, workday: false, startMinutes: 480, endMinutes: 1020 },
+    { day: 1, workday: true,  startMinutes: 480, endMinutes: 1020 },
+    { day: 2, workday: true,  startMinutes: 480, endMinutes: 1020 },
+    { day: 3, workday: true,  startMinutes: 480, endMinutes: 1020 },
+    { day: 4, workday: true,  startMinutes: 480, endMinutes: 1020 },
+    { day: 5, workday: true,  startMinutes: 480, endMinutes: 1020 },
+    { day: 6, workday: false, startMinutes: 480, endMinutes: 1020 },
+  ],
+  // Keyboard Shortcuts
+  keyboardShortcutsEnabled: true,
+  // Profile
+  firstName: '',
+  lastName: '',
+  profilePictureDataUrl: null,
+  // Channels
+  channelEnabled: {},
+  defaultChannelId: null
+};
+
+// Derive userSettings from settings for backward compatibility
 const userSettings = {
-  // TODO: wire to user settings storage/UI
-  workingDays: DEFAULT_WORKING_DAYS.slice()
+  get workingDays() {
+    return settings.schedule
+      .filter(d => d.workday)
+      .map(d => d.day);
+  }
 };
 const WORKDAY_SCROLL_LEAD_HOURS = 1;
 const MIN_CALENDAR_ZOOM = 1;
@@ -134,6 +173,11 @@ let pendingDragType    = null;  // Safari fallback when dragstart is skipped
 let pendingDragId      = null;
 let workdayMarkerDrag  = null;  // { type: 'start' | 'end' }
 
+const rightSidebarState = {
+  activePanel: 'calendar',
+  collapsed: false
+};
+
 /* ═══════════════════════════════════════════════
    DATA MODEL
 ═══════════════════════════════════════════════ */
@@ -146,25 +190,34 @@ const INTEGRATION = {
 };
 
 const CHANNELS = [
-  { id: 'unassigned', label: 'Unassigned', context: null, hashColor: '#999999', eventClass: 'cal-event--blue' },
-  { id: 'ch-work', label: 'work', context: null, hashColor: '#e67e22', eventClass: 'cal-event--orange', isContext: true },
-  { id: 'ch-code-reviews', label: 'code reviews', context: 'work', hashColor: '#e74c3c', eventClass: 'cal-event--orange' },
-  { id: 'ch-coding', label: 'coding', context: 'work', hashColor: '#f39c12', eventClass: 'cal-event--orange' },
-  { id: 'ch-debugging', label: 'debugging', context: 'work', hashColor: '#e67e22', eventClass: 'cal-event--orange' },
-  { id: 'ch-growth', label: 'growth', context: 'work', hashColor: '#22c55e', eventClass: 'cal-event--green' },
-  { id: 'ch-meetings', label: 'meetings', context: 'work', hashColor: '#9b59b6', eventClass: 'cal-event--purple' },
-  { id: 'ch-planning', label: 'planning', context: 'work', hashColor: '#f59e0b', eventClass: 'cal-event--orange' },
-  { id: 'ch-product', label: 'product', context: 'work', hashColor: '#4a90d9', eventClass: 'cal-event--blue' },
-  { id: 'ch-personal', label: 'personal', context: null, hashColor: '#3498db', eventClass: 'cal-event--blue', isContext: true },
-  { id: 'ch-test', label: 'test', context: null, hashColor: '#9b8ec4', eventClass: 'cal-event--purple' },
+  { id: 'unassigned', label: 'Unassigned', context: null, hashColor: '#90a4ae', eventClass: 'cal-event--blue' },
+  { id: 'ch-work', label: 'work', context: null, hashColor: '#ff79a7', eventClass: 'cal-event--orange', isContext: true },
+  { id: 'ch-code-reviews', label: 'code reviews', context: 'work', hashColor: '#d45d8c', eventClass: 'cal-event--purple' },
+  { id: 'ch-coding', label: 'coding', context: 'work', hashColor: '#e979fc', eventClass: 'cal-event--purple' },
+  { id: 'ch-debugging', label: 'debugging', context: 'work', hashColor: '#ff62be', eventClass: 'cal-event--purple' },
+  { id: 'ch-growth', label: 'growth', context: 'work', hashColor: '#856cc2', eventClass: 'cal-event--purple' },
+  { id: 'ch-meetings', label: 'meetings', context: 'work', hashColor: '#a382ff', eventClass: 'cal-event--purple' },
+  { id: 'ch-planning', label: 'planning', context: 'work', hashColor: '#7cadff', eventClass: 'cal-event--blue' },
+  { id: 'ch-product', label: 'product', context: 'work', hashColor: '#5e9fe0', eventClass: 'cal-event--blue' },
+  { id: 'ch-personal', label: 'personal', context: null, hashColor: '#4fc3f7', eventClass: 'cal-event--blue', isContext: true, isPersonal: true },
+  { id: 'ch-test', label: 'test', context: null, hashColor: '#4dd0e1', eventClass: 'cal-event--blue' },
 ];
 
 // Build lookup map from channels
 const CHANNEL_COLORS = {};
+function rebuildChannelColors() {
+  for (const key in CHANNEL_COLORS) delete CHANNEL_COLORS[key];
+  CHANNELS.forEach(ch => {
+    if (ch.id !== 'unassigned') {
+      CHANNEL_COLORS['#' + ch.label] = { hashColor: ch.hashColor, eventClass: ch.eventClass };
+    }
+  });
+}
+rebuildChannelColors();
+
+// Initialize channel enabled state
 CHANNELS.forEach(ch => {
-  if (ch.id !== 'unassigned') {
-    CHANNEL_COLORS['#' + ch.label] = { hashColor: ch.hashColor, eventClass: ch.eventClass };
-  }
+  if (settings.channelEnabled[ch.id] === undefined) settings.channelEnabled[ch.id] = true;
 });
 
 const state = {
@@ -503,7 +556,11 @@ function performRollover() {
       col.tasks.splice(i, 1);
       const targetISO = getRolloverTargetDate(task, todayISO);
       const targetCol = targetISO === todayISO ? todayCol : ensureColumnForDate(targetISO);
-      targetCol.tasks.push(task);
+      if (settings.taskRolloverPosition === 'top') {
+        targetCol.tasks.unshift(task);
+      } else {
+        targetCol.tasks.push(task);
+      }
     }
   }
 }
@@ -699,6 +756,103 @@ function findTaskContext(taskId) {
   return null;
 }
 
+function findTrashEntry(taskId) {
+  return state.trash.find(entry => entry.task && entry.task.id === taskId) || null;
+}
+
+function isTaskInTrash(taskId) {
+  return !!findTrashEntry(taskId);
+}
+
+function getTrashSourceIsoDate(entry) {
+  if (!entry) return getTodayISO();
+  return entry.deletedFrom?.isoDate || entry.task?.startDate || getTodayISO();
+}
+
+function getTrashDaysRemaining(entry) {
+  const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+  if (!entry) return 0;
+  const ts = Date.parse(entry.deletedAt);
+  if (!Number.isFinite(ts)) return 30;
+  const remainingMs = maxAgeMs - (Date.now() - ts);
+  return Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+}
+
+function purgeExpiredTrash() {
+  const now = Date.now();
+  const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+  state.trash = state.trash.filter(entry => {
+    const ts = Date.parse(entry.deletedAt);
+    if (!Number.isFinite(ts)) return true;
+    return now - ts <= maxAgeMs;
+  });
+}
+
+function getTaskLocation(taskId) {
+  const ctx = findTaskContext(taskId);
+  if (ctx) {
+    return { location: 'column', column: ctx.column, task: ctx.task, index: ctx.index, entry: null };
+  }
+  const entry = findTrashEntry(taskId);
+  if (entry) {
+    ensureTaskTimeState(entry.task);
+    const isoDate = getTrashSourceIsoDate(entry);
+    const column = createEmptyColumnForDate(isoDate);
+    return { location: 'trash', column, task: entry.task, index: -1, entry };
+  }
+  return null;
+}
+
+function renderTaskLocation(loc) {
+  if (!loc) return;
+  if (loc.location === 'column') {
+    renderColumn(loc.column);
+  } else {
+    renderTrashPanel();
+  }
+}
+
+function restoreTrashTask(taskId, options = {}) {
+  const entryIndex = state.trash.findIndex(entry => entry.task && entry.task.id === taskId);
+  if (entryIndex === -1) return null;
+
+  const entry = state.trash.splice(entryIndex, 1)[0];
+  const task = entry.task;
+  ensureTaskTimeState(task);
+  ensureTaskRolloverState(task);
+
+  const todayISO = getTodayISO();
+  const sourceIso = getTrashSourceIsoDate(entry);
+  const targetIso = options.targetIsoDate || sourceIso;
+  const targetCol = ensureColumnForDate(targetIso);
+
+  let insertIndex = 0;
+  if (Number.isFinite(options.insertIndex)) {
+    insertIndex = Math.max(0, Math.min(options.insertIndex, targetCol.tasks.length));
+  }
+  targetCol.tasks.splice(insertIndex, 0, task);
+
+  if (options.applyDropRules !== false) {
+    if (targetIso < todayISO && sourceIso >= todayISO) {
+      completeTaskAsOf(task, targetIso);
+      task.startDate = targetIso;
+      moveCompletedTasksToBottom(targetCol);
+    } else if (sourceIso < todayISO && targetIso >= todayISO) {
+      ensureTaskRolloverState(task);
+      task.complete = false;
+      task.completedOnDate = null;
+      task.startDate = targetIso;
+      task.scheduledTime = null;
+    } else {
+      task.startDate = targetIso;
+    }
+  } else {
+    task.startDate = targetIso;
+  }
+
+  return { task, column: targetCol, sourceIso, targetIso, insertIndex };
+}
+
 function ensureSubtaskTimeState(subtask) {
   if (!subtask || typeof subtask !== 'object') return;
   if (!Number.isFinite(subtask.plannedMinutes)) subtask.plannedMinutes = 0;
@@ -809,7 +963,7 @@ function completeTaskAsOf(task, isoDate) {
   task.complete = true;
   task.completedOnDate = isoDate;
   // Auto-set actual time to planned time if no actual time exists
-  if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
+  if (settings.countPlannedAsActual && !task.actualTimeSeconds && task.timeEstimateMinutes) {
     task.ownActualTimeSeconds = (task.ownPlannedMinutes || 0) * 60;
     task.subtasks.forEach(s => {
       if (s.plannedMinutes && !s.actualTimeSeconds) {
@@ -1637,6 +1791,10 @@ function formatTime24AsDisplay(timeValue) {
   const [hRaw, mRaw] = String(timeValue).split(':').map(Number);
   const hour = Math.max(0, Math.min(23, hRaw));
   const minute = Math.max(0, Math.min(59, mRaw));
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
   const suffix = hour >= 12 ? 'PM' : 'AM';
   const hour12 = hour % 12 || 12;
   return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`;
@@ -2652,6 +2810,10 @@ function formatOffsetAsClock(totalHoursFromGridStart) {
   const adjH = m === 60 ? h + 1 : h;
   const adjM = m === 60 ? 0 : m;
   const normalizedHour = ((adjH % 24) + 24) % 24;
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(normalizedHour).padStart(2, '0')}:${String(adjM).padStart(2, '0')}`;
+  }
   const period = normalizedHour < 12 ? 'AM' : 'PM';
   const h12    = normalizedHour % 12 || 12;
   return adjM === 0
@@ -2666,6 +2828,10 @@ function formatOffsetAsClockWithMinutes(totalHoursFromGridStart) {
   const adjH = m === 60 ? h + 1 : h;
   const adjM = m === 60 ? 0 : m;
   const normalizedHour = ((adjH % 24) + 24) % 24;
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(normalizedHour).padStart(2, '0')}:${String(adjM).padStart(2, '0')}`;
+  }
   const period = normalizedHour < 12 ? 'AM' : 'PM';
   const h12 = normalizedHour % 12 || 12;
   return `${h12}:${String(adjM).padStart(2, '0')} ${period}`;
@@ -2678,6 +2844,10 @@ function formatOffsetAsClockNoPeriod(totalHoursFromGridStart) {
   const adjH = m === 60 ? h + 1 : h;
   const adjM = m === 60 ? 0 : m;
   const normalizedHour = ((adjH % 24) + 24) % 24;
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(normalizedHour).padStart(2, '0')}:${String(adjM).padStart(2, '0')}`;
+  }
   const h12 = normalizedHour % 12 || 12;
   return `${h12}:${String(adjM).padStart(2, '0')}`;
 }
@@ -2764,6 +2934,8 @@ function getInsertIndexFromPointer(taskList, clientY, previousIndex = null) {
 
 function clearTaskDragState() {
   dragState.taskId = dragState.sourceColId = dragState.sourceIndex = null;
+  dragState.fromTrash = false;
+  dragState.sourceIsoDate = null;
 }
 
 function clearTaskDraggingClass() {
@@ -2989,8 +3161,9 @@ function renderTaskTimeboxEntries(task) {
     </div>`;
 }
 
-function renderTaskDetailModal(task, column) {
+function renderTaskDetailModal(task, column, options = {}) {
   ensureTaskTimeState(task);
+  const isTrash = options.isTrash === true;
   const rawTag = task.tag ? String(task.tag).trim() : '';
   const hasHash = rawTag.startsWith('#');
   const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'Unassigned';
@@ -3018,6 +3191,15 @@ function renderTaskDetailModal(task, column) {
   const timelineHtml = timelineEntries
     .map(entry => `<li class="task-modal__timeline-item">${escapeHtml(entry)}</li>`)
     .join('');
+
+  const trashBanner = isTrash
+    ? `
+      <div class="task-modal__trash-banner">
+        <span>This task has been deleted (and will be permantly deleted in ${getTrashDaysRemaining(findTrashEntry(task.id))} days).</span>
+        <button class="task-modal__trash-link" type="button" data-restore-task>Restore Task</button>
+      </div>
+    `
+    : '';
 
   return `
     <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
@@ -3048,6 +3230,7 @@ function renderTaskDetailModal(task, column) {
         </div>
       </div>
 
+      ${trashBanner}
       <div class="task-modal__body">
         <div class="task-modal__hero">
           <div class="task-modal__title-wrap">
@@ -3098,8 +3281,11 @@ function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth, options = {}) 
                       'July','August','September','October','November','December'];
 
   const firstOfMonth = new Date(viewYear, viewMonth, 1);
-  const mondayOffset = (firstOfMonth.getDay() + 6) % 7;
-  const gridStart = new Date(viewYear, viewMonth, 1 - mondayOffset, 12);
+  // Calculate offset based on start-of-week setting
+  const weekStartDay = settings.startOfWeek === 'sunday' ? 0 : settings.startOfWeek === 'saturday' ? 6 : 1;
+  const dayOfWeek = firstOfMonth.getDay();
+  const weekOffset = (dayOfWeek - weekStartDay + 7) % 7;
+  const gridStart = new Date(viewYear, viewMonth, 1 - weekOffset, 12);
 
   const calendarRows = [];
   for (let row = 0; row < 6; row++) {
@@ -3137,7 +3323,11 @@ function renderCalendarGrid(selectedIsoDate, viewYear, viewMonth, options = {}) 
       </div>
       <table class="sdp-cal__grid">
         <thead>
-          <tr><th>M</th><th>T</th><th>W</th><th>T</th><th>F</th><th>S</th><th>S</th></tr>
+          <tr>${(() => {
+            const allDays = ['S','M','T','W','T','F','S'];
+            const startIdx = weekStartDay;
+            return Array.from({length: 7}, (_, i) => `<th>${allDays[(startIdx + i) % 7]}</th>`).join('');
+          })()}</tr>
         </thead>
         <tbody>${calendarRows.join('')}</tbody>
       </table>
@@ -3253,26 +3443,42 @@ function renderEllipsisMenuInModal() {
   const wrap = overlay.querySelector('.ellipsis-menu-wrap');
   if (!wrap) return;
 
-  const html = `
-    <div class="ellipsis-menu" data-ellipsis-menu>
-      <div class="sdp__arrow"></div>
-      <div class="sdp__section">
-        <span class="sdp__section-label">Other actions:</span>
-        <button class="sdp__menu-item" data-action="duplicate-task" type="button">
-          <span class="ellipsis-menu__item-content">
-            <i data-lucide="files" class="ellipsis-menu__icon"></i>
-            <span>Duplicate</span>
-          </span>
-        </button>
-        <button class="sdp__menu-item" data-action="delete-task" type="button">
-          <span class="ellipsis-menu__item-content">
-            <i data-lucide="trash" class="ellipsis-menu__icon"></i>
-            <span>Delete</span>
-          </span>
-        </button>
+  const isTrashed = ellipsisMenuState?.taskId ? isTaskInTrash(ellipsisMenuState.taskId) : false;
+  const html = isTrashed
+    ? `
+      <div class="ellipsis-menu" data-ellipsis-menu>
+        <div class="sdp__arrow"></div>
+        <div class="sdp__section">
+          <span class="sdp__section-label">Other actions:</span>
+          <button class="sdp__menu-item" data-action="restore-task" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="undo" class="ellipsis-menu__icon"></i>
+              <span>Restore Task</span>
+            </span>
+          </button>
+        </div>
       </div>
-    </div>
-  `;
+    `
+    : `
+      <div class="ellipsis-menu" data-ellipsis-menu>
+        <div class="sdp__arrow"></div>
+        <div class="sdp__section">
+          <span class="sdp__section-label">Other actions:</span>
+          <button class="sdp__menu-item" data-action="duplicate-task" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="files" class="ellipsis-menu__icon"></i>
+              <span>Duplicate</span>
+            </span>
+          </button>
+          <button class="sdp__menu-item" data-action="delete-task" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="trash" class="ellipsis-menu__icon"></i>
+              <span>Delete</span>
+            </span>
+          </button>
+        </div>
+      </div>
+    `;
 
   const wrapper = document.createElement('div');
   wrapper.innerHTML = html;
@@ -3361,13 +3567,22 @@ function handleDeleteTask(taskId) {
   closeTaskDetailModal();
   renderColumn(column);
   renderCalendarEvents();
+  renderTrashPanel();
   showToast('Deleted', 'dark');
+}
+
+function restoreTaskFromTrash(taskId, options = {}) {
+  const restored = restoreTrashTask(taskId, options);
+  if (!restored) return;
+  renderColumn(restored.column);
+  renderCalendarEvents();
+  renderTrashPanel();
 }
 
 function openStartDatePicker(taskId) {
   closeDueDatePicker();
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
   const today = new Date();
   startDatePickerState = {
     taskId,
@@ -3385,10 +3600,10 @@ function closeStartDatePicker() {
 
 function renderStartDatePickerInModal() {
   if (!startDatePickerState) return;
-  const ctx = findTaskContext(startDatePickerState.taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(startDatePickerState.taskId);
+  if (!loc) return;
 
-  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  const currentIsoDate = loc.column.isoDate || getTodayISO();
 
   const existing = document.querySelector('[data-sdp]');
   if (existing) existing.remove();
@@ -3416,10 +3631,10 @@ function renderStartDatePickerInModal() {
 function handleStartDateAction(action, data) {
   if (!startDatePickerState) return;
   const taskId = startDatePickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
-  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  const currentIsoDate = loc.column.isoDate || getTodayISO();
   let targetDate = null;
 
   switch (action) {
@@ -3437,18 +3652,28 @@ function handleStartDateAction(action, data) {
   }
 
   if (targetDate) {
-    moveTaskToDate(taskId, targetDate);
+    if (loc.location === 'trash') {
+      const restored = restoreTrashTask(taskId, { targetIsoDate: targetDate, applyDropRules: true });
+      if (restored) {
+        renderColumn(restored.column);
+        renderCalendarEvents();
+        renderTrashPanel();
+        openTaskDetailModal(taskId);
+      }
+    } else {
+      moveTaskToDate(taskId, targetDate);
 
-    const overlay = document.getElementById('task-modal-overlay');
-    const startBtn = overlay.querySelector('.task-modal__meta-start-btn');
-    if (startBtn) {
-      const todayISO = getTodayISO();
-      if (targetDate === todayISO) {
-        startBtn.textContent = 'Today';
-      } else if (targetDate === addDays(todayISO, 1)) {
-        startBtn.textContent = 'Tomorrow';
-      } else {
-        startBtn.textContent = formatDateDisplay(targetDate);
+      const overlay = document.getElementById('task-modal-overlay');
+      const startBtn = overlay.querySelector('.task-modal__meta-start-btn');
+      if (startBtn) {
+        const todayISO = getTodayISO();
+        if (targetDate === todayISO) {
+          startBtn.textContent = 'Today';
+        } else if (targetDate === addDays(todayISO, 1)) {
+          startBtn.textContent = 'Tomorrow';
+        } else {
+          startBtn.textContent = formatDateDisplay(targetDate);
+        }
       }
     }
   }
@@ -3463,8 +3688,8 @@ let cardDatePickerState = null; // { taskId, viewYear, viewMonth, anchorCard }
 function openCardDatePicker(taskId, anchorCard = null) {
   closeChannelPicker();
   closeCardDatePicker();
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
   const today = new Date();
   cardDatePickerState = {
     taskId,
@@ -3494,13 +3719,13 @@ function closeCardDatePicker() {
 
 function renderCardDatePicker() {
   if (!cardDatePickerState) return;
-  const ctx = findTaskContext(cardDatePickerState.taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(cardDatePickerState.taskId);
+  if (!loc) return;
 
   const existing = document.querySelector('[data-card-sdp]');
   if (existing) existing.remove();
 
-  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  const currentIsoDate = loc.column.isoDate || getTodayISO();
 
   const card = (cardDatePickerState.anchorCard && cardDatePickerState.anchorCard.isConnected)
     ? cardDatePickerState.anchorCard
@@ -3518,58 +3743,85 @@ function renderCardDatePicker() {
   );
   const dropdown = wrapper.firstElementChild;
   dropdown.setAttribute('data-card-sdp', '');
+  const usePortal = card.dataset.trashCard === 'true';
 
   // Position absolutely from the footer so it overlays without pushing the timer area
   const footer = card.querySelector('.task-card__footer');
   if (!footer) return;
-  footer.style.position = 'relative';
-
-  dropdown.style.position = 'absolute';
-  dropdown.style.top = '100%';
-  dropdown.style.marginTop = '12px';
-  dropdown.style.zIndex = '6000';
-  dropdown.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.15), 0 1px 4px rgba(0, 0, 0, 0.1)';
-
-  // Center the dropdown under the card
-  const cardWidth = card.offsetWidth;
   const ddWidth = 240; // dropdown width from CSS
-  dropdown.style.left = (-12 + (cardWidth - ddWidth) / 2) + 'px'; // -12 accounts for card padding
-  dropdown.style.width = ddWidth + 'px';
 
-  footer.appendChild(dropdown);
+  if (usePortal) {
+    dropdown.style.position = 'fixed';
+    dropdown.style.zIndex = '7000';
+    dropdown.style.width = ddWidth + 'px';
+    dropdown.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.15), 0 1px 4px rgba(0, 0, 0, 0.1)';
+    document.body.appendChild(dropdown);
 
-  // Position arrow to point at the calendar button
-  const arrow = dropdown.querySelector('.sdp__arrow');
-  if (arrow) {
-    const btnRect = dateBtn.getBoundingClientRect();
-    const ddRect = dropdown.getBoundingClientRect();
-    const btnCenterX = btnRect.left + btnRect.width / 2;
-    const arrowLeft = btnCenterX - ddRect.left - 6; // 6 = half arrow width
-    arrow.style.left = Math.max(8, arrowLeft) + 'px';
+    requestAnimationFrame(() => {
+      const btnRect = dateBtn.getBoundingClientRect();
+      const left = btnRect.left + (btnRect.width / 2) - (ddWidth / 2);
+      const clampedLeft = Math.max(12, Math.min(left, window.innerWidth - ddWidth - 12));
+      dropdown.style.left = clampedLeft + 'px';
+      dropdown.style.top = (btnRect.bottom + 12) + 'px';
+
+      const arrow = dropdown.querySelector('.sdp__arrow');
+      if (arrow) {
+        const ddRect = dropdown.getBoundingClientRect();
+        const arrowLeft = btnRect.left + btnRect.width / 2 - ddRect.left - 6;
+        arrow.style.left = Math.max(8, arrowLeft) + 'px';
+      }
+    });
+  } else {
+    footer.style.position = 'relative';
+
+    dropdown.style.position = 'absolute';
+    dropdown.style.top = '100%';
+    dropdown.style.marginTop = '12px';
+    dropdown.style.zIndex = '6000';
+    dropdown.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.15), 0 1px 4px rgba(0, 0, 0, 0.1)';
+
+    // Center the dropdown under the card
+    const cardWidth = card.offsetWidth;
+    dropdown.style.left = (-12 + (cardWidth - ddWidth) / 2) + 'px'; // -12 accounts for card padding
+    dropdown.style.width = ddWidth + 'px';
+
+    footer.appendChild(dropdown);
+
+    // Position arrow to point at the calendar button
+    const arrow = dropdown.querySelector('.sdp__arrow');
+    if (arrow) {
+      const btnRect = dateBtn.getBoundingClientRect();
+      const ddRect = dropdown.getBoundingClientRect();
+      const btnCenterX = btnRect.left + btnRect.width / 2;
+      const arrowLeft = btnCenterX - ddRect.left - 6; // 6 = half arrow width
+      arrow.style.left = Math.max(8, arrowLeft) + 'px';
+    }
   }
 
   if (typeof lucide !== 'undefined') lucide.createIcons();
 
   // Scroll the column so the dropdown is fully visible
-  requestAnimationFrame(() => {
-    const ddRect = dropdown.getBoundingClientRect();
-    const col = card.closest('.day-column');
-    if (col) {
-      const colRect = col.getBoundingClientRect();
-      if (ddRect.bottom > colRect.bottom) {
-        col.scrollTop += ddRect.bottom - colRect.bottom + 8;
+  if (!usePortal) {
+    requestAnimationFrame(() => {
+      const ddRect = dropdown.getBoundingClientRect();
+      const col = card.closest('.day-column');
+      if (col) {
+        const colRect = col.getBoundingClientRect();
+        if (ddRect.bottom > colRect.bottom) {
+          col.scrollTop += ddRect.bottom - colRect.bottom + 8;
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 function handleCardDateAction(action, data) {
   if (!cardDatePickerState) return;
   const taskId = cardDatePickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
-  const currentIsoDate = ctx.column.isoDate || getTodayISO();
+  const currentIsoDate = loc.column.isoDate || getTodayISO();
   let targetDate = null;
 
   switch (action) {
@@ -3587,7 +3839,16 @@ function handleCardDateAction(action, data) {
   }
 
   if (targetDate) {
-    moveTaskToDate(taskId, targetDate);
+    if (loc.location === 'trash') {
+      const restored = restoreTrashTask(taskId, { targetIsoDate: targetDate, applyDropRules: true });
+      if (restored) {
+        renderColumn(restored.column);
+        renderCalendarEvents();
+        renderTrashPanel();
+      }
+    } else {
+      moveTaskToDate(taskId, targetDate);
+    }
   }
 
   closeCardDatePicker();
@@ -3600,6 +3861,7 @@ let channelPickerState = null; // { taskId, highlightIndex }
 function openChannelPicker(taskId) {
   closeCardDatePicker();
   closeCardPicker();
+  if (!getTaskLocation(taskId)) return;
   if (channelPickerState && channelPickerState.taskId === taskId) {
     closeChannelPicker();
     return;
@@ -3624,9 +3886,10 @@ function closeChannelPicker() {
 }
 
 function getFilteredChannels(query) {
-  if (!query) return CHANNELS;
+  const enabled = CHANNELS.filter(ch => ch.id === 'unassigned' || ch.isContext || settings.channelEnabled[ch.id] !== false);
+  if (!query) return enabled;
   const q = query.toLowerCase();
-  return CHANNELS.filter(ch => ch.label.toLowerCase().includes(q));
+  return enabled.filter(ch => ch.label.toLowerCase().includes(q));
 }
 
 function renderChannelListHTML(filtered, currentTag) {
@@ -3649,8 +3912,8 @@ function renderChannelListHTML(filtered, currentTag) {
 function renderChannelPicker() {
   if (!channelPickerState) return;
   const taskId = channelPickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
   const existing = document.querySelector('[data-channel-picker]');
   if (existing) existing.remove();
@@ -3660,10 +3923,10 @@ function renderChannelPicker() {
 
   const footer = card.querySelector('.task-card__footer');
   if (!footer) return;
-  footer.style.position = 'relative';
+  const usePortal = card.dataset.trashCard === 'true';
 
   const filtered = getFilteredChannels('');
-  const listHTML = renderChannelListHTML(filtered, ctx.task.tag);
+  const listHTML = renderChannelListHTML(filtered, loc.task.tag);
 
   const dropdown = document.createElement('div');
   dropdown.className = 'channel-picker';
@@ -3676,51 +3939,75 @@ function renderChannelPicker() {
     `<div class="channel-picker__divider"></div>` +
     `<a class="channel-picker__manage" href="#">Manage channels</a>`;
 
-  footer.appendChild(dropdown);
-
-  // Position: right-aligned under tag button
   const tagBtn = card.querySelector('[data-channel-btn]');
   const ddWidth = 220;
 
-  dropdown.style.position = 'absolute';
-  dropdown.style.top = '100%';
-  dropdown.style.marginTop = '12px';
-  dropdown.style.zIndex = '6000';
-  dropdown.style.width = ddWidth + 'px';
+  if (usePortal) {
+    dropdown.style.position = 'fixed';
+    dropdown.style.zIndex = '7000';
+    dropdown.style.width = ddWidth + 'px';
+    document.body.appendChild(dropdown);
 
-  // Right-align to the tag button
-  requestAnimationFrame(() => {
-    const tagRect = tagBtn ? tagBtn.getBoundingClientRect() : null;
-    const footerRect = footer.getBoundingClientRect();
-    if (tagRect) {
-      const tagCenterX = tagRect.left + tagRect.width / 2 - footerRect.left;
-      let left = tagCenterX - ddWidth / 2;
-      // Clamp so dropdown doesn't overflow card left
-      const maxLeft = footerRect.width - ddWidth;
-      left = Math.max(-12, Math.min(left, maxLeft + 12));
-      dropdown.style.left = left + 'px';
+    requestAnimationFrame(() => {
+      const tagRect = tagBtn ? tagBtn.getBoundingClientRect() : null;
+      if (tagRect) {
+        const left = tagRect.left + tagRect.width / 2 - ddWidth / 2;
+        const clampedLeft = Math.max(12, Math.min(left, window.innerWidth - ddWidth - 12));
+        dropdown.style.left = clampedLeft + 'px';
+        dropdown.style.top = (tagRect.bottom + 12) + 'px';
 
-      // Position arrow
-      const arrow = dropdown.querySelector('.channel-picker__arrow');
-      if (arrow) {
-        const ddRect = dropdown.getBoundingClientRect();
-        const arrowLeft = tagRect.left + tagRect.width / 2 - ddRect.left - 6;
-        arrow.style.left = arrowLeft + 'px';
+        const arrow = dropdown.querySelector('.channel-picker__arrow');
+        if (arrow) {
+          const ddRect = dropdown.getBoundingClientRect();
+          const arrowLeft = tagRect.left + tagRect.width / 2 - ddRect.left - 6;
+          arrow.style.left = arrowLeft + 'px';
+        }
       }
-    } else {
-      dropdown.style.right = '-12px';
-    }
+    });
+  } else {
+    footer.style.position = 'relative';
+    footer.appendChild(dropdown);
 
-    // Scroll column so dropdown is visible
-    const ddRect = dropdown.getBoundingClientRect();
-    const col = card.closest('.day-column');
-    if (col) {
-      const colRect = col.getBoundingClientRect();
-      if (ddRect.bottom > colRect.bottom) {
-        col.scrollTop += ddRect.bottom - colRect.bottom + 8;
+    dropdown.style.position = 'absolute';
+    dropdown.style.top = '100%';
+    dropdown.style.marginTop = '12px';
+    dropdown.style.zIndex = '6000';
+    dropdown.style.width = ddWidth + 'px';
+
+    // Right-align to the tag button
+    requestAnimationFrame(() => {
+      const tagRect = tagBtn ? tagBtn.getBoundingClientRect() : null;
+      const footerRect = footer.getBoundingClientRect();
+      if (tagRect) {
+        const tagCenterX = tagRect.left + tagRect.width / 2 - footerRect.left;
+        let left = tagCenterX - ddWidth / 2;
+        // Clamp so dropdown doesn't overflow card left
+        const maxLeft = footerRect.width - ddWidth;
+        left = Math.max(-12, Math.min(left, maxLeft + 12));
+        dropdown.style.left = left + 'px';
+
+        // Position arrow
+        const arrow = dropdown.querySelector('.channel-picker__arrow');
+        if (arrow) {
+          const ddRect = dropdown.getBoundingClientRect();
+          const arrowLeft = tagRect.left + tagRect.width / 2 - ddRect.left - 6;
+          arrow.style.left = arrowLeft + 'px';
+        }
+      } else {
+        dropdown.style.right = '-12px';
       }
-    }
-  });
+
+      // Scroll column so dropdown is visible
+      const ddRect = dropdown.getBoundingClientRect();
+      const col = card.closest('.day-column');
+      if (col) {
+        const colRect = col.getBoundingClientRect();
+        if (ddRect.bottom > colRect.bottom) {
+          col.scrollTop += ddRect.bottom - colRect.bottom + 8;
+        }
+      }
+    });
+  }
 
   // Focus search input
   const searchInput = dropdown.querySelector('.channel-picker__search');
@@ -3736,12 +4023,12 @@ function attachChannelPickerEvents(searchInput, dropdown) {
   // Search filtering
   searchInput.addEventListener('input', () => {
     const query = searchInput.value;
-    const ctx = findTaskContext(taskId);
-    if (!ctx) return;
+    const loc = getTaskLocation(taskId);
+    if (!loc) return;
     const filtered = getFilteredChannels(query);
     channelPickerState.highlightIndex = 0;
     const list = dropdown.querySelector('.channel-picker__list');
-    if (list) list.innerHTML = renderChannelListHTML(filtered, ctx.task.tag);
+    if (list) list.innerHTML = renderChannelListHTML(filtered, loc.task.tag);
   });
 
   // Keyboard navigation
@@ -3782,17 +4069,17 @@ function updateChannelHighlight(dropdown) {
 }
 
 function selectChannel(taskId, channel) {
-  const ctx = findTaskContext(taskId);
-  if (!ctx) { closeChannelPicker(); return; }
+  const loc = getTaskLocation(taskId);
+  if (!loc) { closeChannelPicker(); return; }
 
   if (channel.id === 'unassigned') {
-    ctx.task.tag = null;
+    loc.task.tag = null;
   } else {
-    ctx.task.tag = '#' + channel.label;
+    loc.task.tag = '#' + channel.label;
   }
 
   closeChannelPicker();
-  renderColumn(ctx.column);
+  renderTaskLocation(loc);
 
   // Update modal if open for this task
   if (openModalTaskId === taskId) {
@@ -3800,9 +4087,9 @@ function selectChannel(taskId, channel) {
     if (overlay) {
       const channelEl = overlay.querySelector('.task-modal__channel');
       if (channelEl) {
-        const style = getChannelStyle(ctx.task.tag);
+        const style = getChannelStyle(loc.task.tag);
         const hashColor = style ? style.hashColor : '#7da2ff';
-        const word = ctx.task.tag ? ctx.task.tag.replace(/^#/, '') : 'Unassigned';
+        const word = loc.task.tag ? loc.task.tag.replace(/^#/, '') : 'Unassigned';
         channelEl.innerHTML =
           `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
           `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
@@ -3839,8 +4126,8 @@ function closeModalChannelPicker() {
 function renderModalChannelPicker() {
   if (!modalChannelPickerState) return;
   const taskId = modalChannelPickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
   const existing = document.querySelector('[data-modal-channel-picker]');
   if (existing) existing.remove();
@@ -3855,7 +4142,7 @@ function renderModalChannelPicker() {
   if (!metaGroup) return;
 
   const filtered = getFilteredChannels('');
-  const listHTML = renderModalChannelListHTML(filtered, ctx.task.tag);
+  const listHTML = renderModalChannelListHTML(filtered, loc.task.tag);
 
   const dropdown = document.createElement('div');
   dropdown.className = 'channel-picker';
@@ -3918,12 +4205,12 @@ function attachModalChannelPickerEvents(searchInput, dropdown) {
 
   searchInput.addEventListener('input', () => {
     const query = searchInput.value;
-    const ctx = findTaskContext(taskId);
-    if (!ctx) return;
+    const loc = getTaskLocation(taskId);
+    if (!loc) return;
     const filtered = getFilteredChannels(query);
     modalChannelPickerState.highlightIndex = 0;
     const list = dropdown.querySelector('.channel-picker__list');
-    if (list) list.innerHTML = renderModalChannelListHTML(filtered, ctx.task.tag);
+    if (list) list.innerHTML = renderModalChannelListHTML(filtered, loc.task.tag);
   });
 
   searchInput.addEventListener('keydown', e => {
@@ -3962,26 +4249,26 @@ function updateModalChannelHighlight(dropdown) {
 }
 
 function selectModalChannel(taskId, channel) {
-  const ctx = findTaskContext(taskId);
-  if (!ctx) { closeModalChannelPicker(); return; }
+  const loc = getTaskLocation(taskId);
+  if (!loc) { closeModalChannelPicker(); return; }
 
   if (channel.id === 'unassigned') {
-    ctx.task.tag = null;
+    loc.task.tag = null;
   } else {
-    ctx.task.tag = '#' + channel.label;
+    loc.task.tag = '#' + channel.label;
   }
 
   closeModalChannelPicker();
-  renderColumn(ctx.column);
+  renderTaskLocation(loc);
 
   // Update modal channel display
   const overlay = document.querySelector('.task-modal-overlay');
   if (overlay) {
     const channelEl = overlay.querySelector('[data-modal-channel-btn]');
     if (channelEl) {
-      const style = getChannelStyle(ctx.task.tag);
-      const hashColor = style ? style.hashColor : (ctx.task.tag ? '#7da2ff' : '#999999');
-      const word = ctx.task.tag ? ctx.task.tag.replace(/^#/, '') : 'Unassigned';
+      const style = getChannelStyle(loc.task.tag);
+      const hashColor = style ? style.hashColor : (loc.task.tag ? '#7da2ff' : '#999999');
+      const word = loc.task.tag ? loc.task.tag.replace(/^#/, '') : 'Unassigned';
       channelEl.innerHTML =
         `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
         `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
@@ -3997,8 +4284,8 @@ let dueDatePickerState = null;
 
 function openDueDatePicker(taskId) {
   closeStartDatePicker();
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
   const today = new Date();
   dueDatePickerState = {
     taskId,
@@ -4016,10 +4303,10 @@ function closeDueDatePicker() {
 
 function renderDueDatePickerInModal() {
   if (!dueDatePickerState) return;
-  const ctx = findTaskContext(dueDatePickerState.taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(dueDatePickerState.taskId);
+  if (!loc) return;
 
-  const currentDueDate = ctx.task.dueDate || null;
+  const currentDueDate = loc.task.dueDate || null;
 
   const existing = document.querySelector('[data-ddp]');
   if (existing) existing.remove();
@@ -4062,12 +4349,13 @@ function updateCardDueDate(taskId, task) {
 function handleDueDateAction(isoDate) {
   if (!dueDatePickerState) return;
   const taskId = dueDatePickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
-  ctx.task.dueDate = isoDate;
+  loc.task.dueDate = isoDate;
   closeDueDatePicker();
-  updateCardDueDate(taskId, ctx.task);
+  updateCardDueDate(taskId, loc.task);
+  if (loc.location === 'trash') renderTrashPanel();
 
   // Re-render modal to update layout (DUE label + button position changes)
   openTaskDetailModal(taskId);
@@ -4076,12 +4364,13 @@ function handleDueDateAction(isoDate) {
 function handleRemoveDueDate() {
   if (!dueDatePickerState) return;
   const taskId = dueDatePickerState.taskId;
-  const ctx = findTaskContext(taskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
 
-  ctx.task.dueDate = null;
+  loc.task.dueDate = null;
   closeDueDatePicker();
-  updateCardDueDate(taskId, ctx.task);
+  updateCardDueDate(taskId, loc.task);
+  if (loc.location === 'trash') renderTrashPanel();
 
   // Re-render modal to remove DUE label and move button back to top-actions
   openTaskDetailModal(taskId);
@@ -4140,9 +4429,9 @@ function attachPickerInputColorListeners(dropdown) {
 
 function renderPlannedPickerInModal() {
   if (!openModalTaskId) return;
-  const ctx = findTaskContext(openModalTaskId);
-  if (!ctx) return;
-  const task = ctx.task;
+  const loc = getTaskLocation(openModalTaskId);
+  if (!loc) return;
+  const task = loc.task;
   const subtask = plannedPickerSubtaskId ? findSubtask(task, plannedPickerSubtaskId) : null;
 
   const existing = document.querySelector('[data-planned-picker]');
@@ -4156,11 +4445,11 @@ function renderPlannedPickerInModal() {
 
   const currentMins = subtask ? (subtask.plannedMinutes || 0) : (task.timeEstimateMinutes || 0);
   const currentFormatted = currentMins ? formatMinutes(currentMins) : '--:--';
-  const dateLabel = getPlannedDateLabel(ctx.column);
+  const dateLabel = getPlannedDateLabel(loc.column);
 
   // Check if parent planned is locked out by subtask planned time
   // Exception: if task has a timebox on the calendar, parent planned reflects the timebox
-  const hasTimebox = ctx.column && getTaskTimeboxesForDate(task, ctx.column.isoDate).length > 0;
+  const hasTimebox = loc.column && getTaskTimeboxesForDate(task, loc.column.isoDate).length > 0;
   const parentPlannedLocked = !subtask && !hasTimebox && taskHasSubtaskPlannedTime(task);
 
   let html;
@@ -4237,13 +4526,13 @@ function renderPlannedPickerInModal() {
 
 function applyPlannedTime(minutes) {
   if (!openModalTaskId) return;
-  const ctx = findTaskContext(openModalTaskId);
-  if (!ctx) return;
-  const task = ctx.task;
+  const loc = getTaskLocation(openModalTaskId);
+  if (!loc) return;
+  const task = loc.task;
   const subtask = plannedPickerSubtaskId ? findSubtask(task, plannedPickerSubtaskId) : null;
 
   // Guard: parent-level planned time is read-only when subtasks have planned time (unless timeboxed)
-  const hasPlannedTimebox = ctx.column && getTaskTimeboxesForDate(task, ctx.column.isoDate).length > 0;
+  const hasPlannedTimebox = loc.column && getTaskTimeboxesForDate(task, loc.column.isoDate).length > 0;
   if (!subtask && !hasPlannedTimebox && taskHasSubtaskPlannedTime(task)) return;
 
   if (subtask) {
@@ -4281,7 +4570,7 @@ function applyPlannedTime(minutes) {
     }
   }
 
-  if (ctx.column) renderColumn(ctx.column);
+  renderTaskLocation(loc);
 }
 
 function handlePlannedTimeEntry() {
@@ -4340,9 +4629,9 @@ function getActualDateLabel(column, overrideDate) {
 
 function renderActualPickerInModal() {
   if (!openModalTaskId) return;
-  const ctx = findTaskContext(openModalTaskId);
-  if (!ctx) return;
-  const task = ctx.task;
+  const loc = getTaskLocation(openModalTaskId);
+  if (!loc) return;
+  const task = loc.task;
   const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
 
   const existing = document.querySelector('[data-actual-picker]');
@@ -4469,15 +4758,25 @@ function renderActualPickerInModal() {
 
 function applyActualTime(minutes) {
   if (!openModalTaskId) return;
-  const ctx = findTaskContext(openModalTaskId);
-  if (!ctx) return;
-  const task = ctx.task;
+  let loc = getTaskLocation(openModalTaskId);
+  if (!loc) return;
+  let task = loc.task;
   const subtask = actualPickerSubtaskId ? findSubtask(task, actualPickerSubtaskId) : null;
+  const restoredFromTrash = loc.location === 'trash' && minutes > 0;
+
+  if (restoredFromTrash) {
+    const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+    if (!restored) return;
+    renderTrashPanel();
+    renderCalendarEvents();
+    loc = { location: 'column', column: restored.column, task: restored.task, index: restored.insertIndex, entry: null };
+    task = loc.task;
+  }
 
   // Guard: parent-level actual time is read-only when subtasks have actual time
   if (!subtask && taskHasSubtaskActualTime(task)) return;
 
-  const applyDateISO = actualPickerDateScope || getTodayISO();
+  const applyDateISO = restoredFromTrash ? getTodayISO() : (actualPickerDateScope || getTodayISO());
   ensureTaskRolloverState(task);
 
   if (subtask) {
@@ -4551,8 +4850,15 @@ function applyActualTime(minutes) {
       }
     }
   }
-  if (ctx.column) renderColumn(ctx.column);
+  if (loc.location === 'column') {
+    renderColumn(loc.column);
+  } else {
+    renderTrashPanel();
+  }
   rerenderGhostColumns(task);
+  if (restoredFromTrash) {
+    openTaskDetailModal(openModalTaskId);
+  }
 }
 
 function handleActualTimeEntry() {
@@ -4700,8 +5006,9 @@ function openCardPicker(taskId, type, subtaskId = null) {
 function renderCardPicker() {
   if (!cardPickerState) return;
   const { taskId, type, editMode, subtaskId } = cardPickerState;
-  const task = findTaskById(taskId);
-  if (!task) return;
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
+  const task = loc.task;
 
   const existing = document.querySelector('[data-card-picker]');
   if (existing) existing.remove();
@@ -4720,6 +5027,7 @@ function renderCardPicker() {
   }
   if (!metricEl) return;
   const card = metricEl.closest('.task-card');
+  const usePortal = card && card.dataset.trashCard === 'true';
   if (card) {
     if (cardPickerState.anchorCard && cardPickerState.anchorCard !== card) {
       cardPickerState.anchorCard.classList.remove('task-card--time-picker-open');
@@ -4765,7 +5073,9 @@ function renderCardPicker() {
 
   let html;
   // Parent-level lock-out for card picker (actual or planned)
-  const cardColDate = actualPickerDateScope || (metricEl.closest('.day-column') || {}).dataset?.isoDate;
+  const cardColDate = actualPickerDateScope
+    || (metricEl.closest('.day-column') || {}).dataset?.isoDate
+    || (card ? card.dataset.columnDate : null);
   const cardHasTimebox = cardColDate && getTaskTimeboxesForDate(task, cardColDate).length > 0;
   const cardParentLocked = !subtaskId && (
     (isActual && taskHasSubtaskActualTime(task)) ||
@@ -4825,8 +5135,29 @@ function renderCardPicker() {
   const wrapper = document.createElement('div');
   wrapper.innerHTML = html;
   const dropdown = wrapper.firstElementChild;
-  metricEl.style.position = 'relative';
-  metricEl.appendChild(dropdown);
+  if (usePortal) {
+    dropdown.style.position = 'fixed';
+    dropdown.style.zIndex = '7000';
+    dropdown.dataset.cardPickerPortal = 'true';
+    document.body.appendChild(dropdown);
+    requestAnimationFrame(() => {
+      const metricRect = metricEl.getBoundingClientRect();
+      const ddRect = dropdown.getBoundingClientRect();
+      let left = metricRect.left + metricRect.width / 2 - ddRect.width / 2;
+      left = Math.max(12, Math.min(left, window.innerWidth - ddRect.width - 12));
+      dropdown.style.left = left + 'px';
+      dropdown.style.top = (metricRect.bottom + 8) + 'px';
+      const arrow = dropdown.querySelector('.planned-picker__arrow');
+      if (arrow) {
+        const updatedRect = dropdown.getBoundingClientRect();
+        const arrowLeft = metricRect.left + metricRect.width / 2 - updatedRect.left - 6;
+        arrow.style.left = Math.max(8, arrowLeft) + 'px';
+      }
+    });
+  } else {
+    metricEl.style.position = 'relative';
+    metricEl.appendChild(dropdown);
+  }
 
   if (editMode) {
     attachPickerInputColorListeners(dropdown);
@@ -4835,23 +5166,36 @@ function renderCardPicker() {
   }
 
   // Scroll column so the picker is fully visible
-  requestAnimationFrame(() => {
-    const ddRect = dropdown.getBoundingClientRect();
-    const colEl = metricEl.closest('.day-column');
-    if (colEl) {
-      const colRect = colEl.getBoundingClientRect();
-      if (ddRect.bottom > colRect.bottom) {
-        colEl.scrollTop += ddRect.bottom - colRect.bottom + 8;
+  if (!usePortal) {
+    requestAnimationFrame(() => {
+      const ddRect = dropdown.getBoundingClientRect();
+      const colEl = metricEl.closest('.day-column');
+      if (colEl) {
+        const colRect = colEl.getBoundingClientRect();
+        if (ddRect.bottom > colRect.bottom) {
+          colEl.scrollTop += ddRect.bottom - colRect.bottom + 8;
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 function applyCardPickerTime(minutes) {
   if (!cardPickerState) return;
   const { taskId, type, subtaskId } = cardPickerState;
-  const task = findTaskById(taskId);
-  if (!task) return;
+  let loc = getTaskLocation(taskId);
+  if (!loc) return;
+  let task = loc.task;
+  const restoredFromTrash = loc.location === 'trash' && type === 'actual' && minutes > 0;
+
+  if (restoredFromTrash) {
+    const restored = restoreTrashTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+    if (!restored) return;
+    renderTrashPanel();
+    renderCalendarEvents();
+    loc = { location: 'column', column: restored.column, task: restored.task, index: restored.insertIndex, entry: null };
+    task = loc.task;
+  }
 
   // Guard: parent-level time is read-only when subtasks have time
   if (type === 'actual' && !subtaskId && taskHasSubtaskActualTime(task)) return;
@@ -4864,7 +5208,7 @@ function applyCardPickerTime(minutes) {
 
   const dateScope = actualPickerDateScope;
   const applyDateScope = type === 'actual'
-    ? (dateScope || getTodayISO())
+    ? (restoredFromTrash ? getTodayISO() : (dateScope || getTodayISO()))
     : dateScope;
 
   if (subtaskId) {
@@ -4956,8 +5300,11 @@ function applyCardPickerTime(minutes) {
   }
 
   closeCardPicker();
-  const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
-  if (col) renderColumn(col);
+  if (loc.location === 'column') {
+    renderColumn(loc.column);
+  } else {
+    renderTrashPanel();
+  }
   // Re-render ghost columns if date-scoped edit changed activity
   if (applyDateScope && type === 'actual') rerenderGhostColumns(task);
 }
@@ -4991,6 +5338,10 @@ function showToast(message, variant) {
 }
 
 function openFocusMode(taskId, autoStart, from, subtaskId = null) {
+  if (isTaskInTrash(taskId)) {
+    showToast('Must focus on today');
+    return;
+  }
   const ctx = findTaskContext(taskId);
   if (!ctx) return;
 
@@ -6119,16 +6470,26 @@ function renderFocusModal(task, autoStart) {
 }
 
 let openModalTaskId = null;
+let openModalIsTrash = false;
 
 function openTaskDetailModal(taskId) {
-  const context = findTaskContext(taskId);
-  if (!context) return;
+  let context = findTaskContext(taskId);
+  let isTrash = false;
+  if (!context) {
+    const trashEntry = findTrashEntry(taskId);
+    if (!trashEntry) return;
+    isTrash = true;
+    const isoDate = getTrashSourceIsoDate(trashEntry);
+    const column = createEmptyColumnForDate(isoDate);
+    context = { task: trashEntry.task, column, index: -1 };
+  }
 
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
   openModalTaskId = taskId;
-  overlay.innerHTML = renderTaskDetailModal(context.task, context.column);
+  openModalIsTrash = isTrash;
+  overlay.innerHTML = renderTaskDetailModal(context.task, context.column, { isTrash });
   overlay.hidden = false;
   document.body.classList.add('modal-open');
 
@@ -6174,7 +6535,25 @@ function closeTaskDetailModal() {
       }
       renderColumn(ctx.column);
     }
+    if (!ctx && openModalIsTrash) {
+      const entry = findTrashEntry(openModalTaskId);
+      if (entry) {
+        const titleEl = overlay.querySelector('.task-modal__title');
+        if (titleEl) {
+          const newTitle = titleEl.textContent.trim();
+          if (newTitle) {
+            entry.task.title = newTitle;
+          }
+        }
+        if (taskModalQuill) {
+          entry.task.notes = getQuillHtml(taskModalQuill);
+          taskModalQuill = null;
+        }
+        renderTrashPanel();
+      }
+    }
     openModalTaskId = null;
+    openModalIsTrash = false;
   }
 
   overlay.hidden = true;
@@ -6409,6 +6788,43 @@ function renderColumn(column) {
   }
 }
 
+function renderTrashPanel() {
+  const panel = document.querySelector('[data-right-panel="trash"]');
+  if (!panel) return;
+  const listEl = panel.querySelector('[data-trash-list]');
+  if (!listEl) return;
+
+  purgeExpiredTrash();
+  const now = Date.now();
+  const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
+  const visibleEntries = state.trash.filter(entry => {
+    const ts = Date.parse(entry.deletedAt);
+    if (!Number.isFinite(ts)) return true;
+    return now - ts <= maxAgeMs;
+  }).sort((a, b) => {
+    const aTs = Date.parse(a.deletedAt);
+    const bTs = Date.parse(b.deletedAt);
+    return (Number.isFinite(bTs) ? bTs : 0) - (Number.isFinite(aTs) ? aTs : 0);
+  });
+
+  listEl.innerHTML = '';
+  if (visibleEntries.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'trash-panel__empty';
+    empty.textContent = 'Empty';
+    listEl.appendChild(empty);
+  } else {
+    visibleEntries.forEach(entry => {
+      const isoDate = getTrashSourceIsoDate(entry);
+      const card = renderTaskCard(entry.task, isoDate, false, null);
+      card.dataset.trashCard = 'true';
+      listEl.appendChild(card);
+    });
+  }
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
 function getCalendarEventsForDate(isoDate) {
   // 1. Get stored calendar events for this date
   const stored = state.calendarEvents.filter(evt => evt.date === isoDate);
@@ -6575,6 +6991,41 @@ function renderWorkdayMarkers() {
 
   startMarker.title = `Workday start (${formatOffsetAsClock(state.workday.startOffset)})`;
   endMarker.title = `Workday end (${formatOffsetAsClock(state.workday.endOffset)})`;
+}
+
+const CURRENT_TIME_UPDATE_INTERVAL_MS = 60 * 1000;
+let currentTimeLineInterval = null;
+let currentTimeLineTimeout = null;
+
+function updateCurrentTimeLine() {
+  const timeGrid = document.getElementById('time-grid');
+  const line = document.getElementById('current-time-line');
+  if (!timeGrid || !line) return;
+
+  const visibleDate = getFirstVisibleDate();
+  const todayISO = getTodayISO();
+  const shouldShow = visibleDate === todayISO;
+  line.hidden = !shouldShow;
+  if (!shouldShow) return;
+
+  const now = new Date();
+  const offset = (now.getHours() - CALENDAR_START_HOUR) + (now.getMinutes() / 60);
+  const clamped = clampCalendarOffset(offset, 0, timeGrid);
+  line.style.setProperty('--offset', String(clamped));
+}
+
+function scheduleCurrentTimeLineUpdates() {
+  if (currentTimeLineTimeout) clearTimeout(currentTimeLineTimeout);
+  if (currentTimeLineInterval) clearInterval(currentTimeLineInterval);
+
+  const now = new Date();
+  const msToNextMinute = Math.max(0, (60 - now.getSeconds()) * 1000 - now.getMilliseconds());
+
+  updateCurrentTimeLine();
+  currentTimeLineTimeout = setTimeout(() => {
+    updateCurrentTimeLine();
+    currentTimeLineInterval = setInterval(updateCurrentTimeLine, CURRENT_TIME_UPDATE_INTERVAL_MS);
+  }, msToNextMinute || CURRENT_TIME_UPDATE_INTERVAL_MS);
 }
 
 function scrollTimelineToWorkdayStart() {
@@ -7003,7 +7454,7 @@ function commitAddTask(colEl) {
     ownActualTimeSeconds: 0,
     scheduledTime: null,
     complete: false,
-    tag: null,
+    tag: settings.defaultChannelId ? (CHANNELS.find(c => c.id === settings.defaultChannelId) || {}).label || null : null,
     integrationColor: null,
     subtasks: [],
     showSubtasks: false,
@@ -7076,8 +7527,9 @@ function attachEvents() {
 
   function beginTaskDragFromCard(card) {
     if (!card) return false;
+    const isTrashCard = card.dataset.trashCard === 'true';
     const colEl = card.closest('.day-column');
-    if (!colEl) return false;
+    if (!colEl && !isTrashCard) return false;
 
     // Recover from any prior interrupted drag that left a card hidden.
     clearTaskDraggingClass();
@@ -7088,6 +7540,32 @@ function attachEvents() {
     dragState.taskId      = card.dataset.taskId;
     dragState.isGhost     = card.dataset.ghostDate ? true : false;
     dragState.ghostVisualColId = null;
+    dragState.fromTrash   = isTrashCard;
+
+    if (isTrashCard) {
+      const entry = findTrashEntry(dragState.taskId);
+      if (!entry) return false;
+      dragState.sourceColId = null;
+      dragState.sourceIndex = null;
+      dragState.sourceIsoDate = getTrashSourceIsoDate(entry);
+
+      if (taskDropPlaceholder && taskDropPlaceholder.parentElement) {
+        taskDropPlaceholder.remove();
+      }
+      taskDropPlaceholder = card.cloneNode(true);
+      taskDropPlaceholder.classList.remove('task-card--dragging');
+      taskDropPlaceholder.classList.add('task-card--placeholder');
+      taskDropPlaceholder.removeAttribute('draggable');
+      taskDropPlaceholder.dataset.taskId = 'placeholder';
+      taskDropPlaceholder.style.height = `${card.offsetHeight}px`;
+      taskDropPlaceholder.style.minHeight = `${card.offsetHeight}px`;
+
+      setActiveDrag('task', dragState.taskId);
+      clearPendingDrag();
+      document.body.classList.add('is-task-reordering');
+      scheduleTaskDragClass(card);
+      return true;
+    }
 
     // For ghost cards, find the actual column where the task lives
     if (dragState.isGhost) {
@@ -7194,7 +7672,7 @@ function attachEvents() {
 
     const durationHours = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
-      : 0.5;
+      : settings.defaultTimeboxDurationMinutes / 60;
     const offset = yToOffset(clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
     const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
@@ -7223,7 +7701,7 @@ function attachEvents() {
 
     const duration = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
-      : 0.5;
+      : settings.defaultTimeboxDurationMinutes / 60;
     const offset = yToOffset(clientY, timeGrid, duration);
     const visibleDate = getFirstVisibleDate();
 
@@ -7264,9 +7742,48 @@ function attachEvents() {
       if (Number.isFinite(parsed)) insertIndex = Math.max(0, Math.min(parsed, cards.length));
     }
 
-    const sourceCol = state.columns.find(c => c.id === dragState.sourceColId);
     const targetCol = state.columns.find(c => c.id === targetColId);
-    if (!sourceCol || !targetCol) return false;
+    if (!targetCol) return false;
+
+    if (dragState.fromTrash) {
+      const entry = findTrashEntry(dragState.taskId);
+      if (!entry) return false;
+      const task = entry.task;
+      ensureTaskTimeState(task);
+      ensureTaskRolloverState(task);
+
+      // Remove from trash
+      state.trash = state.trash.filter(item => item.task.id !== dragState.taskId);
+
+      const todayISO = getTodayISO();
+      const sourceIso = dragState.sourceIsoDate || getTrashSourceIsoDate(entry);
+
+      targetCol.tasks.splice(insertIndex, 0, task);
+
+      if (targetCol.isoDate < todayISO && sourceIso >= todayISO) {
+        completeTaskAsOf(task, targetCol.isoDate);
+        task.startDate = targetCol.isoDate;
+        moveCompletedTasksToBottom(targetCol);
+      } else if (sourceIso < todayISO && targetCol.isoDate >= todayISO) {
+        ensureTaskRolloverState(task);
+        task.complete = false;
+        task.completedOnDate = null;
+        task.startDate = targetCol.isoDate;
+        task.scheduledTime = null;
+      } else {
+        task.startDate = targetCol.isoDate;
+      }
+
+      cleanupTaskDropVisuals();
+      renderColumn(targetCol);
+      renderCalendarEvents();
+      renderTrashPanel();
+      setTimeout(finalizeTaskDragState, 0);
+      return true;
+    }
+
+    const sourceCol = state.columns.find(c => c.id === dragState.sourceColId);
+    if (!sourceCol) return false;
     const taskIndex = sourceCol.tasks.findIndex(t => t.id === dragState.taskId);
     if (taskIndex === -1) return false;
 
@@ -7884,7 +8401,7 @@ function attachEvents() {
     }
 
     const overTimeline = !!(target && closestFromTarget(target, '#time-grid'));
-    if (overTimeline) {
+    if (overTimeline && !dragState.fromTrash) {
       showCalendarGhostForTask(taskPointerDrag.taskId, e.clientY);
     } else {
       hideCalendarGhost();
@@ -7912,7 +8429,7 @@ function attachEvents() {
     }
 
     const overTimeline = !!(target && closestFromTarget(target, '#time-grid'));
-    if (overTimeline) {
+    if (overTimeline && !dragState.fromTrash) {
       dropTaskOnTimeline(taskId, e.clientY);
     }
 
@@ -7991,6 +8508,330 @@ function attachEvents() {
   });
 }
 
+function attachTrashEvents() {
+  const list = document.querySelector('[data-trash-list]');
+  if (!list) return;
+
+  function closestFromTarget(target, selector) {
+    if (target instanceof Element) return target.closest(selector);
+    if (target instanceof Node && target.parentElement) return target.parentElement.closest(selector);
+    return null;
+  }
+
+  list.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (activeDragType || dragState.taskId || taskPointerDrag || calPointerDrag) return;
+    if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-check]')) return;
+    if (closestFromTarget(e.target, '[data-card-time-badge]')) return;
+    if (closestFromTarget(e.target, '[data-card-timer-toggle]')) return;
+    if (closestFromTarget(e.target, '[data-card-actual-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-planned-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-date-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-sdp]')) return;
+    if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-actual]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-planned]')) return;
+    const card = closestFromTarget(e.target, '.task-card');
+    if (!card) return;
+    e.preventDefault();
+    taskPointerDrag = {
+      taskId: card.dataset.taskId,
+      startX: e.clientX,
+      startY: e.clientY,
+      started: false,
+      sourceCard: card,
+      ghostEl: null
+    };
+  });
+
+  list.addEventListener('click', e => {
+    const completeBtn = closestFromTarget(e.target, '.task-card__complete-btn');
+    if (completeBtn) {
+      e.stopImmediatePropagation();
+      closeCardPicker();
+      closeCardDatePicker();
+      closeChannelPicker();
+      const card = completeBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const restored = restoreTrashTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+      if (!restored) return;
+      completeTaskAsOf(restored.task, getTodayISO());
+      restored.task.startDate = getTodayISO();
+      moveCompletedTasksToBottom(restored.column);
+      renderColumn(restored.column);
+      renderCalendarEvents();
+      renderTrashPanel();
+      return;
+    }
+
+    const subtaskBtn = closestFromTarget(e.target, '[data-card-subtask-check]');
+    if (subtaskBtn) {
+      e.stopImmediatePropagation();
+      closeCardPicker();
+      closeCardDatePicker();
+      closeChannelPicker();
+      const subtaskEl = subtaskBtn.closest('.subtask');
+      const card = subtaskBtn.closest('.task-card');
+      if (!subtaskEl || !card) return;
+      const taskId = card.dataset.taskId;
+      const subtaskId = subtaskEl.dataset.subtaskId;
+      if (!subtaskId) return;
+      const restored = restoreTrashTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+      if (!restored) return;
+      const subtask = findSubtask(restored.task, subtaskId);
+      if (!subtask) return;
+      subtask.done = !subtask.done;
+      subtask.deleteReady = false;
+      ensureTaskRolloverState(restored.task);
+      const todayISO = getTodayISO();
+      if (subtask.done) {
+        if (!restored.task.subtaskCompletionsByDate[todayISO]) restored.task.subtaskCompletionsByDate[todayISO] = [];
+        if (!restored.task.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
+          restored.task.subtaskCompletionsByDate[todayISO].push(subtask.id);
+        }
+      } else {
+        for (const date in restored.task.subtaskCompletionsByDate) {
+          const arr = restored.task.subtaskCompletionsByDate[date];
+          const idx = arr.indexOf(subtask.id);
+          if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete restored.task.subtaskCompletionsByDate[date]; }
+        }
+      }
+      renderColumn(restored.column);
+      renderCalendarEvents();
+      renderTrashPanel();
+      return;
+    }
+
+    const badge = closestFromTarget(e.target, '[data-card-time-badge]');
+    if (badge) {
+      e.stopImmediatePropagation();
+      const card = badge.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+
+      const isPastCard = card.dataset.isPast === 'true';
+      const columnDate = card.dataset.columnDate;
+      const isShutdownCard = dailyShutdownState.isActive && !!columnDate;
+
+      const timerKey = getCardTimerKeyForCard(card);
+      if (cardTimerExpanded.has(timerKey)) {
+        if (cardPickerState) closeCardPicker();
+        cardTimerExpanded.delete(timerKey);
+      } else {
+        cardTimerExpanded.add(timerKey);
+      }
+      renderTrashPanel();
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+
+      if ((isPastCard || isShutdownCard) && cardTimerExpanded.has(timerKey) && columnDate) {
+        setTimeout(() => {
+          actualPickerDateScope = columnDate;
+          openCardPicker(taskId, 'actual');
+        }, 0);
+      }
+      return;
+    }
+
+    const timerBtn = closestFromTarget(e.target, '[data-card-timer-toggle]');
+    if (timerBtn) {
+      e.stopImmediatePropagation();
+      const card = timerBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      if (focusState.running && focusState.taskId === taskId) {
+        stopFocusTimer();
+        const ctx = findTaskContext(taskId);
+        if (ctx) renderColumn(ctx.column);
+        else renderTrashPanel();
+        return;
+      }
+      const restored = restoreTrashTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+      if (!restored) return;
+      renderColumn(restored.column);
+      renderCalendarEvents();
+      renderTrashPanel();
+      openFocusMode(taskId, true);
+      return;
+    }
+
+    const picker = closestFromTarget(e.target, '[data-card-picker]');
+    if (picker) {
+      e.stopImmediatePropagation();
+      const optBtn = closestFromTarget(e.target, '[data-card-picker-minutes]');
+      if (optBtn) { applyCardPickerTime(parseInt(optBtn.dataset.cardPickerMinutes, 10)); return; }
+      if (closestFromTarget(e.target, '[data-card-picker-edit]')) {
+        if (cardPickerState) { cardPickerState.editMode = true; renderCardPicker(); }
+        return;
+      }
+      if (closestFromTarget(e.target, '[data-card-picker-clear]')) { applyCardPickerTime(0); return; }
+      return;
+    }
+
+    const actualBtn = closestFromTarget(e.target, '[data-card-actual-picker-btn]');
+    if (actualBtn) {
+      e.stopImmediatePropagation();
+      const card = actualBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      if (focusState.running && focusState.taskId === taskId) return;
+      if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'actual') {
+        closeCardPicker();
+      } else {
+        if ((card.dataset.isPast === 'true' || dailyShutdownState.isActive) && card.dataset.columnDate) {
+          actualPickerDateScope = card.dataset.columnDate;
+        }
+        openCardPicker(taskId, 'actual');
+      }
+      return;
+    }
+
+    const plannedBtn = closestFromTarget(e.target, '[data-card-planned-picker-btn]');
+    if (plannedBtn) {
+      e.stopImmediatePropagation();
+      const card = plannedBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'planned') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'planned');
+      }
+      return;
+    }
+
+    const subtaskActualBtn = closestFromTarget(e.target, '[data-card-subtask-actual]');
+    if (subtaskActualBtn) {
+      e.stopImmediatePropagation();
+      const card = subtaskActualBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const subtaskId = subtaskActualBtn.dataset.cardSubtaskActual;
+      if (focusState.running && focusState.taskId === taskId && focusState.subtaskId === subtaskId) return;
+      if (cardPickerState && cardPickerState.subtaskId === subtaskId && cardPickerState.type === 'actual') {
+        closeCardPicker();
+      } else {
+        if ((card.dataset.isPast === 'true' || dailyShutdownState.isActive) && card.dataset.columnDate) {
+          actualPickerDateScope = card.dataset.columnDate;
+        }
+        openCardPicker(taskId, 'actual', subtaskId);
+      }
+      return;
+    }
+
+    const subtaskPlannedBtn = closestFromTarget(e.target, '[data-card-subtask-planned]');
+    if (subtaskPlannedBtn) {
+      e.stopImmediatePropagation();
+      const card = subtaskPlannedBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const subtaskId = subtaskPlannedBtn.dataset.cardSubtaskPlanned;
+      if (cardPickerState && cardPickerState.subtaskId === subtaskId && cardPickerState.type === 'planned') {
+        closeCardPicker();
+      } else {
+        openCardPicker(taskId, 'planned', subtaskId);
+      }
+      return;
+    }
+
+    const dateBtn = closestFromTarget(e.target, '[data-card-date-btn]');
+    if (dateBtn) {
+      e.stopImmediatePropagation();
+      if (cardPickerState) closeCardPicker();
+      const card = dateBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      if (cardDatePickerState && cardDatePickerState.taskId === taskId) {
+        closeCardDatePicker();
+      } else {
+        openCardDatePicker(taskId, card);
+      }
+      return;
+    }
+
+    const clockBtn = closestFromTarget(e.target, '[data-card-clock-btn]');
+    if (clockBtn) {
+      e.stopImmediatePropagation();
+      if (cardDatePickerState) closeCardDatePicker();
+      const card = clockBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      const loc = getTaskLocation(taskId);
+      if (!loc) return;
+      const task = loc.task;
+      const columnDate = card.dataset.columnDate || card.dataset.ghostDate || null;
+
+      const timerKey = getCardTimerKeyForCard(card);
+      if (!cardTimerExpanded.has(timerKey) && !(focusState.running && focusState.taskId === taskId)) {
+        if (timerKey) cardTimerExpanded.add(timerKey);
+        if (loc.location === 'trash') {
+          renderTrashPanel();
+        } else {
+          const col = columnDate
+            ? state.columns.find(c => c.isoDate === columnDate)
+            : state.columns.find(c => c.tasks.some(t => t.id === taskId));
+          if (col) renderColumn(col);
+        }
+
+        if (!task.timeEstimateMinutes) {
+          setTimeout(() => openCardPicker(taskId, 'planned'), 0);
+        }
+      } else {
+        if (cardPickerState) closeCardPicker();
+        const key = getCardTimerKeyForCard(card);
+        if (key) cardTimerExpanded.delete(key);
+        if (loc.location === 'trash') {
+          renderTrashPanel();
+        } else {
+          const col = columnDate
+            ? state.columns.find(c => c.isoDate === columnDate)
+            : state.columns.find(c => c.tasks.some(t => t.id === taskId));
+          if (col) renderColumn(col);
+        }
+      }
+      return;
+    }
+
+    const channelBtn = closestFromTarget(e.target, '[data-channel-btn]');
+    if (channelBtn) {
+      e.stopImmediatePropagation();
+      const card = channelBtn.closest('.task-card');
+      if (!card) return;
+      const taskId = card.dataset.taskId;
+      openChannelPicker(taskId);
+      return;
+    }
+  });
+
+  list.addEventListener('click', e => {
+    if (suppressTaskCardClick) {
+      suppressTaskCardClick = false;
+      return;
+    }
+    if (closestFromTarget(e.target, '.task-card__complete-btn')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-check]')) return;
+    if (closestFromTarget(e.target, '[data-card-time-badge]')) return;
+    if (closestFromTarget(e.target, '[data-card-timer-toggle]')) return;
+    if (closestFromTarget(e.target, '[data-card-actual-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-planned-picker-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-date-btn]')) return;
+    if (closestFromTarget(e.target, '[data-card-sdp]')) return;
+    if (closestFromTarget(e.target, '[data-card-clock-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-btn]')) return;
+    if (closestFromTarget(e.target, '[data-channel-picker]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-actual]')) return;
+    if (closestFromTarget(e.target, '[data-card-subtask-planned]')) return;
+    const card = closestFromTarget(e.target, '.task-card');
+    if (!card) return;
+    openTaskDetailModal(card.dataset.taskId);
+  });
+}
+
 function closeAnyPicker() {
   if (actualPickerOpen) { closeActualPicker(); return true; }
   if (plannedPickerOpen) { closePlannedPicker(); return true; }
@@ -8029,20 +8870,20 @@ function focusModalSubtaskInput(subtaskId) {
 
 function rerenderOpenTaskDetailModal(focusSubtaskId = null) {
   if (!openModalTaskId) return;
-  const ctx = findTaskContext(openModalTaskId);
-  if (!ctx) return;
+  const loc = getTaskLocation(openModalTaskId);
+  if (!loc) return;
   const overlay = document.getElementById('task-modal-overlay');
   if (!overlay) return;
 
   // Save Quill content before re-render destroys the instance
   if (taskModalQuill) {
-    ctx.task.notes = getQuillHtml(taskModalQuill);
+    loc.task.notes = getQuillHtml(taskModalQuill);
     taskModalQuill = null;
   }
 
-  overlay.innerHTML = renderTaskDetailModal(ctx.task, ctx.column);
+  overlay.innerHTML = renderTaskDetailModal(loc.task, loc.column, { isTrash: loc.location === 'trash' });
   if (typeof lucide !== 'undefined') lucide.createIcons();
-  initTaskModalQuill(ctx.task);
+  initTaskModalQuill(loc.task);
   if (focusState.running && focusState.taskId === openModalTaskId) {
     updateCardDetailTimerState();
   }
@@ -8170,12 +9011,21 @@ function attachTaskModalEvents() {
       return;
     }
 
+    // Restore banner action for trashed tasks
+    if (e.target.closest('[data-restore-task]')) {
+      if (!openModalTaskId) return;
+      restoreTaskFromTrash(openModalTaskId);
+      closeTaskDetailModal();
+      showToast('Restored', 'dark');
+      return;
+    }
+
     // "+ Subtasks" top action: create one row initially and focus label
     if (e.target.closest('[data-modal-add-two-subtasks]')) {
       if (!openModalTaskId) return;
-      const ctx = findTaskContext(openModalTaskId);
-      if (!ctx) return;
-      const { task, column } = ctx;
+      const loc = getTaskLocation(openModalTaskId);
+      if (!loc) return;
+      const { task } = loc;
 
       task.showSubtasks = true;
       let focusSubtaskId;
@@ -8186,7 +9036,7 @@ function attachTaskModalEvents() {
         focusSubtaskId = emptyExisting ? emptyExisting.id : addModalSubtask(task).id;
       }
 
-      renderColumn(column);
+      renderTaskLocation(loc);
       rerenderOpenTaskDetailModal(focusSubtaskId);
       return;
     }
@@ -8216,6 +9066,10 @@ function attachTaskModalEvents() {
           handleDuplicateTask(openModalTaskId);
         } else if (action === 'delete-task') {
           handleDeleteTask(openModalTaskId);
+        } else if (action === 'restore-task') {
+          restoreTaskFromTrash(openModalTaskId);
+          closeTaskDetailModal();
+          showToast('Restored', 'dark');
         }
       }
       return;
@@ -8224,10 +9078,10 @@ function attachTaskModalEvents() {
     // Add subtask row button
     if (e.target.closest('[data-modal-add-subtask]')) {
       if (!openModalTaskId) return;
-      const ctx = findTaskContext(openModalTaskId);
-      if (!ctx) return;
-      const subtask = addModalSubtask(ctx.task);
-      renderColumn(ctx.column);
+      const loc = getTaskLocation(openModalTaskId);
+      if (!loc) return;
+      const subtask = addModalSubtask(loc.task);
+      renderTaskLocation(loc);
       rerenderOpenTaskDetailModal(subtask.id);
       return;
     }
@@ -8236,29 +9090,42 @@ function attachTaskModalEvents() {
     const subtaskCheckBtn = e.target.closest('[data-modal-subtask-check]');
     if (subtaskCheckBtn) {
       if (!openModalTaskId) return;
-      const ctx = findTaskContext(openModalTaskId);
-      if (!ctx) return;
+      let loc = getTaskLocation(openModalTaskId);
+      if (!loc) return;
+      const restoredFromTrash = loc.location === 'trash';
+      if (restoredFromTrash) {
+        const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+        if (!restored) return;
+        renderTrashPanel();
+        renderCalendarEvents();
+        loc = { location: 'column', column: restored.column, task: restored.task, index: restored.insertIndex, entry: null };
+      }
       const subtaskId = subtaskCheckBtn.getAttribute('data-modal-subtask-check');
-      const subtask = findSubtask(ctx.task, subtaskId);
+      const subtask = findSubtask(loc.task, subtaskId);
       if (!subtask) return;
       subtask.done = !subtask.done;
       subtask.deleteReady = false;
-      ensureTaskRolloverState(ctx.task);
+      ensureTaskRolloverState(loc.task);
       const todayISO = getTodayISO();
       if (subtask.done) {
-        if (!ctx.task.subtaskCompletionsByDate[todayISO]) ctx.task.subtaskCompletionsByDate[todayISO] = [];
-        if (!ctx.task.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
-          ctx.task.subtaskCompletionsByDate[todayISO].push(subtask.id);
+        if (!loc.task.subtaskCompletionsByDate[todayISO]) loc.task.subtaskCompletionsByDate[todayISO] = [];
+        if (!loc.task.subtaskCompletionsByDate[todayISO].includes(subtask.id)) {
+          loc.task.subtaskCompletionsByDate[todayISO].push(subtask.id);
         }
       } else {
-        for (const date in ctx.task.subtaskCompletionsByDate) {
-          const arr = ctx.task.subtaskCompletionsByDate[date];
+        for (const date in loc.task.subtaskCompletionsByDate) {
+          const arr = loc.task.subtaskCompletionsByDate[date];
           const idx = arr.indexOf(subtask.id);
-          if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete ctx.task.subtaskCompletionsByDate[date]; }
+          if (idx !== -1) { arr.splice(idx, 1); if (arr.length === 0) delete loc.task.subtaskCompletionsByDate[date]; }
         }
       }
-      subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
-      renderColumn(ctx.column);
+      if (!restoredFromTrash) {
+        subtaskCheckBtn.classList.toggle('task-modal__check--complete', subtask.done);
+      }
+      renderColumn(loc.column);
+      if (restoredFromTrash) {
+        openTaskDetailModal(openModalTaskId);
+      }
       return;
     }
 
@@ -8266,16 +9133,24 @@ function attachTaskModalEvents() {
     const detachBtn = e.target.closest('[data-modal-subtask-detach]');
     if (detachBtn) {
       if (!openModalTaskId) return;
-      const ctx = findTaskContext(openModalTaskId);
-      if (!ctx) return;
+      let loc = getTaskLocation(openModalTaskId);
+      if (!loc) return;
+      if (loc.location === 'trash') {
+        const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+        if (!restored) return;
+        renderTrashPanel();
+        renderCalendarEvents();
+        loc = { location: 'column', column: restored.column, task: restored.task, index: restored.insertIndex, entry: null };
+        openTaskDetailModal(openModalTaskId);
+      }
       const subtaskId = detachBtn.getAttribute('data-modal-subtask-detach');
 
       if (focusState.running && focusState.taskId === openModalTaskId && focusState.subtaskId === subtaskId) {
         stopFocusTimer();
       }
 
-      detachModalSubtaskToTask(ctx.task, ctx.column, subtaskId);
-      renderColumn(ctx.column);
+      detachModalSubtaskToTask(loc.task, loc.column, subtaskId);
+      renderColumn(loc.column);
       rerenderOpenTaskDetailModal();
       return;
     }
@@ -8286,6 +9161,14 @@ function attachTaskModalEvents() {
       if (!openModalTaskId) return;
       const subtaskId = subtaskPlayBtn.getAttribute('data-modal-subtask-play');
       if (!subtaskId) return;
+      if (openModalIsTrash) {
+        const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+        if (!restored) return;
+        renderColumn(restored.column);
+        renderCalendarEvents();
+        renderTrashPanel();
+        openTaskDetailModal(openModalTaskId);
+      }
 
       const isSameRunning = focusState.running
         && focusState.taskId === openModalTaskId
@@ -8304,6 +9187,14 @@ function attachTaskModalEvents() {
     // START/STOP button on card detail
     if (e.target.closest('.task-modal__start-btn')) {
       if (!openModalTaskId) return;
+      if (openModalIsTrash) {
+        const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+        if (!restored) return;
+        renderColumn(restored.column);
+        renderCalendarEvents();
+        renderTrashPanel();
+        openTaskDetailModal(openModalTaskId);
+      }
       if (focusState.running && focusState.taskId === openModalTaskId) {
         // Timer is running — stop it
         stopFocusTimer();
@@ -8322,6 +9213,18 @@ function attachTaskModalEvents() {
     // Modal checkmark toggle
     if (e.target.closest('[data-modal-check]')) {
       if (!openModalTaskId) return;
+      if (openModalIsTrash) {
+        const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+        if (!restored) return;
+        completeTaskAsOf(restored.task, getTodayISO());
+        restored.task.startDate = getTodayISO();
+        moveCompletedTasksToBottom(restored.column);
+        renderColumn(restored.column);
+        renderCalendarEvents();
+        renderTrashPanel();
+        openTaskDetailModal(openModalTaskId);
+        return;
+      }
       let task = null;
       let col = null;
       for (const c of state.columns) {
@@ -8407,7 +9310,18 @@ function attachTaskModalEvents() {
         const ch = CHANNELS.find(c => c.id === chId);
         if (ch && openModalTaskId) selectModalChannel(openModalTaskId, ch);
       }
-      if (e.target.closest('.channel-picker__manage')) e.preventDefault();
+      if (e.target.closest('.channel-picker__manage')) {
+        e.preventDefault();
+        closeModalChannelPicker();
+        closeTaskDetailModal();
+        openSettingsView();
+        setTimeout(() => {
+          const section = document.getElementById('settings-section-channels');
+          if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setSettingsActiveNav('channels');
+        }, 50);
+        return;
+      }
       return;
     }
 
@@ -8549,39 +9463,50 @@ function attachTaskModalEvents() {
       const historyDeleteBtn = e.target.closest('[data-delete-history]');
       if (historyDeleteBtn) {
         const dateToDelete = historyDeleteBtn.dataset.deleteHistory;
-        const ctx = findTaskContext(openModalTaskId);
-        if (ctx) {
-          ensureTaskRolloverState(ctx.task);
-          const entry = ctx.task.dailyActualTime[dateToDelete];
+        let loc = getTaskLocation(openModalTaskId);
+        if (loc) {
+          const restoredFromTrash = loc.location === 'trash';
+          if (restoredFromTrash) {
+            const restored = restoreTrashTask(openModalTaskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
+            if (!restored) return;
+            renderTrashPanel();
+            renderCalendarEvents();
+            loc = { location: 'column', column: restored.column, task: restored.task, index: restored.insertIndex, entry: null };
+          }
+          ensureTaskRolloverState(loc.task);
+          const entry = loc.task.dailyActualTime[dateToDelete];
           if (entry) {
             // Subtract from aggregate totals
-            const subtask = actualPickerSubtaskId ? findSubtask(ctx.task, actualPickerSubtaskId) : null;
+            const subtask = actualPickerSubtaskId ? findSubtask(loc.task, actualPickerSubtaskId) : null;
             if (!subtask) {
-              ctx.task.ownActualTimeSeconds = Math.max(0, (ctx.task.ownActualTimeSeconds || 0) - (entry.ownSeconds || 0));
-              ctx.task.subtasks.forEach(s => {
+              loc.task.ownActualTimeSeconds = Math.max(0, (loc.task.ownActualTimeSeconds || 0) - (entry.ownSeconds || 0));
+              loc.task.subtasks.forEach(s => {
                 if (entry.subtasks && entry.subtasks[s.id]) {
                   s.actualTimeSeconds = Math.max(0, (s.actualTimeSeconds || 0) - (entry.subtasks[s.id] || 0));
                 }
               });
             }
-            delete ctx.task.dailyActualTime[dateToDelete];
-            syncTaskAggregateTimes(ctx.task);
+            delete loc.task.dailyActualTime[dateToDelete];
+            syncTaskAggregateTimes(loc.task);
           }
           renderActualPickerInModal();
           // Update the actual metric display
           const overlay = document.getElementById('task-modal-overlay');
           const parentMetricEl = overlay.querySelector('[data-actual-btn] .task-modal__metric-value');
           if (parentMetricEl) {
-            if (ctx.task.actualTimeSeconds) {
-              parentMetricEl.textContent = formatMinutes(Math.floor(ctx.task.actualTimeSeconds / 60));
+            if (loc.task.actualTimeSeconds) {
+              parentMetricEl.textContent = formatMinutes(Math.floor(loc.task.actualTimeSeconds / 60));
               parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--set';
             } else {
               parentMetricEl.textContent = '--:--';
               parentMetricEl.className = 'task-modal__metric-value task-modal__metric-value--placeholder';
             }
           }
-          renderColumn(ctx.column);
-          rerenderGhostColumns(ctx.task);
+          renderColumn(loc.column);
+          rerenderGhostColumns(loc.task);
+          if (restoredFromTrash) {
+            openTaskDetailModal(openModalTaskId);
+          }
         }
         return;
       }
@@ -8630,11 +9555,11 @@ function attachTaskModalEvents() {
     const labelEl = targetEl.closest('[data-modal-subtask-label]');
     if (!labelEl) return;
     if (!openModalTaskId) return;
-    const ctx = findTaskContext(openModalTaskId);
-    if (!ctx) return;
+    const loc = getTaskLocation(openModalTaskId);
+    if (!loc) return;
 
     const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
-    const subtask = findSubtask(ctx.task, subtaskId);
+    const subtask = findSubtask(loc.task, subtaskId);
     if (!subtask) return;
 
     const cleanText = labelEl.textContent.replace(/\n/g, '').trim();
@@ -8652,11 +9577,11 @@ function attachTaskModalEvents() {
     const labelEl = targetEl.closest('[data-modal-subtask-label]');
     if (!labelEl) return;
     if (!openModalTaskId) return;
-    const ctx = findTaskContext(openModalTaskId);
-    if (!ctx) return;
+    const loc = getTaskLocation(openModalTaskId);
+    if (!loc) return;
 
     const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
-    const subtask = findSubtask(ctx.task, subtaskId);
+    const subtask = findSubtask(loc.task, subtaskId);
     if (!subtask) return;
 
     const cleanText = labelEl.textContent.replace(/\n/g, '').trim();
@@ -8668,7 +9593,7 @@ function attachTaskModalEvents() {
     }
 
     // Reflect subtask title changes on the kanban card as soon as field focus leaves.
-    renderColumn(ctx.column);
+    renderTaskLocation(loc);
   });
 
   overlay.addEventListener('keydown', e => {
@@ -8677,11 +9602,11 @@ function attachTaskModalEvents() {
     const labelEl = targetEl.closest('[data-modal-subtask-label]');
     if (!labelEl) return;
     if (!openModalTaskId) return;
-    const ctx = findTaskContext(openModalTaskId);
-    if (!ctx) return;
+    const loc = getTaskLocation(openModalTaskId);
+    if (!loc) return;
 
     const subtaskId = labelEl.getAttribute('data-modal-subtask-label');
-    const task = ctx.task;
+    const task = loc.task;
     const index = task.subtasks.findIndex(s => s.id === subtaskId);
     if (index === -1) return;
     const subtask = task.subtasks[index];
@@ -8689,7 +9614,7 @@ function attachTaskModalEvents() {
     if (e.key === 'Enter') {
       e.preventDefault();
       const inserted = addModalSubtask(task, index + 1);
-      renderColumn(ctx.column);
+      renderTaskLocation(loc);
       rerenderOpenTaskDetailModal(inserted.id);
       return;
     }
@@ -8703,7 +9628,7 @@ function attachTaskModalEvents() {
       e.preventDefault();
       const nextFocusId = task.subtasks[index + 1]?.id || task.subtasks[index - 1]?.id || null;
       removeModalSubtask(task, subtaskId);
-      renderColumn(ctx.column);
+      renderTaskLocation(loc);
       rerenderOpenTaskDetailModal(nextFocusId);
     }
   });
@@ -8758,13 +9683,13 @@ function attachTaskModalEvents() {
       return;
     }
 
-    const ctx = findTaskContext(openModalTaskId);
-    if (!ctx) {
+    const loc = getTaskLocation(openModalTaskId);
+    if (!loc) {
       suppressSubtaskHoverUntilPointerMove();
       return;
     }
 
-    const list = ctx.task.subtasks;
+    const list = loc.task.subtasks;
     const from = list.findIndex(s => s.id === drag.draggedId);
     const to = list.findIndex(s => s.id === drag.targetId);
     if (from === -1 || to === -1) {
@@ -8779,7 +9704,7 @@ function attachTaskModalEvents() {
     insertAt = Math.max(0, Math.min(insertAt, list.length));
     list.splice(insertAt, 0, moved);
 
-    renderColumn(ctx.column);
+    renderTaskLocation(loc);
     rerenderOpenTaskDetailModal(drag.draggedId);
     suppressSubtaskHoverUntilPointerMove();
   };
@@ -8940,6 +9865,8 @@ function updateTodayButtonLabel(overrideDate) {
     renderCalendarEvents._overrideDate = firstDate;
     renderCalendarEvents();
   }
+
+  updateCurrentTimeLine();
 }
 
 function updateCalendarDayHeader(isoDate) {
@@ -9085,6 +10012,34 @@ function setSidebarCollapsed(isCollapsed) {
   if (focusModal) focusModal.classList.toggle('focus-modal--sidebar-collapsed', isCollapsed);
 }
 
+function setRightSidebarCollapsed(isCollapsed) {
+  const shell = document.querySelector('.app-shell');
+  if (!shell) return;
+  rightSidebarState.collapsed = isCollapsed;
+  shell.classList.toggle('right-sidebar-collapsed', isCollapsed);
+  const collapseBtn = document.querySelector('[data-right-sidebar-collapse]');
+  if (collapseBtn) {
+    collapseBtn.setAttribute('aria-label', isCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  }
+}
+
+function setRightSidebarActive(panelId) {
+  if (!panelId) return;
+  rightSidebarState.activePanel = panelId;
+  document.querySelectorAll('[data-right-panel]').forEach(panel => {
+    panel.hidden = panel.dataset.rightPanel !== panelId;
+  });
+  document.querySelectorAll('[data-right-panel-btn]').forEach(btn => {
+    btn.classList.toggle('right-rail__btn--active', btn.dataset.rightPanelBtn === panelId);
+  });
+  if (panelId === 'calendar') {
+    updateCurrentTimeLine();
+  }
+  if (panelId === 'trash') {
+    renderTrashPanel();
+  }
+}
+
 function closeWorkspaceMenu() {
   const menu = document.querySelector('[data-workspace-menu]');
   if (menu) menu.hidden = true;
@@ -9119,6 +10074,31 @@ function attachSidebarToggleEvents() {
       setSidebarCollapsed(false);
     });
   }
+}
+
+function attachRightSidebarEvents() {
+  const collapseBtn = document.querySelector('[data-right-sidebar-collapse]');
+  if (collapseBtn) {
+    collapseBtn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      setRightSidebarCollapsed(!rightSidebarState.collapsed);
+    });
+  }
+
+  document.querySelectorAll('[data-right-panel-btn]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      const panelId = btn.dataset.rightPanelBtn;
+      if (!panelId) return;
+      setRightSidebarActive(panelId);
+      if (rightSidebarState.collapsed) {
+        setRightSidebarCollapsed(false);
+      }
+    });
+  });
+
+  setRightSidebarActive(rightSidebarState.activePanel);
 }
 
 function attachSidebarEvents() {
@@ -9177,7 +10157,11 @@ function attachWorkspaceMenuEvents() {
 
   menu.addEventListener('click', e => {
     const item = e.target.closest('.sdp__menu-item');
-    if (item) closeWorkspaceMenu();
+    if (!item) return;
+    closeWorkspaceMenu();
+    if (item.hasAttribute('data-settings-open')) {
+      openSettingsView();
+    }
   });
 
   document.addEventListener('click', e => {
@@ -9559,7 +10543,7 @@ function attachCalendarEvents() {
 
     const durationHours = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
-      : 0.5;
+      : settings.defaultTimeboxDurationMinutes / 60;
     const offset = yToOffset(e.clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
     const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
@@ -9594,7 +10578,7 @@ function attachCalendarEvents() {
 
     const duration = task.timeEstimateMinutes > 0
       ? task.timeEstimateMinutes / 60
-      : 0.5;
+      : settings.defaultTimeboxDurationMinutes / 60;
     const offset   = yToOffset(e.clientY, timeGrid, duration);
     const visibleDate = getFirstVisibleDate();
 
@@ -9834,6 +10818,18 @@ document.addEventListener('keydown', e => {
 document.addEventListener('click', e => {
   if (!cardPickerState) return;
   if (e.target instanceof Element) {
+    const portalPicker = e.target.closest('[data-card-picker-portal]');
+    if (portalPicker) {
+      e.stopImmediatePropagation();
+      const optBtn = e.target.closest('[data-card-picker-minutes]');
+      if (optBtn) { applyCardPickerTime(parseInt(optBtn.dataset.cardPickerMinutes, 10)); return; }
+      if (e.target.closest('[data-card-picker-edit]')) {
+        if (cardPickerState) { cardPickerState.editMode = true; renderCardPicker(); }
+        return;
+      }
+      if (e.target.closest('[data-card-picker-clear]')) { applyCardPickerTime(0); return; }
+      return;
+    }
     if (e.target.closest('[data-card-picker]')) return;
     if (e.target.closest('[data-card-actual-picker-btn]')) return;
     if (e.target.closest('[data-card-planned-picker-btn]')) return;
@@ -9899,9 +10895,15 @@ document.addEventListener('click', e => {
         const ch = CHANNELS.find(c => c.id === chId);
         if (ch) selectChannel(channelPickerState.taskId, ch);
       }
-      // Click on manage link — do nothing for now
       if (e.target.closest('.channel-picker__manage')) {
         e.preventDefault();
+        closeChannelPicker();
+        openSettingsView();
+        setTimeout(() => {
+          const section = document.getElementById('settings-section-channels');
+          if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setSettingsActiveNav('channels');
+        }, 50);
       }
       return;
     }
@@ -9930,6 +10932,1093 @@ document.addEventListener('keydown', e => {
   }
 });
 
+/* ═══════════════════════════════════════════════
+   SETTINGS VIEW
+═══════════════════════════════════════════════ */
+
+let settingsScrollSpyObserver = null;
+let settingsScrollSpySuppressed = false;
+let settingsScrollSpyTimer = null;
+let settingsDropdownOpen = null; // { key, el }
+let settingsChannelModalState = null; // { mode: 'create-context'|'edit-context'|'create-channel'|'edit-channel', data }
+
+const SETTINGS_COLOR_PALETTE = [
+  '#ff79a7','#d45d8c','#e979fc','#ff62be','#856cc2','#a382ff',
+  '#7cadff','#5e9fe0','#90a4ae','#4fc3f7','#4dd0e1','#4db6c1',
+  '#4db6ac','#4da197','#74b077','#82c785','#95bc74','#aed580',
+  '#ffd451','#ffbd4d','#ffb74d','#f8a34d','#ff8964','#ee805e',
+  '#ff8686','#e06d6d','#a1887f','#8e7973',
+];
+
+function getDeviceTimeFormat() {
+  const f = new Intl.DateTimeFormat(undefined, { hour: 'numeric' });
+  const parts = f.formatToParts(new Date(2000, 0, 1, 13));
+  return parts.some(p => p.type === 'dayPeriod') ? '12' : '24';
+}
+
+function getEffectiveTimeFormat() {
+  if (settings.timeFormat === 'device') return getDeviceTimeFormat();
+  return settings.timeFormat;
+}
+
+function minutesToTimeLabel(minutes) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  }
+  const period = h < 12 ? 'AM' : 'PM';
+  const h12 = h % 12 || 12;
+  return m === 0 ? `${h12}:00 ${period}` : `${h12}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+function generateTimeOptions() {
+  const options = [];
+  for (let mins = 0; mins < 24 * 60; mins += 15) {
+    options.push({ value: mins, label: minutesToTimeLabel(mins) });
+  }
+  return options;
+}
+
+function formatTimezoneLabel(tz) {
+  try {
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' });
+    const parts = formatter.formatToParts(now);
+    const offsetPart = parts.find(p => p.type === 'timeZoneName');
+    const offset = offsetPart ? offsetPart.value : '';
+    return `(${offset}) ${tz.replace(/_/g, ' ')}`;
+  } catch { return tz; }
+}
+
+function getAllTimezones() {
+  try {
+    return Intl.supportedValuesOf('timeZone');
+  } catch {
+    return ['America/New_York','America/Chicago','America/Denver','America/Los_Angeles',
+            'America/Anchorage','Pacific/Honolulu','Europe/London','Europe/Paris',
+            'Europe/Berlin','Asia/Tokyo','Asia/Shanghai','Asia/Kolkata',
+            'Australia/Sydney','Pacific/Auckland','UTC'];
+  }
+}
+
+function openSettingsView() {
+  const settingsEl = document.getElementById('settings-view');
+  const appShell = document.querySelector('.app-shell');
+  if (!settingsEl || !appShell) return;
+
+  renderSettingsContent();
+  settingsEl.hidden = false;
+  appShell.style.display = 'none';
+
+  // Reset scroll and active nav to top
+  const contentEl = document.getElementById('settings-content');
+  if (contentEl) contentEl.scrollTop = 0;
+  setSettingsActiveNav('general');
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  initSettingsScrollSpy();
+}
+
+function closeSettingsView() {
+  const settingsEl = document.getElementById('settings-view');
+  const appShell = document.querySelector('.app-shell');
+  if (!settingsEl || !appShell) return;
+
+  settingsEl.hidden = true;
+  appShell.style.display = '';
+  cleanupSettingsScrollSpy();
+  closeSettingsDropdown();
+  applySettingsToApp();
+}
+
+function applySettingsToApp() {
+  // Sync workload threshold
+  dailyPlanningState.capacityConfig.defaultMinutes = settings.workloadThresholdHours * 60;
+
+  // Sync workday schedule for today
+  const todayDow = new Date().getDay();
+  const todaySchedule = settings.schedule.find(s => s.day === todayDow);
+  if (todaySchedule) {
+    state.workday.startOffset = todaySchedule.startMinutes / 60;
+    state.workday.endOffset = todaySchedule.endMinutes / 60;
+    state.workdayDefault.startOffset = todaySchedule.startMinutes / 60;
+    state.workdayDefault.endOffset = todaySchedule.endMinutes / 60;
+  }
+
+  // Update time grid labels
+  updateTimeGridLabels();
+
+  // Re-render affected UI
+  renderWorkdayMarkers();
+  renderCalendarEvents();
+}
+
+function updateTimeGridLabels() {
+  const labels = document.querySelectorAll('.time-grid__label');
+  labels.forEach((label, i) => {
+    const hour = i;
+    const fmt = getEffectiveTimeFormat();
+    if (fmt === '24') {
+      label.textContent = `${String(hour).padStart(2, '0')}:00`;
+    } else {
+      const period = hour < 12 ? 'AM' : 'PM';
+      const h12 = hour % 12 || 12;
+      label.textContent = `${h12} ${period}`;
+    }
+  });
+}
+
+// ── Render helpers ──
+
+function settingsToggleHTML(key, value) {
+  return `<button class="settings-toggle${value ? ' settings-toggle--on' : ''}" type="button" data-settings-toggle="${key}">
+    <span class="settings-toggle__knob"></span>
+  </button>`;
+}
+
+function settingsSelectHTML(key, currentLabel) {
+  return `<div class="settings-view__dropdown-anchor">
+    <button class="settings-view__select" type="button" data-settings-select="${key}">
+      <span>${escapeHtml(currentLabel)}</span>
+      <i data-lucide="chevron-down" class="settings-view__select-icon"></i>
+    </button>
+  </div>`;
+}
+
+function settingsRowHTML(label, desc, controlHTML) {
+  return `<div class="settings-view__row">
+    <div class="settings-view__row-info">
+      <div class="settings-view__row-label">${escapeHtml(label)}</div>
+      ${desc ? `<div class="settings-view__row-desc">${escapeHtml(desc)}</div>` : ''}
+    </div>
+    ${controlHTML}
+  </div>`;
+}
+
+// ── Section renderers ──
+
+function renderSettingsGeneral() {
+  const tzLabel = formatTimezoneLabel(settings.timezone);
+  const timeFormatLabels = { device: 'Use device region', '12': '12 hour', '24': '24 hour' };
+  const startOfWeekLabels = { monday: 'Monday', sunday: 'Sunday' };
+  const rolloverLabels = { top: 'Top', bottom: 'Bottom' };
+  const workloadLabel = `${settings.workloadThresholdHours} hours`;
+
+  return `<section class="settings-view__section" id="settings-section-general">
+    <h2 class="settings-view__section-title">General</h2>
+    ${settingsRowHTML('Time zone', "What's your time zone", settingsSelectHTML('timezone', tzLabel))}
+    ${settingsRowHTML('Time format', 'How should times be displayed in Sunsama?', settingsSelectHTML('timeFormat', timeFormatLabels[settings.timeFormat]))}
+    ${settingsRowHTML('Start of week', 'What day does the week start', settingsSelectHTML('startOfWeek', startOfWeekLabels[settings.startOfWeek]))}
+    ${settingsRowHTML('Count planned time as actual time', 'When you complete a task that has no "actual time", use the time you planned to spend on it as the time you actually spent on it.', settingsToggleHTML('countPlannedAsActual', settings.countPlannedAsActual))}
+    ${settingsRowHTML('Task rollover position', 'When tasks rollover, should they roll to the top or bottom of the next day?', settingsSelectHTML('taskRolloverPosition', rolloverLabels[settings.taskRolloverPosition]))}
+    ${settingsRowHTML('Workload threshold', 'How many hours per day do you prefer to work', settingsSelectHTML('workloadThresholdHours', workloadLabel))}
+  </section>`;
+}
+
+function renderSettingsDisplay() {
+  const darkModeLabels = { light: 'Light', dark: 'Dark' };
+  return `<section class="settings-view__section" id="settings-section-display">
+    <h2 class="settings-view__section-title">Display</h2>
+    ${settingsRowHTML('Dark mode', 'Show interface in dark mode', settingsSelectHTML('darkMode', darkModeLabels[settings.darkMode]))}
+  </section>`;
+}
+
+function renderSettingsTimeboxing() {
+  const label = `${settings.defaultTimeboxDurationMinutes} min`;
+  return `<section class="settings-view__section" id="settings-section-timeboxing">
+    <h2 class="settings-view__section-title">Timeboxing</h2>
+    ${settingsRowHTML('Default duration when scheduling tasks', 'When you drag a task onto your calendar, how much time to block off', settingsSelectHTML('defaultTimeboxDurationMinutes', label))}
+  </section>`;
+}
+
+function renderSettingsSchedule() {
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  let rows = '';
+  for (let i = 0; i < 7; i++) {
+    const s = settings.schedule[i];
+    const startLabel = minutesToTimeLabel(s.startMinutes);
+    const endLabel = minutesToTimeLabel(s.endMinutes);
+    const disabledClass = s.workday ? '' : ' settings-schedule__times--disabled';
+    rows += `<div class="settings-schedule__row">
+      <span class="settings-schedule__day">${dayNames[i]}</span>
+      <div class="settings-schedule__times${disabledClass}">
+        <div class="settings-view__dropdown-anchor">
+          <button class="settings-schedule__select" type="button" data-settings-select="schedule-${i}-start">
+            <span>${escapeHtml(startLabel)}</span>
+          </button>
+        </div>
+        <span class="settings-schedule__dash">-</span>
+        <div class="settings-view__dropdown-anchor">
+          <button class="settings-schedule__select" type="button" data-settings-select="schedule-${i}-end">
+            <span>${escapeHtml(endLabel)}</span>
+          </button>
+        </div>
+      </div>
+      <div class="settings-schedule__workday">
+        <button class="settings-toggle${s.workday ? ' settings-toggle--on' : ''}" type="button" data-settings-schedule-workday="${i}" aria-label="Workday toggle for ${dayNames[i]}">
+          <span class="settings-toggle__knob"></span>
+        </button>
+      </div>
+    </div>`;
+  }
+  return `<section class="settings-view__section" id="settings-section-schedule">
+    <h2 class="settings-view__section-title">Schedule</h2>
+    <div class="settings-view__row-desc" style="margin-bottom:8px">Controls default start of day and end of timing.</div>
+    <div class="settings-schedule__header">
+      <h3 style="font-size:16px;font-weight:600;color:#413f39;margin:0">Default schedule</h3>
+      <span class="settings-schedule__workday-heading">Workday</span>
+    </div>
+    ${rows}
+  </section>`;
+}
+
+function renderSettingsShortcuts() {
+  return `<section class="settings-view__section" id="settings-section-shortcuts">
+    <h2 class="settings-view__section-title">Keyboard shortcuts</h2>
+    ${settingsRowHTML('Keyboard shortcuts', 'Enable keyboard shortcuts', settingsToggleHTML('keyboardShortcutsEnabled', settings.keyboardShortcutsEnabled))}
+  </section>`;
+}
+
+function renderSettingsProfile() {
+  const initials = ((settings.firstName || '').charAt(0) + (settings.lastName || '').charAt(0)).toUpperCase() || '';
+  const avatarContent = settings.profilePictureDataUrl
+    ? `<img src="${settings.profilePictureDataUrl}" alt="Profile">`
+    : initials;
+
+  return `<section class="settings-view__section" id="settings-section-profile">
+    <h2 class="settings-view__section-title">Profile</h2>
+    <div class="settings-profile__layout">
+      <div class="settings-profile__fields">
+        <div class="settings-profile__input-group">
+          <label class="settings-profile__input-label">Name</label>
+          <input class="settings-profile__input" type="text" placeholder="First" value="${escapeHtml(settings.firstName)}" data-settings-input="firstName">
+        </div>
+        <div class="settings-profile__input-group">
+          <label class="settings-profile__input-label">&nbsp;</label>
+          <input class="settings-profile__input" type="text" placeholder="Last" value="${escapeHtml(settings.lastName)}" data-settings-input="lastName">
+        </div>
+      </div>
+      <div class="settings-profile__avatar-area">
+        <div class="settings-profile__avatar" id="settings-avatar">${avatarContent}</div>
+        <button class="settings-profile__upload-btn" type="button" data-settings-upload>Upload a new picture</button>
+        <input type="file" accept="image/*" id="settings-avatar-file" hidden>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderSettingsAccountMgmt() {
+  return `<section class="settings-view__section" id="settings-section-account-mgmt">
+    <h2 class="settings-view__section-title">Account Management</h2>
+    <div class="settings-acct__row">
+      <div class="settings-acct__label">Change password</div>
+      <div class="settings-acct__desc">Enter a new password to login to Sunsama</div>
+    </div>
+    <div class="settings-acct__row">
+      <div class="settings-acct__label">Change primary email</div>
+      <div class="settings-acct__desc">Choose a different email address to use to log into your account</div>
+    </div>
+  </section>`;
+}
+
+function renderSettingsChannels() {
+  // Group channels by context
+  const contexts = CHANNELS.filter(ch => ch.isContext);
+  const uncategorized = CHANNELS.filter(ch => !ch.isContext && !ch.context && ch.id !== 'unassigned');
+  const unassigned = CHANNELS.find(ch => ch.id === 'unassigned');
+
+  let html = `<section class="settings-view__section" id="settings-section-channels">
+    <h2 class="settings-view__section-title">Contexts & Channels</h2>
+    <div class="settings-channels__actions">
+      <button class="settings-channels__btn" type="button" data-create-context>Create Context</button>
+      <button class="settings-channels__btn" type="button" data-create-channel>Create Channel</button>
+    </div>
+    <div class="settings-channels__table">
+      <div class="settings-channels__table-header">
+        <span>CONTEXT/CHANNEL</span>
+        <span>ENABLE</span>
+      </div>`;
+
+  // Render each context and its children
+  for (const ctx of contexts) {
+    const children = CHANNELS.filter(ch => ch.context === ctx.label && !ch.isContext);
+    html += `<div class="settings-channels__context-row" data-channel-edit="${ctx.id}">
+      <span class="settings-channels__context-hash" style="color:${ctx.hashColor}">#</span>
+      <span>${escapeHtml(ctx.label)}</span>
+    </div>`;
+    for (const ch of children) {
+      const enabled = settings.channelEnabled[ch.id] !== false;
+      html += `<div class="settings-channels__channel-row" data-channel-edit="${ch.id}">
+        <div class="settings-channels__channel-info">
+          <span class="settings-channels__channel-hash" style="color:${ch.hashColor}">#</span>
+          <span class="settings-channels__channel-name">${escapeHtml(ch.label)}</span>
+        </div>
+        ${settingsToggleHTML('channel-' + ch.id, enabled)}
+      </div>`;
+    }
+    html += `<button class="settings-channels__create-link" type="button" data-create-channel-in="${ctx.label}">
+      + Create channel in ${escapeHtml(ctx.label)}
+    </button>`;
+  }
+
+  // Uncategorized channels
+  if (uncategorized.length > 0) {
+    html += `<div class="settings-channels__context-row">
+      <span class="settings-channels__context-hash" style="color:#787878">#</span>
+      <span>uncategorized</span>
+    </div>`;
+    for (const ch of uncategorized) {
+      const enabled = settings.channelEnabled[ch.id] !== false;
+      html += `<div class="settings-channels__channel-row" data-channel-edit="${ch.id}">
+        <div class="settings-channels__channel-info">
+          <span class="settings-channels__channel-hash" style="color:${ch.hashColor}">#</span>
+          <span class="settings-channels__channel-name">${escapeHtml(ch.label)}</span>
+        </div>
+        ${settingsToggleHTML('channel-' + ch.id, enabled)}
+      </div>`;
+    }
+    html += `<button class="settings-channels__create-link" type="button" data-create-channel-in="uncategorized">
+      + Create channel in uncategorized
+    </button>`;
+  }
+
+  html += '</div></section>';
+  return html;
+}
+
+function renderSettingsContent() {
+  const contentEl = document.getElementById('settings-content');
+  if (!contentEl) return;
+  contentEl.innerHTML = `<div class="settings-view__content-inner">
+    ${renderSettingsGeneral()}
+    ${renderSettingsDisplay()}
+    ${renderSettingsTimeboxing()}
+    ${renderSettingsSchedule()}
+    ${renderSettingsChannels()}
+    ${renderSettingsShortcuts()}
+    ${renderSettingsProfile()}
+    ${renderSettingsAccountMgmt()}
+  </div>`;
+}
+
+// ── Scroll Spy ──
+
+function initSettingsScrollSpy() {
+  cleanupSettingsScrollSpy();
+  const contentEl = document.getElementById('settings-content');
+  if (!contentEl) return;
+
+  const sections = contentEl.querySelectorAll('.settings-view__section');
+  if (!sections.length) return;
+
+  settingsScrollSpyObserver = new IntersectionObserver(entries => {
+    if (settingsScrollSpySuppressed) return;
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        const sectionId = entry.target.id.replace('settings-section-', '');
+        setSettingsActiveNav(sectionId);
+      }
+    }
+  }, {
+    root: contentEl,
+    threshold: 0,
+    rootMargin: '-10% 0px -80% 0px'
+  });
+
+  sections.forEach(s => settingsScrollSpyObserver.observe(s));
+}
+
+function cleanupSettingsScrollSpy() {
+  if (settingsScrollSpyObserver) {
+    settingsScrollSpyObserver.disconnect();
+    settingsScrollSpyObserver = null;
+  }
+}
+
+function setSettingsActiveNav(sectionId) {
+  const navItems = document.querySelectorAll('[data-settings-nav]');
+  navItems.forEach(item => {
+    item.classList.toggle('settings-view__nav-item--active', item.dataset.settingsNav === sectionId);
+  });
+}
+
+// ── Dropdown handling ──
+
+function openSettingsDropdown(key, triggerEl) {
+  closeSettingsDropdown();
+  const anchor = triggerEl.closest('.settings-view__dropdown-anchor') || triggerEl.parentElement;
+  const options = getSettingsDropdownOptions(key);
+  const currentValue = getSettingsValue(key);
+
+  let html = '<div class="settings-view__dropdown' + (key === 'timezone' ? ' settings-view__dropdown--wide' : '') + '" data-settings-dropdown>';
+  for (const opt of options) {
+    const selected = String(opt.value) === String(currentValue);
+    html += `<button class="settings-view__dropdown-item" type="button" data-settings-dropdown-item data-key="${escapeHtml(key)}" data-value="${escapeHtml(String(opt.value))}">
+      <span>${escapeHtml(opt.label)}</span>
+      <span class="settings-view__dropdown-check">${selected ? '✓' : ''}</span>
+    </button>`;
+  }
+  html += '</div>';
+
+  anchor.insertAdjacentHTML('beforeend', html);
+  settingsDropdownOpen = { key, el: anchor.querySelector('[data-settings-dropdown]') };
+
+  // Scroll to selected item
+  const selectedItem = settingsDropdownOpen.el.querySelector('.settings-view__dropdown-item:has(.settings-view__dropdown-check:not(:empty))');
+  if (selectedItem) selectedItem.scrollIntoView({ block: 'nearest' });
+}
+
+function closeSettingsDropdown() {
+  if (settingsDropdownOpen) {
+    settingsDropdownOpen.el.remove();
+    settingsDropdownOpen = null;
+  }
+  // Also remove any stray dropdowns
+  document.querySelectorAll('.settings-view__dropdown').forEach(d => d.remove());
+}
+
+function getSettingsValue(key) {
+  if (key.startsWith('schedule-')) {
+    const parts = key.split('-');
+    const dayIdx = parseInt(parts[1]);
+    const field = parts[2]; // 'start' or 'end'
+    return settings.schedule[dayIdx][field === 'start' ? 'startMinutes' : 'endMinutes'];
+  }
+  return settings[key];
+}
+
+function setSettingsValue(key, value) {
+  if (key.startsWith('schedule-')) {
+    const parts = key.split('-');
+    const dayIdx = parseInt(parts[1]);
+    const field = parts[2];
+    settings.schedule[dayIdx][field === 'start' ? 'startMinutes' : 'endMinutes'] = parseInt(value);
+    return;
+  }
+  if (key.startsWith('channel-')) {
+    const chId = key.replace('channel-', '');
+    settings.channelEnabled[chId] = value;
+    return;
+  }
+
+  // Type conversion
+  if (key === 'workloadThresholdHours' || key === 'defaultTimeboxDurationMinutes') {
+    settings[key] = parseInt(value);
+  } else if (typeof settings[key] === 'boolean') {
+    settings[key] = value === true || value === 'true';
+  } else {
+    settings[key] = value;
+  }
+}
+
+function getSettingsDropdownOptions(key) {
+  switch (key) {
+    case 'timezone':
+      return getAllTimezones().map(tz => ({ value: tz, label: formatTimezoneLabel(tz) }));
+    case 'timeFormat':
+      return [
+        { value: 'device', label: 'Use device region' },
+        { value: '12', label: '12 hour' },
+        { value: '24', label: '24 hour' },
+      ];
+    case 'startOfWeek':
+      return [
+        { value: 'monday', label: 'Monday' },
+        { value: 'sunday', label: 'Sunday' },
+      ];
+    case 'taskRolloverPosition':
+      return [
+        { value: 'top', label: 'Top' },
+        { value: 'bottom', label: 'Bottom' },
+      ];
+    case 'workloadThresholdHours':
+      return [6,7,8,9,10].map(h => ({ value: h, label: `${h} hours` }));
+    case 'darkMode':
+      return [
+        { value: 'light', label: 'Light' },
+        { value: 'dark', label: 'Dark' },
+      ];
+    case 'defaultTimeboxDurationMinutes':
+      return [15,30,45,60].map(m => ({ value: m, label: `${m} min` }));
+    default:
+      if (key.startsWith('schedule-')) {
+        return generateTimeOptions();
+      }
+      return [];
+  }
+}
+
+function getSettingsDisplayLabel(key, value) {
+  const options = getSettingsDropdownOptions(key);
+  const opt = options.find(o => String(o.value) === String(value));
+  return opt ? opt.label : String(value);
+}
+
+// ── Channel Modal ──
+
+function openChannelModal(mode, data) {
+  settingsChannelModalState = { mode, data: data || {} };
+  renderChannelModal();
+}
+
+function closeChannelModal() {
+  settingsChannelModalState = null;
+  const overlay = document.getElementById('settings-channel-overlay');
+  if (overlay) overlay.remove();
+}
+
+function renderChannelModal() {
+  if (!settingsChannelModalState) return;
+  const { mode, data } = settingsChannelModalState;
+
+  // Remove existing
+  const existing = document.getElementById('settings-channel-overlay');
+  if (existing) existing.remove();
+
+  const isEdit = mode.startsWith('edit-');
+  const isContext = mode.includes('context');
+  const title = isEdit ? (isContext ? 'Edit context' : 'Edit channel') : (isContext ? 'Create context' : 'Create channel');
+
+  const name = data.label || '';
+  const color = data.hashColor || '#4a90d9';
+  const context = data.context || '';
+
+  // Get available contexts for channel creation
+  const contextOptions = CHANNELS.filter(ch => ch.isContext).map(ch => ch.label);
+
+  let fieldsHTML = '';
+
+  // Name
+  fieldsHTML += `<div class="settings-channel-modal__field">
+    <div class="settings-channel-modal__field-label">Name</div>
+    <input class="settings-channel-modal__input" type="text" placeholder="Name..." value="${escapeHtml(name)}" data-channel-name>
+  </div>`;
+
+  // Context selector (only for channels, not contexts)
+  if (!isContext) {
+    fieldsHTML += `<div class="settings-channel-modal__field">
+      <div class="settings-channel-modal__field-row">
+        <div>
+          <div class="settings-channel-modal__field-label">Context</div>
+          <div class="settings-channel-modal__field-desc">Select a context for this channel.</div>
+        </div>
+        <div class="settings-view__dropdown-anchor">
+          <button class="settings-view__select" type="button" data-channel-context-select>
+            <span>${context ? escapeHtml(context) : 'Select'}</span>
+            <i data-lucide="chevron-down" class="settings-view__select-icon"></i>
+          </button>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // Personal context toggle (only for contexts)
+  if (isContext) {
+    const isPersonal = data.isPersonal || false;
+    fieldsHTML += `<div class="settings-channel-modal__field">
+      <div class="settings-channel-modal__field-row">
+        <div>
+          <div class="settings-channel-modal__field-label">Personal context</div>
+          <div class="settings-channel-modal__field-desc">Categorize tasks in this context as personal.</div>
+        </div>
+        ${settingsToggleHTML('channel-personal', isPersonal)}
+      </div>
+    </div>`;
+  }
+
+  // Default channel toggle
+  const isDefaultChannel = isEdit && data.id === settings.defaultChannelId;
+  fieldsHTML += `<div class="settings-channel-modal__field">
+    <div class="settings-channel-modal__field-row">
+      <div>
+        <div class="settings-channel-modal__field-label">Default channel</div>
+        <div class="settings-channel-modal__field-desc">Assign new tasks to this ${isContext ? 'context' : 'channel'} by default.</div>
+      </div>
+      ${settingsToggleHTML('channel-default', isDefaultChannel)}
+    </div>
+  </div>`;
+
+  // Color picker
+  let colorSwatches = '';
+  for (const c of SETTINGS_COLOR_PALETTE) {
+    const selected = c === color ? ' settings-channel-modal__color-swatch--selected' : '';
+    colorSwatches += `<button class="settings-channel-modal__color-swatch${selected}" type="button" data-channel-color="${c}" style="background:${c}"><i data-lucide="check"></i></button>`;
+  }
+  fieldsHTML += `<div class="settings-channel-modal__field">
+    <div class="settings-channel-modal__field-label">Color</div>
+    <div class="settings-channel-modal__color-grid">${colorSwatches}</div>
+  </div>`;
+
+  // Action buttons
+  const deleteBtn = isEdit ? `<button class="settings-channel-modal__btn settings-channel-modal__btn--danger" type="button" data-channel-delete>Delete</button>` : '';
+  const saveLabel = isEdit ? 'Save' : 'Create';
+  const discardLabel = 'Discard';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'settings-channel-overlay';
+  overlay.className = 'settings-channel-overlay';
+  overlay.innerHTML = `<div class="settings-channel-modal">
+    <div class="settings-channel-modal__header">
+      <h2 class="settings-channel-modal__title">${escapeHtml(title)}</h2>
+      <div class="settings-channel-modal__header-actions">
+        ${deleteBtn}
+        <button class="settings-channel-modal__btn" type="button" data-channel-modal-close>${escapeHtml(discardLabel)}</button>
+        <button class="settings-channel-modal__btn settings-channel-modal__btn--primary" type="button" data-channel-save>${escapeHtml(saveLabel)}</button>
+      </div>
+    </div>
+    <div class="settings-channel-modal__body">${fieldsHTML}</div>
+  </div>`;
+
+  document.getElementById('settings-view').appendChild(overlay);
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  // Attach channel modal events
+  overlay.addEventListener('click', e => {
+    // Close
+    if (e.target.closest('[data-channel-modal-close]')) {
+      closeChannelModal();
+      return;
+    }
+    // Click outside modal
+    if (e.target === overlay) {
+      closeChannelModal();
+      return;
+    }
+    // Save
+    if (e.target.closest('[data-channel-save]')) {
+      handleChannelSave();
+      return;
+    }
+    // Delete (two-click confirm)
+    const deleteBtn = e.target.closest('[data-channel-delete]');
+    if (deleteBtn) {
+      if (deleteBtn.classList.contains('settings-channel-modal__btn--danger-confirm')) {
+        handleChannelDelete();
+      } else {
+        const isContext = settingsChannelModalState && settingsChannelModalState.mode.includes('context');
+        deleteBtn.classList.add('settings-channel-modal__btn--danger-confirm');
+        deleteBtn.textContent = isContext ? 'Delete context' : 'Delete channel';
+      }
+      return;
+    }
+    // Color swatch
+    const swatch = e.target.closest('[data-channel-color]');
+    if (swatch) {
+      overlay.querySelectorAll('.settings-channel-modal__color-swatch').forEach(s => s.classList.remove('settings-channel-modal__color-swatch--selected'));
+      swatch.classList.add('settings-channel-modal__color-swatch--selected');
+      if (typeof lucide !== 'undefined') lucide.createIcons();
+      return;
+    }
+    // Close context dropdown if clicking outside it
+    const openDD = overlay.querySelector('.settings-view__dropdown');
+    if (openDD && !e.target.closest('[data-channel-context-select]') && !e.target.closest('[data-context-option]')) {
+      openDD.remove();
+    }
+
+    // Context selector
+    if (e.target.closest('[data-channel-context-select]')) {
+      const btn = e.target.closest('[data-channel-context-select]');
+      const anchor = btn.closest('.settings-view__dropdown-anchor');
+      // Toggle dropdown
+      const existing = anchor.querySelector('.settings-view__dropdown');
+      if (existing) { existing.remove(); return; }
+      let ddHTML = '<div class="settings-view__dropdown" data-settings-dropdown>';
+      for (const ctx of contextOptions) {
+        ddHTML += `<button class="settings-view__dropdown-item" type="button" data-context-option="${escapeHtml(ctx)}"><span>${escapeHtml(ctx)}</span></button>`;
+      }
+      ddHTML += '</div>';
+      anchor.insertAdjacentHTML('beforeend', ddHTML);
+      return;
+    }
+    // Context option click
+    const ctxOpt = e.target.closest('[data-context-option]');
+    if (ctxOpt) {
+      const ctx = ctxOpt.dataset.contextOption;
+      const btn = overlay.querySelector('[data-channel-context-select]');
+      if (btn) {
+        const span = btn.querySelector('span');
+        if (span) span.textContent = ctx;
+      }
+      ctxOpt.closest('.settings-view__dropdown').remove();
+      return;
+    }
+    // Toggle in modal (stop propagation to prevent settings-level handler double-toggling)
+    const toggle = e.target.closest('.settings-toggle');
+    if (toggle) {
+      e.stopPropagation();
+      toggle.classList.toggle('settings-toggle--on');
+      return;
+    }
+  });
+
+  function handleModalKeydown(e) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      e.preventDefault();
+      const currentOverlay = document.getElementById('settings-channel-overlay');
+      if (!currentOverlay) { document.removeEventListener('keydown', handleModalKeydown, true); return; }
+      const openDD = currentOverlay.querySelector('.settings-view__dropdown');
+      if (openDD) {
+        openDD.remove();
+        return;
+      }
+      closeChannelModal();
+      document.removeEventListener('keydown', handleModalKeydown, true);
+    }
+  }
+  document.addEventListener('keydown', handleModalKeydown, true);
+}
+
+function handleChannelSave() {
+  if (!settingsChannelModalState) return;
+  const { mode, data } = settingsChannelModalState;
+  const overlay = document.getElementById('settings-channel-overlay');
+  if (!overlay) return;
+
+  const nameInput = overlay.querySelector('[data-channel-name]');
+  const name = nameInput ? nameInput.value.trim() : '';
+  if (!name) return;
+
+  const selectedColor = overlay.querySelector('.settings-channel-modal__color-swatch--selected');
+  const color = selectedColor ? selectedColor.dataset.channelColor : '#4a90d9';
+
+  const isContext = mode.includes('context');
+  const isEdit = mode.startsWith('edit-');
+
+  // Get context for channels
+  let context = null;
+  if (!isContext) {
+    const ctxBtn = overlay.querySelector('[data-channel-context-select]');
+    const ctxSpan = ctxBtn ? ctxBtn.querySelector('span') : null;
+    context = ctxSpan ? ctxSpan.textContent.trim() : null;
+    if (context === 'Select') context = null;
+  }
+
+  // Get default toggle state
+  const defaultToggle = overlay.querySelectorAll('.settings-toggle');
+  let isDefault = false;
+  let isPersonal = false;
+  if (isContext) {
+    // First toggle is personal, second is default
+    if (defaultToggle[0]) isPersonal = defaultToggle[0].classList.contains('settings-toggle--on');
+    if (defaultToggle[1]) isDefault = defaultToggle[1].classList.contains('settings-toggle--on');
+  } else {
+    // Only default toggle
+    if (defaultToggle[0]) isDefault = defaultToggle[0].classList.contains('settings-toggle--on');
+  }
+
+  // Determine eventClass from color
+  const eventClassMap = {
+    '#ff79a7': 'cal-event--orange', '#d45d8c': 'cal-event--purple', '#e979fc': 'cal-event--purple',
+    '#ff62be': 'cal-event--purple', '#856cc2': 'cal-event--purple', '#a382ff': 'cal-event--purple',
+    '#7cadff': 'cal-event--blue', '#5e9fe0': 'cal-event--blue', '#90a4ae': 'cal-event--blue',
+    '#4fc3f7': 'cal-event--blue', '#4dd0e1': 'cal-event--blue', '#4db6c1': 'cal-event--blue',
+    '#4db6ac': 'cal-event--green', '#4da197': 'cal-event--green', '#74b077': 'cal-event--green',
+    '#82c785': 'cal-event--green', '#95bc74': 'cal-event--green', '#aed580': 'cal-event--green',
+    '#ffd451': 'cal-event--orange', '#ffbd4d': 'cal-event--orange', '#ffb74d': 'cal-event--orange',
+    '#f8a34d': 'cal-event--orange', '#ff8964': 'cal-event--orange', '#ee805e': 'cal-event--orange',
+    '#ff8686': 'cal-event--orange', '#e06d6d': 'cal-event--orange', '#a1887f': 'cal-event--blue',
+    '#8e7973': 'cal-event--blue',
+  };
+  const eventClass = eventClassMap[color] || 'cal-event--blue';
+
+  let channelId;
+  if (isEdit) {
+    // Update existing channel
+    channelId = data.id;
+    const ch = CHANNELS.find(c => c.id === data.id);
+    if (ch) {
+      ch.label = name;
+      ch.hashColor = color;
+      ch.eventClass = eventClass;
+      if (!isContext) ch.context = context;
+      if (isContext) ch.isPersonal = isPersonal;
+    }
+  } else {
+    // Create new channel/context
+    channelId = 'ch-' + uid();
+    const newChannel = {
+      id: channelId,
+      label: name,
+      context: isContext ? null : context,
+      hashColor: color,
+      eventClass: eventClass,
+    };
+    if (isContext) {
+      newChannel.isContext = true;
+      newChannel.isPersonal = isPersonal;
+    }
+    CHANNELS.push(newChannel);
+    settings.channelEnabled[channelId] = true;
+  }
+
+  // Handle default channel (only one allowed)
+  if (isDefault) {
+    settings.defaultChannelId = channelId;
+  } else if (settings.defaultChannelId === channelId) {
+    settings.defaultChannelId = null;
+  }
+
+  rebuildChannelColors();
+  closeChannelModal();
+
+  // Re-render channels section
+  const channelsSection = document.getElementById('settings-section-channels');
+  if (channelsSection) {
+    channelsSection.outerHTML = renderSettingsChannels();
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+  }
+}
+
+function handleChannelDelete() {
+  if (!settingsChannelModalState) return;
+  const { data } = settingsChannelModalState;
+  if (!data.id) return;
+
+  const isContext = CHANNELS.find(ch => ch.id === data.id && ch.isContext);
+
+  // Remove the channel
+  const idx = CHANNELS.findIndex(ch => ch.id === data.id);
+  if (idx !== -1) CHANNELS.splice(idx, 1);
+
+  // If it's a context, also remove children or unlink them
+  if (isContext) {
+    CHANNELS.forEach(ch => {
+      if (ch.context === data.label) {
+        ch.context = null;
+      }
+    });
+  }
+
+  delete settings.channelEnabled[data.id];
+  rebuildChannelColors();
+  closeChannelModal();
+
+  // Re-render
+  const channelsSection = document.getElementById('settings-section-channels');
+  if (channelsSection) {
+    channelsSection.outerHTML = renderSettingsChannels();
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+  }
+}
+
+// ── Event Delegation ──
+
+function attachSettingsEvents() {
+  const settingsView = document.getElementById('settings-view');
+  if (!settingsView) return;
+
+  settingsView.addEventListener('click', e => {
+    // Back button
+    if (e.target.closest('[data-settings-back]')) {
+      e.preventDefault();
+      closeSettingsView();
+      return;
+    }
+
+    // Nav items
+    const navItem = e.target.closest('[data-settings-nav]');
+    if (navItem) {
+      e.preventDefault();
+      const sectionId = navItem.dataset.settingsNav;
+      // Suppress scroll spy during smooth scroll to prevent flickering
+      settingsScrollSpySuppressed = true;
+      clearTimeout(settingsScrollSpyTimer);
+      settingsScrollSpyTimer = setTimeout(() => { settingsScrollSpySuppressed = false; }, 800);
+      if (sectionId === 'general') {
+        const contentEl = document.getElementById('settings-content');
+        if (contentEl) contentEl.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        const section = document.getElementById('settings-section-' + sectionId);
+        if (section) {
+          section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }
+      setSettingsActiveNav(sectionId);
+      return;
+    }
+
+    // Dropdown trigger
+    const selectBtn = e.target.closest('[data-settings-select]');
+    if (selectBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const key = selectBtn.dataset.settingsSelect;
+      if (settingsDropdownOpen && settingsDropdownOpen.key === key) {
+        closeSettingsDropdown();
+      } else {
+        openSettingsDropdown(key, selectBtn);
+      }
+      return;
+    }
+
+    // Dropdown item selection
+    const dropdownItem = e.target.closest('[data-settings-dropdown-item]');
+    if (dropdownItem) {
+      e.preventDefault();
+      const key = dropdownItem.dataset.key;
+      const value = dropdownItem.dataset.value;
+      setSettingsValue(key, value);
+      closeSettingsDropdown();
+
+      // Update the trigger label
+      const label = getSettingsDisplayLabel(key, value);
+      let triggerSelector = `[data-settings-select="${key}"]`;
+      const trigger = settingsView.querySelector(triggerSelector);
+      if (trigger) {
+        const span = trigger.querySelector('span');
+        if (span) span.textContent = label;
+      }
+
+      // For schedule or timeFormat changes, re-render the schedule section
+      if (key.startsWith('schedule-') || key === 'timeFormat') {
+        const scheduleSection = document.getElementById('settings-section-schedule');
+        if (scheduleSection) {
+          scheduleSection.outerHTML = renderSettingsSchedule();
+          if (typeof lucide !== 'undefined') lucide.createIcons();
+        }
+      }
+      return;
+    }
+
+    // Schedule workday toggle
+    const workdayToggle = e.target.closest('[data-settings-schedule-workday]');
+    if (workdayToggle) {
+      e.preventDefault();
+      const dayIdx = parseInt(workdayToggle.dataset.settingsScheduleWorkday);
+      settings.schedule[dayIdx].workday = !settings.schedule[dayIdx].workday;
+      const scheduleSection = document.getElementById('settings-section-schedule');
+      if (scheduleSection) {
+        scheduleSection.outerHTML = renderSettingsSchedule();
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+      }
+      return;
+    }
+
+    // Toggle switches
+    const toggle = e.target.closest('[data-settings-toggle]');
+    if (toggle) {
+      e.preventDefault();
+      const key = toggle.dataset.settingsToggle;
+      const isOn = toggle.classList.contains('settings-toggle--on');
+      toggle.classList.toggle('settings-toggle--on');
+
+      if (key.startsWith('channel-')) {
+        const chId = key.replace('channel-', '');
+        settings.channelEnabled[chId] = !isOn;
+      } else {
+        settings[key] = !isOn;
+      }
+      return;
+    }
+
+    // Profile upload
+    if (e.target.closest('[data-settings-upload]')) {
+      const fileInput = document.getElementById('settings-avatar-file');
+      if (fileInput) fileInput.click();
+      return;
+    }
+
+    // Create context
+    if (e.target.closest('[data-create-context]')) {
+      openChannelModal('create-context', {});
+      return;
+    }
+
+    // Create channel
+    if (e.target.closest('[data-create-channel]')) {
+      openChannelModal('create-channel', {});
+      return;
+    }
+
+    // Create channel in specific context
+    const createInCtx = e.target.closest('[data-create-channel-in]');
+    if (createInCtx) {
+      const ctx = createInCtx.dataset.createChannelIn;
+      openChannelModal('create-channel', { context: ctx === 'uncategorized' ? null : ctx });
+      return;
+    }
+
+    // Edit channel
+    const editBtn = e.target.closest('[data-channel-edit]');
+    if (editBtn) {
+      // Don't trigger if we clicked a toggle inside this row
+      if (e.target.closest('.settings-toggle')) return;
+      const chId = editBtn.dataset.channelEdit;
+      const ch = CHANNELS.find(c => c.id === chId);
+      if (ch) {
+        const mode = ch.isContext ? 'edit-context' : 'edit-channel';
+        openChannelModal(mode, { ...ch });
+      }
+      return;
+    }
+
+    // Close dropdown on click elsewhere
+    if (settingsDropdownOpen && !e.target.closest('[data-settings-dropdown]')) {
+      closeSettingsDropdown();
+    }
+  });
+
+  // Text inputs
+  settingsView.addEventListener('input', e => {
+    const input = e.target.closest('[data-settings-input]');
+    if (input) {
+      const key = input.dataset.settingsInput;
+      settings[key] = input.value;
+
+      // Update avatar initials
+      const avatar = document.getElementById('settings-avatar');
+      if (avatar && !settings.profilePictureDataUrl) {
+        const initials = ((settings.firstName || '').charAt(0) + (settings.lastName || '').charAt(0)).toUpperCase();
+        avatar.textContent = initials;
+      }
+    }
+  });
+
+  // File upload (use event delegation since input is JS-rendered)
+  settingsView.addEventListener('change', e => {
+    if (e.target.id !== 'settings-avatar-file') return;
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      settings.profilePictureDataUrl = reader.result;
+      const avatar = document.getElementById('settings-avatar');
+      if (avatar) {
+        avatar.innerHTML = `<img src="${reader.result}" alt="Profile">`;
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // Escape key
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const settingsEl = document.getElementById('settings-view');
+    if (!settingsEl || settingsEl.hidden) return;
+
+    // Close channel modal first
+    if (settingsChannelModalState) {
+      e.preventDefault();
+      closeChannelModal();
+      return;
+    }
+
+    // Close dropdown first
+    if (settingsDropdownOpen) {
+      e.preventDefault();
+      closeSettingsDropdown();
+      return;
+    }
+
+    // Close settings view
+    e.preventDefault();
+    closeSettingsView();
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   initializeDayWindow();
   initializeTaskTimeState();
@@ -9938,11 +12027,13 @@ document.addEventListener('DOMContentLoaded', () => {
   initializeTodayFirstColumnPosition();
   renderCalendarEvents();
   renderWorkdayMarkers();
+  scheduleCurrentTimeLineUpdates();
   attachCalendarZoomEvents();
   attachEvents();
   attachBoardTopbarEvents();
   attachSidebarToggleEvents();
   attachSidebarEvents();
+  attachRightSidebarEvents();
   attachWorkspaceMenuEvents();
   attachDailyPlanningEvents();
   attachDailyPlanningEscapeEvents();
@@ -9952,6 +12043,8 @@ document.addEventListener('DOMContentLoaded', () => {
   attachCalendarEvents();
   attachCalendarResizeEvents();
   attachWorkdayMarkerEvents();
+  attachTrashEvents();
+  attachSettingsEvents();
   setSidebarCollapsed(false);
   setSidebarActiveNav('home');
   requestAnimationFrame(scrollTimelineToWorkdayStart);

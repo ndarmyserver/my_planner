@@ -23,7 +23,7 @@
         </button>
         <div class="start-date-picker workspace-menu" data-workspace-menu hidden>
           <div class="sdp__arrow"></div>
-          <button class="sdp__menu-item" type="button">
+          <button class="sdp__menu-item" type="button" data-settings-open>
             <span class="ellipsis-menu__item-content">
               <i data-lucide="settings" class="ellipsis-menu__icon"></i>
               <span>Settings</span>
@@ -125,78 +125,159 @@
         </div>
       </main>
 
-      <!-- ═══ CALENDAR PANEL ═══ -->
-      <aside class="calendar-panel">
-        <div class="calendar-panel__header">
-          <i data-lucide="align-justify" class="cal-header-icon"></i>
-          <span class="cal-header-label">Calendars</span>
+      <!-- ═══ RIGHT SIDEBAR ═══ -->
+      <aside class="right-sidebar">
+        <div class="right-sidebar__panel" data-right-panel="calendar">
+          <section class="calendar-panel">
+            <div class="calendar-panel__header">
+              <span class="cal-header-label">Calendars</span>
+            </div>
+
+            <div class="calendar-day-badge">
+              <div class="calendar-zoom" aria-label="Timeline zoom controls">
+                <button class="calendar-zoom__btn" id="calendar-zoom-in" type="button" aria-label="Zoom in timeline">+</button>
+                <span class="calendar-zoom__value" id="calendar-zoom-value">1x</span>
+                <button class="calendar-zoom__btn" id="calendar-zoom-out" type="button" aria-label="Zoom out timeline">−</button>
+              </div>
+              <div class="calendar-day-info">
+                <span class="calendar-day-name">THU</span>
+                <span class="calendar-day-number">5</span>
+              </div>
+            </div>
+
+            <div class="time-grid-wrapper">
+              <div class="time-grid" id="time-grid">
+                <!-- Hour rows 12 AM – 11 PM -->
+                <div class="time-grid__row"><span class="time-grid__label">12 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">1 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">2 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">3 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">4 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">5 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">6 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">7 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">8 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">9 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">10 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">11 AM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">12 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">1 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">2 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">3 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">4 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">5 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">6 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">7 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">8 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">9 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">10 PM</span><div class="time-grid__track"></div></div>
+                <div class="time-grid__row"><span class="time-grid__label">11 PM</span><div class="time-grid__track"></div></div>
+
+                <!-- Calendar events rendered by renderCalendarEvents() in app.js -->
+
+                <!-- Current time indicator -->
+                <div class="current-time-line" id="current-time-line" hidden aria-hidden="true"></div>
+
+                <!-- Workday start/end markers -->
+                <div class="workday-marker" id="workday-start-marker" data-marker="start" aria-label="Workday start marker">
+                  <span class="workday-marker__badge" aria-hidden="true">START</span>
+                  <span class="workday-marker__curve" aria-hidden="true"></span>
+                </div>
+                <div class="workday-marker" id="workday-end-marker" data-marker="end" aria-label="Workday end marker">
+                  <span class="workday-marker__badge" aria-hidden="true">END</span>
+                  <span class="workday-marker__curve" aria-hidden="true"></span>
+                </div>
+
+                <!-- Drop line indicator for calendar event repositioning -->
+                <div id="cal-drag-line" hidden></div>
+
+                <!-- Drag ghost preview — positioned dynamically during dragover -->
+                <div class="cal-event cal-event-ghost" id="cal-event-ghost" hidden>
+                  <span class="cal-event__title"></span>
+                  <span class="cal-event__time"></span>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
 
-        <div class="calendar-day-badge">
-          <div class="calendar-zoom" aria-label="Timeline zoom controls">
-            <button class="calendar-zoom__btn" id="calendar-zoom-in" type="button" aria-label="Zoom in timeline">+</button>
-            <span class="calendar-zoom__value" id="calendar-zoom-value">1x</span>
-            <button class="calendar-zoom__btn" id="calendar-zoom-out" type="button" aria-label="Zoom out timeline">−</button>
-          </div>
-          <div class="calendar-day-info">
-            <span class="calendar-day-name">THU</span>
-            <span class="calendar-day-number">5</span>
+        <div class="right-sidebar__panel" data-right-panel="backlog" hidden>
+          <div class="right-sidebar__placeholder">
+            <div class="right-sidebar__placeholder-header">Backlog</div>
           </div>
         </div>
 
-        <div class="time-grid-wrapper">
-          <div class="time-grid" id="time-grid">
-            <!-- Hour rows 12 AM – 11 PM -->
-            <div class="time-grid__row"><span class="time-grid__label">12 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">1 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">2 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">3 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">4 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">5 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">6 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">7 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">8 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">9 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">10 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">11 AM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">12 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">1 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">2 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">3 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">4 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">5 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">6 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">7 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">8 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">9 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">10 PM</span><div class="time-grid__track"></div></div>
-            <div class="time-grid__row"><span class="time-grid__label">11 PM</span><div class="time-grid__track"></div></div>
-
-            <!-- Calendar events rendered by renderCalendarEvents() in app.js -->
-
-            <!-- Workday start/end markers -->
-            <div class="workday-marker" id="workday-start-marker" data-marker="start" aria-label="Workday start marker">
-              <span class="workday-marker__badge" aria-hidden="true">START</span>
-              <span class="workday-marker__curve" aria-hidden="true"></span>
-            </div>
-            <div class="workday-marker" id="workday-end-marker" data-marker="end" aria-label="Workday end marker">
-              <span class="workday-marker__badge" aria-hidden="true">END</span>
-              <span class="workday-marker__curve" aria-hidden="true"></span>
-            </div>
-
-            <!-- Drop line indicator for calendar event repositioning -->
-            <div id="cal-drag-line" hidden></div>
-
-            <!-- Drag ghost preview — positioned dynamically during dragover -->
-            <div class="cal-event cal-event-ghost" id="cal-event-ghost" hidden>
-              <span class="cal-event__title"></span>
-              <span class="cal-event__time"></span>
-            </div>
+        <div class="right-sidebar__panel" data-right-panel="archive" hidden>
+          <div class="right-sidebar__placeholder">
+            <div class="right-sidebar__placeholder-header">Archive</div>
           </div>
+        </div>
+
+        <div class="right-sidebar__panel" data-right-panel="search" hidden>
+          <div class="right-sidebar__placeholder">
+            <div class="right-sidebar__placeholder-header">Search</div>
+          </div>
+        </div>
+
+        <div class="right-sidebar__panel" data-right-panel="trash" hidden>
+          <div class="right-sidebar__placeholder-header">Trash</div>
+          <div class="trash-panel">
+            <div class="trash-panel__intro">
+              <div class="trash-panel__title">Trash</div>
+              <div class="trash-panel__description">Tasks deleted within the past 30 days.</div>
+            </div>
+            <div class="trash-panel__list" data-trash-list></div>
+          </div>
+        </div>
+
+        <div class="right-rail" data-right-rail>
+          <button class="right-rail__collapse" type="button" aria-label="Collapse sidebar" data-right-sidebar-collapse>
+            <i data-lucide="chevrons-right" class="right-rail__collapse-icon right-rail__collapse-icon--collapse"></i>
+            <i data-lucide="chevrons-left" class="right-rail__collapse-icon right-rail__collapse-icon--expand"></i>
+          </button>
+          <button class="right-rail__btn right-rail__btn--active" type="button" aria-label="Calendar" data-right-panel-btn="calendar">
+            <i data-lucide="calendar-days"></i>
+          </button>
+          <button class="right-rail__btn" type="button" aria-label="Backlog" data-right-panel-btn="backlog">
+            <i data-lucide="archive"></i>
+          </button>
+          <button class="right-rail__btn" type="button" aria-label="Archive" data-right-panel-btn="archive">
+            <i data-lucide="moon-star"></i>
+          </button>
+          <button class="right-rail__btn" type="button" aria-label="Search" data-right-panel-btn="search">
+            <i data-lucide="search"></i>
+          </button>
+          <button class="right-rail__btn" type="button" aria-label="Trash" data-right-panel-btn="trash">
+            <i data-lucide="trash"></i>
+          </button>
         </div>
       </aside>
     </div>
 
+  </div>
+
+  <!-- Settings View (full-screen overlay) -->
+  <div id="settings-view" class="settings-view" hidden>
+    <div class="settings-view__sidebar">
+      <button class="settings-view__back" type="button" data-settings-back>
+        <i data-lucide="arrow-left" class="settings-view__back-icon"></i>
+        <span>Return to workspace</span>
+      </button>
+      <div class="settings-view__nav">
+        <span class="settings-view__nav-header">Account</span>
+        <button class="settings-view__nav-item settings-view__nav-item--active" type="button" data-settings-nav="general">General</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="display">Display</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="timeboxing">Timeboxing</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="schedule">Schedule</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="channels">Channels</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="shortcuts">Keyboard Shortcuts</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="profile">Profile</button>
+        <button class="settings-view__nav-item" type="button" data-settings-nav="account-mgmt">Account Management</button>
+      </div>
+    </div>
+    <div class="settings-view__content" id="settings-content">
+      <!-- rendered by JS -->
+    </div>
   </div>
 
   <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
