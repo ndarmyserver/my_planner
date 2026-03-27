@@ -63,6 +63,7 @@
             <span class="ellipsis-menu__item-content">
               <i data-lucide="keyboard" class="ellipsis-menu__icon"></i>
               <span>Keyboard shortcuts</span>
+              <span class="workspace-menu__shortcut-hint">?</span>
             </span>
           </button>
           <div class="sdp__divider"></div>
@@ -105,22 +106,6 @@
           <a href="#" class="nav-item" data-sidebar-daily-shutdown>
             <i data-lucide="book" class="nav-icon"></i>
             <span class="nav-label">Daily shutdown</span>
-          </a>
-          <a href="#" class="nav-item">
-            <i data-lucide="highlighter" class="nav-icon"></i>
-            <span class="nav-label">Daily highlights</span>
-          </a>
-        </div>
-
-        <div class="sidebar__section">
-          <span class="section-label">WEEKLY RITUALS</span>
-          <a href="#" class="nav-item">
-            <i data-lucide="clipboard-list" class="nav-icon"></i>
-            <span class="nav-label">Weekly planning</span>
-          </a>
-          <a href="#" class="nav-item">
-            <i data-lucide="book" class="nav-icon"></i>
-            <span class="nav-label">Weekly review</span>
           </a>
         </div>
       </div>
@@ -339,15 +324,17 @@
         <h2 class="shortcuts-overlay__title" id="shortcuts-title">Keyboard shortcuts</h2>
       </div>
       <div class="shortcuts-overlay__search-row">
-        <i data-lucide="search" class="shortcuts-overlay__search-icon"></i>
-        <input
-          class="shortcuts-overlay__search-input"
-          type="text"
-          placeholder="Search..."
-          autocomplete="off"
-          spellcheck="false"
-          data-shortcuts-search
-        >
+        <div class="shortcuts-overlay__search-field">
+          <i data-lucide="search" class="shortcuts-overlay__search-icon"></i>
+          <input
+            class="shortcuts-overlay__search-input"
+            type="text"
+            placeholder="Search..."
+            autocomplete="off"
+            spellcheck="false"
+            data-shortcuts-search
+          >
+        </div>
       </div>
       <div class="shortcuts-overlay__content" data-shortcuts-content></div>
     </div>

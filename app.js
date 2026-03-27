@@ -1213,6 +1213,12 @@ function clearActiveTaskSelection() {
   syncActiveTaskCardUI();
 }
 
+function getPinnedShortcutTaskId() {
+  if (cardDatePickerState?.taskId) return cardDatePickerState.taskId;
+  if (startDatePickerState?.taskId) return startDatePickerState.taskId;
+  return null;
+}
+
 function suppressTaskHoverSelectionUntilPointerMove() {
   shortcutState.suppressHoverUntilPointerMove = true;
 }
@@ -1349,7 +1355,7 @@ function setActiveTaskSelectionFromCard(card, source = 'pointer') {
 }
 
 function getActiveTaskLocation() {
-  const taskId = shortcutState.activeTaskId;
+  const taskId = getPinnedShortcutTaskId() || shortcutState.activeTaskId;
   if (!taskId) return null;
   const loc = getTaskLocation(taskId);
   if (!loc) {
@@ -1439,6 +1445,122 @@ function isEditableElement(target) {
 
 function isEditorShortcutTarget(target) {
   return target instanceof Element && !!target.closest('.ql-editor');
+}
+
+function getOpenArrowNavigablePicker() {
+  return document.querySelector('[data-topbar-sdp]')
+    || document.querySelector('[data-card-sdp]')
+    || document.querySelector('[data-sdp]')
+    || document.querySelector('[data-ddp]')
+    || document.querySelector('[data-ellipsis-menu]')
+    || document.querySelector('[data-card-picker]');
+}
+
+function getArrowNavigableItems(root) {
+  if (!root) return [];
+  if (root.matches('[data-card-picker]')) {
+    return [...root.querySelectorAll('button:not([disabled])')];
+  }
+  return [...root.querySelectorAll('.sdp__menu-item:not(:disabled)')];
+}
+
+function getHighlightedPickerItem(root) {
+  if (!root) return null;
+  return root.querySelector('.picker-nav-highlighted');
+}
+
+function setPickerNavigationMode(root, mode) {
+  if (!root) return;
+  root.classList.toggle('picker-nav--keyboard', mode === 'keyboard');
+  root.classList.toggle('picker-nav--pointer', mode === 'pointer');
+}
+
+function setHighlightedPickerItem(root, item) {
+  if (!root) return;
+  root.querySelectorAll('.picker-nav-highlighted').forEach(el => el.classList.remove('picker-nav-highlighted'));
+  if (!item) return;
+  item.classList.add('picker-nav-highlighted');
+  if (typeof item.focus === 'function') {
+    item.focus({ preventScroll: true });
+  }
+}
+
+function moveOpenPickerItemFocus(direction) {
+  const root = getOpenArrowNavigablePicker();
+  if (!root) return false;
+  const items = getArrowNavigableItems(root);
+  if (!items.length) return false;
+
+  const active = getHighlightedPickerItem(root) || (document.activeElement instanceof Element ? document.activeElement.closest('button') : null);
+  const currentIndex = active ? items.indexOf(active) : -1;
+  const delta = direction === 'down' ? 1 : -1;
+  let nextIndex = currentIndex;
+
+  if (currentIndex === -1) {
+    nextIndex = direction === 'down' ? 0 : items.length - 1;
+  } else {
+    nextIndex = Math.max(0, Math.min(currentIndex + delta, items.length - 1));
+  }
+
+  const nextItem = items[nextIndex];
+  if (!nextItem) return false;
+  setPickerNavigationMode(root, 'keyboard');
+  setHighlightedPickerItem(root, nextItem);
+  if (typeof nextItem.scrollIntoView === 'function') {
+    nextItem.scrollIntoView({ block: 'nearest' });
+  }
+  return true;
+}
+
+function handleOpenPickerArrowNavigation(e) {
+  if (!e || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return false;
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false;
+
+  const root = getOpenArrowNavigablePicker();
+  if (!root) return false;
+
+  const target = e.target instanceof Element ? e.target : null;
+  if (target && target.closest('[data-backlog-filter-picker]')) {
+    return false;
+  }
+  if (isEditableElement(target)) return false;
+
+  return moveOpenPickerItemFocus(e.key === 'ArrowDown' ? 'down' : 'up') || true;
+}
+
+function handleOpenPickerEnterActivation(e) {
+  if (!e || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return false;
+  if (e.key !== 'Enter') return false;
+
+  const root = getOpenArrowNavigablePicker();
+  if (!root) return false;
+
+  const target = e.target instanceof Element ? e.target : null;
+  if (isEditableElement(target)) return false;
+
+  const item = getHighlightedPickerItem(root) || (document.activeElement instanceof Element ? document.activeElement.closest('button') : null);
+  if (!item || typeof item.click !== 'function') return false;
+  item.click();
+  return true;
+}
+
+function handleOpenPickerPointerHover(e) {
+  const root = getOpenArrowNavigablePicker();
+  if (!root) return;
+  if (!(e.target instanceof Element)) return;
+  if (!root.contains(e.target)) return;
+
+  const items = getArrowNavigableItems(root);
+  if (!items.length) return;
+
+  const hoveredItem = e.target.closest('button');
+  if (!hoveredItem || !items.includes(hoveredItem)) return;
+
+  const highlightedItem = getHighlightedPickerItem(root);
+  if (highlightedItem === hoveredItem && root.classList.contains('picker-nav--keyboard')) return;
+
+  setPickerNavigationMode(root, 'pointer');
+  setHighlightedPickerItem(root, hoveredItem);
 }
 
 function withActiveTask(handler) {
@@ -2091,6 +2213,14 @@ function shortcutLabelsForPlatform(row) {
   return IS_MAC_PLATFORM ? row.keysMac : row.keysOther;
 }
 
+function findShortcutRow(shortcutId) {
+  for (const section of SHORTCUT_SECTIONS) {
+    const row = section.rows.find(item => item.id === shortcutId);
+    if (row) return row;
+  }
+  return null;
+}
+
 function renderShortcutKeyGroups(groups = [], options = {}) {
   const keyClass = options.literal ? 'shortcuts-overlay__key shortcuts-overlay__key--literal' : 'shortcuts-overlay__key';
   return groups.map((group, index) => {
@@ -2098,6 +2228,19 @@ function renderShortcutKeyGroups(groups = [], options = {}) {
     const joiner = index < groups.length - 1 ? '<span class="shortcuts-overlay__joiner">or</span>' : '';
     return `<span class="shortcuts-overlay__sequence">${keysHtml}</span>${joiner}`;
   }).join('');
+}
+
+function renderInlineShortcutGroups(groups = []) {
+  return groups.map(group => {
+    const keysHtml = group.map(key => `<span class="sdp__shortcut">${escapeHtml(key)}</span>`).join('');
+    return `<span class="sdp__shortcut-group">${keysHtml}</span>`;
+  }).join('');
+}
+
+function renderInlineShortcutForId(shortcutId) {
+  const row = findShortcutRow(shortcutId);
+  if (!row) return '';
+  return renderInlineShortcutGroups(shortcutLabelsForPlatform(row));
 }
 
 const SHORTCUT_SECTIONS = [
@@ -2191,8 +2334,8 @@ const SHORTCUT_SECTIONS = [
     title: 'Date navigation',
     rows: [
       { id: 'jump-today', label: 'Jump to today', keysMac: [['⇧', 'Space']], keysOther: [['Shift', 'Space']], scope: 'global', enabled: true, searchTokens: ['today date'], bindings: [{ key: 'space', shiftKey: true }], handler: () => jumpToTodayForShortcut() },
-      { id: 'jump-forward-day', label: 'Jump forward a day', keysMac: [['⌘', '→']], keysOther: [['Ctrl', '→']], scope: 'global', enabled: true, searchTokens: ['next day'], bindings: [{ key: 'arrowright', shortKey: true }], handler: () => jumpRelativeDayForShortcut(1) },
-      { id: 'jump-backward-day', label: 'Jump backward a day', keysMac: [['⌘', '←']], keysOther: [['Ctrl', '←']], scope: 'global', enabled: true, searchTokens: ['previous day'], bindings: [{ key: 'arrowleft', shortKey: true }], handler: () => jumpRelativeDayForShortcut(-1) }
+      { id: 'jump-forward-day', label: 'Jump forward a day', keysMac: [['⇧', '→']], keysOther: [['Shift', '→']], scope: 'global', enabled: true, searchTokens: ['next day'], bindings: [{ key: 'arrowright', shiftKey: true }], handler: () => jumpRelativeDayForShortcut(1) },
+      { id: 'jump-backward-day', label: 'Jump backward a day', keysMac: [['⇧', '←']], keysOther: [['Shift', '←']], scope: 'global', enabled: true, searchTokens: ['previous day'], bindings: [{ key: 'arrowleft', shiftKey: true }], handler: () => jumpRelativeDayForShortcut(-1) }
     ]
   },
   {
@@ -2333,6 +2476,18 @@ function handleGlobalShortcutKeydown(e) {
   const isTextEntryTarget = target instanceof Element
     && !!target.closest('input, textarea, select, [contenteditable="true"], .ql-editor');
 
+  if (handleOpenPickerArrowNavigation(e)) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
+
+  if (handleOpenPickerEnterActivation(e)) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
+
   if (!isTextEntryTarget && (dailyPlanningState.isActive || dailyShutdownState.isActive)) {
     if (matchesShortcutBinding(e, { key: 'arrowright' })) {
       const handled = dailyPlanningState.isActive
@@ -2364,6 +2519,9 @@ function handleGlobalShortcutKeydown(e) {
       if (!row.bindings.some(binding => matchesShortcutBinding(e, binding))) continue;
       const handled = row.handler(e);
       if (handled) {
+        if (topbarTodayPickerState) {
+          closeTopbarTodayPicker();
+        }
         e.preventDefault();
         e.stopImmediatePropagation();
         return;
@@ -5314,7 +5472,7 @@ function renderBacklogHorizonOptions(selectedHorizon = null) {
       </span>
       ${selectedHorizon === horizon.id
         ? '<i data-lucide="check" class="sdp__backlog-check"></i>'
-        : `<kbd class="sdp__shortcut">${escapeHtml(horizon.shortcut)}</kbd>`}
+        : `<span class="sdp__shortcut-group"><span class="sdp__shortcut">${escapeHtml(horizon.shortcut)}</span></span>`}
     </button>
   `).join('');
 }
@@ -5362,17 +5520,17 @@ function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth, options = 
       <div class="sdp__section">
         <span class="sdp__section-label">Move:</span>
         <button class="sdp__menu-item" data-action="snooze-day" type="button">
-          <span>Snooze one day</span><kbd class="sdp__shortcut">D</kbd>
+          <span>Snooze one day</span>${renderInlineShortcutForId('snooze-day')}
         </button>
         <button class="sdp__menu-item" data-action="snooze-week" type="button">
           <span>Snooze one week</span>
         </button>
         <button class="sdp__menu-item" data-action="move-backlog" type="button">
-          <span>Move to backlog</span><kbd class="sdp__shortcut">Z</kbd>
+          <span>Move to backlog</span>${renderInlineShortcutForId('move-backlog')}
         </button>
         <button class="sdp__menu-item" data-action="move-top-backlog" type="button">
           <span>Move to top of backlog</span>
-          <span class="sdp__shortcut-group"><kbd class="sdp__shortcut">\u21E7</kbd><kbd class="sdp__shortcut">Z</kbd></span>
+          ${renderInlineShortcutForId('move-backlog-top')}
         </button>
       </div>
       <div class="sdp__divider"></div>
@@ -5427,13 +5585,13 @@ function renderTopbarTodayDropdown(selectedIsoDate, viewYear, viewMonth) {
       <div class="sdp__arrow"></div>
       <div class="sdp__section">
         <button class="sdp__menu-item" data-action="go-today" type="button">
-          <span>Go to today</span>
+          <span>Go to today</span>${renderInlineShortcutForId('jump-today')}
         </button>
         <button class="sdp__menu-item" data-action="go-next-day" type="button"${disableNext ? ' disabled' : ''}>
-          <span>Go to next day</span>
+          <span>Go to next day</span>${renderInlineShortcutForId('jump-forward-day')}
         </button>
         <button class="sdp__menu-item" data-action="go-previous-day" type="button"${disablePrev ? ' disabled' : ''}>
-          <span>Go to previous day</span>
+          <span>Go to previous day</span>${renderInlineShortcutForId('jump-backward-day')}
         </button>
       </div>
       <div class="sdp__divider"></div>
@@ -5517,12 +5675,14 @@ function renderEllipsisMenuInModal() {
               <i data-lucide="files" class="ellipsis-menu__icon"></i>
               <span>Duplicate</span>
             </span>
+            ${renderInlineShortcutForId('duplicate-task')}
           </button>
           <button class="sdp__menu-item" data-action="delete-task" type="button">
             <span class="ellipsis-menu__item-content">
               <i data-lucide="trash" class="ellipsis-menu__icon"></i>
               <span>Delete</span>
             </span>
+            ${renderInlineShortcutForId('delete-task')}
           </button>
         </div>
       </div>
@@ -5814,6 +5974,7 @@ function openCardDatePicker(taskId, anchorCard = null) {
     ? anchorCard
     : document.querySelector(`.task-card[data-task-id="${taskId}"]`);
   if (card) card.classList.add('task-card--picker-open');
+  setActiveTaskSelection(taskId, 'keyboard', loc.column?.isoDate || null);
   renderCardDatePicker();
 }
 
@@ -6272,12 +6433,15 @@ function closeBacklogFilterPicker() {
 }
 
 function renderBacklogFilterListHTML(options, selectedId) {
-  return options.map(opt => {
+  return options.map((opt, index) => {
     const isSelected = opt.id === selectedId;
     const nested = opt.context ? ' channel-picker__item--nested' : '';
     const selected = isSelected ? ' channel-picker__item--selected' : '';
+    const highlighted = backlogFilterPickerState && backlogFilterPickerState.highlightIndex === index
+      ? ' channel-picker__item--highlighted'
+      : '';
     const checkmark = isSelected ? '<span class="channel-picker__check">\u2713</span>' : '';
-    return `<div class="channel-picker__item${nested}${selected}" data-backlog-filter-id="${escapeHtml(opt.id)}">`
+    return `<div class="channel-picker__item${nested}${selected}${highlighted}" data-backlog-filter-id="${escapeHtml(opt.id)}" data-backlog-filter-idx="${index}">`
       + `<span class="channel-picker__hash" style="color:${escapeHtml(opt.hashColor)};">#</span>`
       + `<span class="channel-picker__label">${escapeHtml(opt.label)}</span>${checkmark}</div>`;
   }).join('');
@@ -6288,14 +6452,14 @@ function openBacklogFilterPicker() {
     closeBacklogFilterPicker();
     return;
   }
-  backlogFilterPickerState = { filterId: backlogPanelState.filterId };
+  backlogFilterPickerState = { filterId: backlogPanelState.filterId, highlightIndex: 0 };
   renderBacklogFilterPicker();
 }
 
 function renderBacklogFilterPicker() {
   if (!backlogFilterPickerState) return;
   closeBacklogFilterPicker();
-  backlogFilterPickerState = { filterId: backlogPanelState.filterId };
+  backlogFilterPickerState = { filterId: backlogPanelState.filterId, highlightIndex: 0 };
 
   const panel = document.querySelector('[data-right-panel="backlog"]');
   const button = panel ? panel.querySelector('[data-backlog-filter-btn]') : null;
@@ -6337,12 +6501,53 @@ function renderBacklogFilterPicker() {
   if (searchInput && list) {
     requestAnimationFrame(() => searchInput.focus());
     searchInput.addEventListener('input', () => {
+      if (!backlogFilterPickerState) return;
+      backlogFilterPickerState.highlightIndex = 0;
       list.innerHTML = renderBacklogFilterListHTML(
         getBacklogFilterOptions(searchInput.value),
         backlogPanelState.filterId
       );
     });
+    searchInput.addEventListener('keydown', e => {
+      if (!backlogFilterPickerState) return;
+      const filtered = getBacklogFilterOptions(searchInput.value);
+      const count = filtered.length;
+      if (count === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        backlogFilterPickerState.highlightIndex = Math.min(backlogFilterPickerState.highlightIndex + 1, count - 1);
+        updateBacklogFilterHighlight(dropdown);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        backlogFilterPickerState.highlightIndex = Math.max(backlogFilterPickerState.highlightIndex - 1, 0);
+        updateBacklogFilterHighlight(dropdown);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const option = filtered[backlogFilterPickerState.highlightIndex];
+        if (option) selectBacklogFilter(option.id);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closeBacklogFilterPicker();
+      }
+    });
   }
+}
+
+function updateBacklogFilterHighlight(dropdown) {
+  if (!backlogFilterPickerState) return;
+  const items = dropdown.querySelectorAll('[data-backlog-filter-id]');
+  items.forEach((item, index) => {
+    item.classList.toggle('channel-picker__item--highlighted', index === backlogFilterPickerState.highlightIndex);
+  });
+  const highlighted = dropdown.querySelector('.channel-picker__item--highlighted');
+  if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+}
+
+function selectBacklogFilter(filterId) {
+  backlogPanelState.filterId = filterId || 'all';
+  closeBacklogFilterPicker();
+  renderBacklogPanel();
 }
 
 /* ── Modal Channel Picker ───────────────────── */
@@ -12116,9 +12321,7 @@ function attachBacklogEvents() {
     const filterItem = closestFromTarget(e.target, '[data-backlog-filter-id]');
     if (filterItem) {
       e.preventDefault();
-      backlogPanelState.filterId = filterItem.getAttribute('data-backlog-filter-id') || 'all';
-      closeBacklogFilterPicker();
-      renderBacklogPanel();
+      selectBacklogFilter(filterItem.getAttribute('data-backlog-filter-id') || 'all');
       return;
     }
   });
@@ -13766,9 +13969,11 @@ function attachWorkspaceMenuEvents() {
 
 function attachShortcutEvents() {
   document.addEventListener('keydown', handleGlobalShortcutKeydown, true);
+  document.addEventListener('mouseover', handleOpenPickerPointerHover, true);
 
   document.addEventListener('mouseover', e => {
     if (shortcutState.suppressHoverUntilPointerMove) return;
+    if (cardDatePickerState) return;
     const card = e.target instanceof Element ? e.target.closest('.task-card') : null;
     if (!card || card.dataset.ghostDate) return;
     const previousCard = e.relatedTarget instanceof Element ? e.relatedTarget.closest('.task-card') : null;
@@ -13777,6 +13982,7 @@ function attachShortcutEvents() {
   });
 
   document.addEventListener('mouseout', e => {
+    if (cardDatePickerState) return;
     if (shortcutState.activeSource !== 'hover') return;
     const currentCard = e.target instanceof Element ? e.target.closest('.task-card') : null;
     if (!currentCard || currentCard.dataset.ghostDate) return;
