@@ -8,10 +8,34 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260306-04">
+  <link rel="stylesheet" href="styles.css?v=20260326-01">
 </head>
 <body>
-  <div class="app-shell">
+
+  <!-- ═══ LOGIN SCREEN ═══ -->
+  <div id="login-screen" class="login-screen" hidden>
+    <div class="login-screen__left">
+      <div class="login-card">
+        <div class="login-card__logo">
+          <span class="login-card__logo-icon">&#9679;</span>
+          <span class="login-card__logo-text">sunsama</span>
+        </div>
+        <h1 class="login-card__heading">Log in</h1>
+        <p class="login-card__subtitle">Log in to your account</p>
+        <form id="login-form" class="login-form">
+          <input type="email"    id="login-email"    class="login-form__input" placeholder="jane@company.com" required autocomplete="email">
+          <input type="password" id="login-password" class="login-form__input" placeholder="password" required autocomplete="current-password">
+          <div id="login-error" class="login-form__error" hidden></div>
+          <button type="submit" class="login-form__btn">Log in with email</button>
+        </form>
+      </div>
+    </div>
+    <div class="login-screen__right">
+      <img src="images/login-preview.png" alt="App preview" class="login-screen__preview">
+    </div>
+  </div>
+
+  <div class="app-shell" style="display: none">
 
     <!-- ═══ LEFT SIDEBAR ═══ -->
     <aside class="sidebar">
@@ -35,7 +59,7 @@
               <span>Analytics</span>
             </span>
           </button>
-          <button class="sdp__menu-item" type="button">
+          <button class="sdp__menu-item" type="button" data-shortcuts-open>
             <span class="ellipsis-menu__item-content">
               <i data-lucide="keyboard" class="ellipsis-menu__icon"></i>
               <span>Keyboard shortcuts</span>
@@ -44,7 +68,7 @@
           <div class="sdp__divider"></div>
           <div class="workspace-menu__meta">Logged in as</div>
           <div class="workspace-menu__email">thendarmyserver@gmail.com</div>
-          <button class="sdp__menu-item" type="button">
+          <button class="sdp__menu-item" type="button" data-logout>
             <span class="ellipsis-menu__item-content">
               <i data-lucide="door-closed" class="ellipsis-menu__icon"></i>
               <span>Log out</span>
@@ -62,7 +86,7 @@
             <i data-lucide="home" class="nav-icon"></i>
             <span class="nav-label">Home</span>
           </a>
-          <a href="#" class="nav-item">
+          <a href="#" class="nav-item" data-sidebar-today>
             <i data-lucide="list-checks" class="nav-icon"></i>
             <span class="nav-label">Today</span>
           </a>
@@ -113,6 +137,11 @@
             <button class="view-btn view-btn--active" data-view="today">
               <i data-lucide="calendar-days" class="view-icon"></i>
               Today
+            </button>
+          </div>
+          <div class="board__topbar-right">
+            <button class="task-modal__top-action task-modal__top-action--icon board__topbar-close" type="button" aria-label="Close today view" data-today-view-close hidden>
+              <i data-lucide="x"></i>
             </button>
           </div>
         </div>
@@ -202,14 +231,61 @@
         </div>
 
         <div class="right-sidebar__panel" data-right-panel="backlog" hidden>
-          <div class="right-sidebar__placeholder">
-            <div class="right-sidebar__placeholder-header">Backlog</div>
+          <div class="right-sidebar__placeholder-header">Backlog</div>
+          <div class="backlog-panel">
+            <div class="backlog-panel__intro">
+              <div class="backlog-panel__title">Backlog</div>
+              <button class="backlog-panel__filter" type="button" data-backlog-filter-btn>
+                <span class="backlog-panel__filter-text">#all</span>
+              </button>
+            </div>
+            <div class="backlog-panel__list" data-backlog-list></div>
           </div>
         </div>
 
         <div class="right-sidebar__panel" data-right-panel="archive" hidden>
-          <div class="right-sidebar__placeholder">
-            <div class="right-sidebar__placeholder-header">Archive</div>
+          <div class="right-sidebar__placeholder-header archive-panel__header-row">
+            <span data-archive-panel-title>Auto-archive</span>
+            <button class="settings-toggle" type="button" data-archive-toggle aria-label="Toggle auto-archive">
+              <span class="settings-toggle__knob"></span>
+            </button>
+          </div>
+          <div class="archive-panel">
+            <div class="archive-panel__body" data-archive-enabled-view hidden>
+              <div class="archive-panel__intro">
+                <div class="archive-panel__intro-row">
+                  <div class="archive-panel__title">Archive</div>
+                  <button class="archive-panel__delete-all" type="button" data-archive-delete-all>Delete all</button>
+                </div>
+                <div class="archive-panel__description">Tasks which have rolled over at least:</div>
+                <div class="settings-view__dropdown-anchor archive-panel__days-anchor">
+                  <button class="archive-panel__days-btn" type="button" data-archive-days-btn>
+                    <span data-archive-days-label>5 days</span>
+                  </button>
+                </div>
+              </div>
+              <div class="archive-panel__list" data-archive-list></div>
+            </div>
+
+            <div class="archive-panel__body archive-panel__body--disabled" data-archive-disabled-view>
+              <div class="archive-panel__intro archive-panel__intro--disabled">
+                <div class="archive-panel__title">Archive</div>
+                <div class="archive-panel__disabled-copy">Auto-archive tasks that keep rolling over to de-clutter your day.</div>
+                <button class="archive-panel__enable-btn" type="button" data-archive-enable-btn>Enable auto-archive</button>
+              </div>
+              <div class="archive-panel__guide">
+                <div class="archive-panel__guide-heading">Use to:</div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">1</span><span>Remove the distraction of low-priority work</span></div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">2</span><span>Consistently complete all your daily goals</span></div>
+              </div>
+              <div class="archive-panel__guide">
+                <div class="archive-panel__guide-heading">How it works:</div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">1</span><span>Enable auto-archive</span></div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">2</span><span>Pick an auto-archive threshold e.g. 5 days</span></div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">3</span><span>When a task rolls over past your threshold, it automatically moves into the archive</span></div>
+                <div class="archive-panel__guide-step"><span class="archive-panel__guide-badge">4</span><span>To move a task out of the archive, just pick a new day to move it to</span></div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -243,6 +319,7 @@
           </button>
           <button class="right-rail__btn" type="button" aria-label="Archive" data-right-panel-btn="archive">
             <i data-lucide="moon-star"></i>
+            <span class="right-rail__indicator" data-archive-indicator hidden></span>
           </button>
           <button class="right-rail__btn" type="button" aria-label="Search" data-right-panel-btn="search">
             <i data-lucide="search"></i>
@@ -254,6 +331,26 @@
       </aside>
     </div>
 
+  </div>
+
+  <div class="shortcuts-overlay" id="shortcuts-overlay" hidden>
+    <div class="shortcuts-overlay__panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="shortcuts-overlay__header">
+        <h2 class="shortcuts-overlay__title" id="shortcuts-title">Keyboard shortcuts</h2>
+      </div>
+      <div class="shortcuts-overlay__search-row">
+        <i data-lucide="search" class="shortcuts-overlay__search-icon"></i>
+        <input
+          class="shortcuts-overlay__search-input"
+          type="text"
+          placeholder="Search..."
+          autocomplete="off"
+          spellcheck="false"
+          data-shortcuts-search
+        >
+      </div>
+      <div class="shortcuts-overlay__content" data-shortcuts-content></div>
+    </div>
   </div>
 
   <!-- Settings View (full-screen overlay) -->
@@ -282,10 +379,22 @@
 
   <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
 
+  <!-- Firebase SDK (compat builds) -->
+  <script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-firestore-compat.js"></script>
+  <!-- App Firebase layer -->
+  <script src="firebase-config.js"></script>
+  <script src="auth.js"></script>
+  <script src="db.js"></script>
+
+  <!-- Vendor -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <script src="https://cdn.quilljs.com/1.3.7/quill.min.js"></script>
   <script>window.quill = window.Quill;</script>
   <script src="https://unpkg.com/quill-markdown-shortcuts@latest/dist/markdownShortcuts.js"></script>
-  <script src="app.js?v=20260306-04"></script>
+
+  <!-- App -->
+  <script src="app.js?v=20260326-01"></script>
 </body>
 </html>
