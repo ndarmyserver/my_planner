@@ -91,3 +91,6 @@ Recommended smoke checks:
 
 - Expect local uncommitted changes from the user, especially in `app.js`. Read before editing and avoid reverting unrelated work.
 - If you cannot fully verify a change because it requires Firebase credentials or browser interaction, say exactly what you were able to validate and what remains manual.
+- The right-sidebar search panel now has its own UI state in `searchPanelState`, but its persistent controls live in `settings.searchFilters`, `settings.searchDateRange`, and `settings.searchChannelFilterId`. If you change search behavior, keep `normalizeSearchSettings()`, `persistSettings()`, and the right-panel render path in sync.
+- The search results intentionally use a dedicated renderer instead of `renderTaskCard()`. Search cards are clickable but non-draggable, exclude trash, and combine column tasks, backlog, and archive in one list.
+- The search panel channel dropdown is intentionally grouped like the regular channel picker: contexts first, enabled child channels nested under them, uncategorized enabled channels next, and `Unassigned` last. Keep it aligned with `CHANNELS` plus `settings.channelEnabled` behavior.

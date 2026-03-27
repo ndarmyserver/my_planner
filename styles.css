@@ -2196,7 +2196,7 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
 .task-card__tag {
   display: inline-flex;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
   font-size: 11.5px;
   color: #787878;
   margin-left: auto;
@@ -2420,6 +2420,334 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
   font-size: 12px;
   font-weight: 600;
   color: #787878;
+}
+
+.search-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #faf9f6;
+}
+
+.search-panel__search-row {
+  padding: 18px 20px 0;
+}
+
+.search-panel__search-field {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid #f0f0f0;
+  background: transparent;
+}
+
+.search-panel__search-field--active {
+  border-bottom-color: #2ca7ff;
+}
+
+.search-panel__search-icon {
+  width: 18px;
+  height: 18px;
+  color: #b4b4b4;
+  flex-shrink: 0;
+}
+
+.search-panel__search-icon--active {
+  color: #2ca7ff;
+}
+
+.search-panel__search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: #413f39;
+  padding: 0 14px;
+  line-height: 20px;
+  outline: none;
+}
+
+.search-panel__search-input::placeholder {
+  color: #b4b4b4;
+  font-weight: 500;
+}
+
+.search-panel__reset-btn {
+  border: 0;
+  background: transparent;
+  color: #787878;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  padding: 0;
+  margin-left: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.search-panel__reset-btn:hover {
+  background: transparent;
+  color: #787878;
+}
+
+.search-panel__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px 0;
+  flex-wrap: wrap;
+}
+
+.search-panel__control-anchor {
+  position: static;
+}
+
+.search-panel__control {
+  border: 0;
+  background: transparent;
+  border-radius: 4px;
+  padding: 6px;
+  color: #787878;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.search-panel__control:hover {
+  background: #f0f0f0;
+  color: #413f39;
+}
+
+.search-panel__control--inactive {
+  background: transparent;
+  color: #787878;
+}
+
+.search-panel__control--active {
+  background: rgba(219, 235, 247, 0.4);
+  color: #2ca7ff;
+}
+
+.search-panel__control--active:hover {
+  background: rgba(219, 235, 247, 0.4);
+  color: #2ca7ff;
+}
+
+.search-panel__results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 12px;
+  padding: 0 0 16px;
+}
+
+.search-panel__results::-webkit-scrollbar {
+  width: 4px;
+}
+
+.search-panel__results::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.search-panel__results::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 2px;
+}
+
+.search-panel__empty {
+  margin-top: 12px;
+  padding: 14px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  font-style: italic;
+  color: #787878;
+}
+
+.search-result-card {
+  display: block;
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid #f0f0f0;
+  background: transparent;
+  border-radius: 0;
+  font-family: inherit;
+  padding: 14px 20px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.search-result-card:hover {
+  background: #ffffff;
+}
+
+.search-result-card:first-child {
+  border-top: 0;
+}
+
+.search-result-card__title {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #787878;
+  margin-bottom: 5px;
+}
+
+.search-result-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.search-result-card__meta-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.search-result-card__channel,
+.search-result-card__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.search-result-card__channel-hash,
+.search-result-card__channel-label,
+.search-result-card__status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.search-result-card__channel-hash {
+  font-weight: 700;
+  line-height: 1;
+}
+
+.search-result-card__channel-label,
+.search-result-card__status {
+  color: #787878;
+}
+
+.search-result-card__status svg {
+  width: 13px;
+  height: 13px;
+  color: #787878;
+  flex-shrink: 0;
+}
+
+.search-result-card__date {
+  font-size: 12px;
+  font-weight: 500;
+  color: #787878;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.search-result-card__date--complete {
+  color: #4dcd7d;
+}
+
+.search-panel__dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: auto;
+  min-width: 168px;
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+  padding: 0;
+  overflow: visible;
+  z-index: 7000;
+}
+
+.search-panel__dropdown--filter {
+  width: 246px;
+}
+
+.search-panel__dropdown--date {
+  width: 214px;
+}
+
+.search-panel__dropdown--channel {
+  width: max-content;
+  min-width: 0;
+  max-width: 206px;
+}
+
+.search-panel__dropdown .settings-view__dropdown-arrow {
+  right: auto;
+  left: 18px;
+}
+
+.search-panel__dropdown-header {
+  padding: 8px 14px 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #787878;
+}
+
+.search-panel__dropdown .settings-view__dropdown-items {
+  padding-bottom: 4px;
+}
+
+.search-panel__dropdown-item {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  font-size: 14px;
+}
+
+.search-panel__dropdown-item--nested {
+  padding-left: 32px;
+}
+
+.search-panel__dropdown-item--nested .search-panel__dropdown-channel {
+  margin-left: 18px;
+}
+
+.search-panel__dropdown-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-panel__dropdown-hash {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.search-panel__dropdown-item--disabled {
+  cursor: default;
+  color: #b0b0b0;
+}
+
+.search-panel__dropdown-item--disabled:hover {
+  background: transparent;
+}
+
+.search-panel__coming-soon {
+  font-size: 11px;
+  font-weight: 600;
+  color: #b0b0b0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .backlog-panel {

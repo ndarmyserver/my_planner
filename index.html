@@ -275,9 +275,42 @@
         </div>
 
         <div class="right-sidebar__panel" data-right-panel="search" hidden>
-          <div class="right-sidebar__placeholder">
-            <div class="right-sidebar__placeholder-header">Search</div>
-          </div>
+          <div class="right-sidebar__placeholder-header">Search</div>
+          <section class="search-panel">
+            <div class="search-panel__search-row">
+              <div class="search-panel__search-field">
+                <i data-lucide="search" class="search-panel__search-icon"></i>
+                <input
+                  class="search-panel__search-input"
+                  type="text"
+                  placeholder="Search..."
+                  autocomplete="off"
+                  spellcheck="false"
+                  data-search-input
+                >
+                <button class="search-panel__reset-btn" type="button" data-search-reset hidden>reset</button>
+              </div>
+            </div>
+            <div class="search-panel__controls">
+              <div class="settings-view__dropdown-anchor search-panel__control-anchor">
+                <button class="search-panel__control search-panel__control--filter" type="button" data-search-filter-btn>
+                  <span data-search-filter-label>Filter</span>
+                </button>
+              </div>
+              <div class="settings-view__dropdown-anchor search-panel__control-anchor">
+                <button class="search-panel__control" type="button" data-search-date-btn>
+                  <span data-search-date-label>Date: Anytime</span>
+                </button>
+              </div>
+              <div class="settings-view__dropdown-anchor search-panel__control-anchor">
+                <button class="search-panel__control" type="button" data-search-channel-btn>
+                  <span data-search-channel-label>Channel: all</span>
+                </button>
+              </div>
+            </div>
+            <div class="search-panel__results" data-search-results></div>
+            <div class="search-panel__empty" data-search-empty hidden>No matches</div>
+          </section>
         </div>
 
         <div class="right-sidebar__panel" data-right-panel="trash" hidden>
