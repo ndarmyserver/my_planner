@@ -10699,6 +10699,23 @@ function attachEvents() {
       return true;
     }
 
+    // Dropping within the past → keep complete, but move the completion marker
+    // to the new day so untimed/unused tasks behave like a move instead of a duplicate.
+    if (sourceCol.isoDate < todayISO && targetCol.isoDate < todayISO) {
+      targetCol.tasks.splice(insertIndex, 0, task);
+      ensureTaskRolloverState(task);
+      task.complete = true;
+      task.completedOnDate = targetCol.isoDate;
+      task.startDate = targetCol.isoDate;
+      moveCompletedTasksToBottom(targetCol);
+      cleanupTaskDropVisuals();
+      renderColumn(sourceCol);
+      renderColumn(targetCol);
+      persistTask(task, 0);
+      setTimeout(finalizeTaskDragState, 0);
+      return true;
+    }
+
     // Dropping from past to current/future → uncomplete, set new startDate
     if (sourceCol.isoDate < todayISO && targetCol.isoDate >= todayISO) {
       targetCol.tasks.splice(insertIndex, 0, task);
