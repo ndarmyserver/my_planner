@@ -216,6 +216,7 @@ function initTaskModalQuill(task) {
   taskModalQuill = initQuillEditor(container, 'Notes...', task.notes || '');
   taskModalQuill.on('text-change', () => {
     task.notes = getQuillHtml(taskModalQuill);
+    markTaskAsRepeatModified(task);
     persistTask(task, 500);
   });
 }
@@ -252,7 +253,8 @@ const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
 const DEFAULT_SEARCH_FILTERS = {
   hideCompleted: false,
   hideIncomplete: false,
-  hidePlanningTasks: true
+  hidePlanningTasks: true,
+  hideRepeatingTasks: false
 };
 const settings = {
   // General
@@ -424,6 +426,8 @@ const state = {
 
   calendarEvents: [],
 
+  repeatSeries: [],
+
   workday: {
     startOffset: DEFAULT_WORKDAY_START_HOUR,
     endOffset: DEFAULT_WORKDAY_END_HOUR
@@ -443,6 +447,12 @@ const state = {
   backlog: [],
   archive: [],
   trash: []
+};
+
+const repeatRuntimeState = {
+  tasksById: new Map(),
+  tasksByDate: new Map(),
+  pinnedOccurrenceKeys: new Set()
 };
 
 const DAILY_PLANNING_STEPS = {
@@ -512,6 +522,14 @@ const todayViewState = {
   returnRightSidebarCollapsed: false
 };
 
+const topbarTaskFilterState = {
+  homeToday: 'all',
+  dailyPlanning: 'all',
+  dailyShutdown: 'all'
+};
+
+let topbarFilterPickerState = null; // { filterId, highlightIndex }
+
 /* ═══════════════════════════════════════════════
    UTILITIES
 ═══════════════════════════════════════════════ */
@@ -559,6 +577,11 @@ function formatDateDisplay(isoStr) {
   return months[d.getMonth()] + ' ' + d.getDate();
 }
 
+function formatLongDate(isoStr) {
+  const d = parseISO(isoStr);
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
 function getDayName(isoStr) {
   const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   return days[parseISO(isoStr).getDay()];
@@ -574,6 +597,605 @@ function daysBetween(isoA, isoB) {
   const a = parseISO(isoA);
   const b = parseISO(isoB);
   return Math.round((b - a) / (1000 * 60 * 60 * 24));
+}
+
+const REPEAT_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const REPEAT_MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+const REPEAT_MONTH_NAMES_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const REPEAT_ORDINAL_OPTIONS = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th',
+  '11th', '12th', '13th', '14th', '15th', '16th', '17th', '18th', '19th', '20th',
+  '21st', '22nd', '23rd', '24th', '25th', '26th', '27th', '28th', '29th', '30th', '31st', 'Last'];
+
+function createRepeatOccurrenceTaskId(seriesId, isoDate) {
+  return `repeat-${seriesId}-${isoDate}`;
+}
+
+function isRepeatRuntimeTask(task) {
+  return !!(task && task.isRepeatingTask && task.repeatSeriesId && task.repeatOccurrenceDate);
+}
+
+function isDerivedRepeatTask(task) {
+  return !!(task && task.__derivedRepeat === true);
+}
+
+function getRepeatSeriesById(seriesId) {
+  return state.repeatSeries.find(series => series.id === seriesId) || null;
+}
+
+function getStartOfWeekIndex() {
+  return settings.startOfWeek === 'sunday' ? 0 : 1;
+}
+
+function getOrderedWeekdayIndexes() {
+  const start = getStartOfWeekIndex();
+  return Array.from({ length: 7 }, (_, index) => (start + index) % 7);
+}
+
+function getOrderedWeekdayNames() {
+  return getOrderedWeekdayIndexes().map(index => REPEAT_DAY_NAMES[index]);
+}
+
+function getMonthDifference(startISO, endISO) {
+  const start = parseISO(startISO);
+  const end = parseISO(endISO);
+  return (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+}
+
+function getDaysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function normalizeRepeatOrdinalValue(value, fallback = '1st') {
+  const normalized = String(value || '').trim();
+  return REPEAT_ORDINAL_OPTIONS.includes(normalized) ? normalized : fallback;
+}
+
+function normalizeRepeatDayTypeValue(value) {
+  if (value === 'day') return 'day';
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 6 ? parsed : 'day';
+}
+
+function repeatOrdinalToNumber(value) {
+  if (value === 'Last') return 'last';
+  const parsed = Number.parseInt(String(value || '').replace(/\D/g, ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function formatOrdinalLabel(number) {
+  const value = Math.max(1, Number(number) || 1);
+  const mod10 = value % 10;
+  const mod100 = value % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${value}st`;
+  if (mod10 === 2 && mod100 !== 12) return `${value}nd`;
+  if (mod10 === 3 && mod100 !== 13) return `${value}rd`;
+  return `${value}th`;
+}
+
+function getMonthlyDayForOrdinal(year, monthIndex, ordinal) {
+  if (ordinal === 'Last') return getDaysInMonth(year, monthIndex);
+  const numeric = Math.max(1, Number(repeatOrdinalToNumber(ordinal)) || 1);
+  return Math.min(numeric, getDaysInMonth(year, monthIndex));
+}
+
+function getWeekdayOrdinalInMonth(year, monthIndex, weekday, ordinal) {
+  const monthDays = getDaysInMonth(year, monthIndex);
+  const matches = [];
+  for (let day = 1; day <= monthDays; day++) {
+    const date = new Date(year, monthIndex, day, 12);
+    if (date.getDay() === weekday) matches.push(day);
+  }
+  if (matches.length === 0) return null;
+  if (ordinal === 'Last') return matches[matches.length - 1];
+  const numeric = Math.max(1, Math.min(4, Number(repeatOrdinalToNumber(ordinal)) || 1));
+  return matches[Math.min(matches.length - 1, numeric - 1)];
+}
+
+function normalizeRepeatRuleEntry(entry = {}, options = {}) {
+  const fallbackOrdinal = options.allowLargeOrdinal ? '1st' : 'Last';
+  const rule = {
+    ordinal: normalizeRepeatOrdinalValue(entry.ordinal, fallbackOrdinal),
+    dayType: normalizeRepeatDayTypeValue(entry.dayType),
+    month: Number.isInteger(entry.month) && entry.month >= 0 && entry.month <= 11 ? entry.month : 0
+  };
+  if (rule.dayType !== 'day') {
+    if (!['1st', '2nd', '3rd', '4th', 'Last'].includes(rule.ordinal)) {
+      rule.ordinal = 'Last';
+    }
+  }
+  return rule;
+}
+
+function getRepeatRuleFingerprint(series = {}) {
+  const cadence = ['daily', 'weekly', 'monthly', 'yearly'].includes(series.cadence) ? series.cadence : 'weekly';
+  const interval = Math.max(1, Number.parseInt(series.interval, 10) || 1);
+  const orderedWeekdays = getOrderedWeekdayIndexes();
+  const weeklyDays = Array.from(new Set((Array.isArray(series.weeklyDays) ? series.weeklyDays : [])
+    .map(day => Number.parseInt(day, 10))
+    .filter(day => Number.isInteger(day) && day >= 0 && day <= 6)))
+    .sort((a, b) => orderedWeekdays.indexOf(a) - orderedWeekdays.indexOf(b));
+  const monthlyRules = (Array.isArray(series.monthlyRules) && series.monthlyRules.length > 0
+    ? series.monthlyRules
+    : [{ ordinal: '1st', dayType: 'day' }])
+    .slice(0, 31)
+    .map(rule => {
+      const normalized = normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true });
+      return { ordinal: normalized.ordinal, dayType: normalized.dayType };
+    });
+  const yearlyRules = (Array.isArray(series.yearlyRules) && series.yearlyRules.length > 0
+    ? series.yearlyRules
+    : [{ ordinal: '1st', dayType: 'day', month: 0 }])
+    .slice(0, 31)
+    .map(rule => {
+      const normalized = normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true });
+      return { ordinal: normalized.ordinal, dayType: normalized.dayType, month: normalized.month };
+    });
+  return JSON.stringify({
+    anchorStartDate: typeof series.anchorStartDate === 'string' ? series.anchorStartDate : getTodayISO(),
+    untilDate: typeof series.untilDate === 'string' ? series.untilDate : null,
+    cadence,
+    interval,
+    weeklyDays,
+    monthlyRules,
+    yearlyRules
+  });
+}
+
+function normalizeSkippedOccurrences(entries, fallbackRuleFingerprint) {
+  if (!Array.isArray(entries)) return [];
+  const seen = new Set();
+  const normalized = [];
+  entries.forEach(entry => {
+    const isoDate = typeof entry?.isoDate === 'string'
+      ? entry.isoDate
+      : (typeof entry === 'string' ? entry : null);
+    if (!isoDate) return;
+    const ruleFingerprint = typeof entry?.ruleFingerprint === 'string' && entry.ruleFingerprint
+      ? entry.ruleFingerprint
+      : fallbackRuleFingerprint;
+    if (!ruleFingerprint) return;
+    const key = `${isoDate}:${ruleFingerprint}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push({ isoDate, ruleFingerprint });
+  });
+  return normalized.sort((a, b) => {
+    if (a.isoDate === b.isoDate) return a.ruleFingerprint.localeCompare(b.ruleFingerprint);
+    return a.isoDate.localeCompare(b.isoDate);
+  });
+}
+
+function normalizeRepeatSeries(series = {}) {
+  const cadence = ['daily', 'weekly', 'monthly', 'yearly'].includes(series.cadence) ? series.cadence : 'weekly';
+  const interval = Math.max(1, Number.parseInt(series.interval, 10) || 1);
+  const weeklyDaysSource = Array.isArray(series.weeklyDays) ? series.weeklyDays : [];
+  const orderedWeekdays = getOrderedWeekdayIndexes();
+  const uniqueWeeklyDays = Array.from(new Set(weeklyDaysSource
+    .map(day => Number.parseInt(day, 10))
+    .filter(day => Number.isInteger(day) && day >= 0 && day <= 6)));
+  uniqueWeeklyDays.sort((a, b) => orderedWeekdays.indexOf(a) - orderedWeekdays.indexOf(b));
+
+  const monthlyRulesSource = Array.isArray(series.monthlyRules) && series.monthlyRules.length > 0
+    ? series.monthlyRules
+    : [{ ordinal: '1st', dayType: 'day' }];
+  const yearlyRulesSource = Array.isArray(series.yearlyRules) && series.yearlyRules.length > 0
+    ? series.yearlyRules
+    : [{ ordinal: '1st', dayType: 'day', month: 0 }];
+  const fallbackRuleFingerprint = getRepeatRuleFingerprint({
+    anchorStartDate: typeof series.anchorStartDate === 'string' ? series.anchorStartDate : getTodayISO(),
+    untilDate: typeof series.untilDate === 'string' ? series.untilDate : null,
+    cadence,
+    interval,
+    weeklyDays: uniqueWeeklyDays.length > 0 ? uniqueWeeklyDays : [parseISO(series.anchorStartDate || getTodayISO()).getDay()],
+    monthlyRules: monthlyRulesSource,
+    yearlyRules: yearlyRulesSource
+  });
+
+  return {
+    id: series.id || uid(),
+    status: ['active', 'paused', 'stopped'].includes(series.status) ? series.status : 'active',
+    timezone: series.timezone || settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    anchorStartDate: typeof series.anchorStartDate === 'string' ? series.anchorStartDate : getTodayISO(),
+    untilDate: typeof series.untilDate === 'string' ? series.untilDate : null,
+    cadence,
+    interval,
+    weeklyDays: uniqueWeeklyDays.length > 0 ? uniqueWeeklyDays : [parseISO(series.anchorStartDate || getTodayISO()).getDay()],
+    monthlyRules: monthlyRulesSource.slice(0, 31).map(rule => normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true })),
+    yearlyRules: yearlyRulesSource.slice(0, 31).map(rule => normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true })),
+    skippedOccurrences: normalizeSkippedOccurrences(series.skippedOccurrences, fallbackRuleFingerprint),
+    templateTask: {
+      title: series.templateTask?.title || '',
+      notes: series.templateTask?.notes || '',
+      tag: series.templateTask?.tag || null,
+      integrationColor: series.templateTask?.integrationColor || null,
+      timeEstimateMinutes: Math.max(0, Number.parseInt(series.templateTask?.timeEstimateMinutes, 10) || 0),
+      subtasks: Array.isArray(series.templateTask?.subtasks)
+        ? series.templateTask.subtasks.map(subtask => ({
+          id: subtask.id || uid(),
+          label: subtask.label || '',
+          done: !!subtask.done,
+          plannedMinutes: Math.max(0, Number.parseInt(subtask.plannedMinutes, 10) || 0),
+          actualTimeSeconds: Math.max(0, Number.parseInt(subtask.actualTimeSeconds, 10) || 0)
+        }))
+        : []
+    }
+  };
+}
+
+function createRepeatTemplateFromTask(task) {
+  ensureTaskTimeState(task);
+  return {
+    title: task.title || '',
+    notes: task.notes || '',
+    tag: task.tag || null,
+    integrationColor: task.integrationColor || null,
+    timeEstimateMinutes: task.timeEstimateMinutes || 0,
+    subtasks: (task.subtasks || []).map(subtask => ({
+      id: subtask.id || uid(),
+      label: subtask.label || '',
+      done: !!subtask.done,
+      plannedMinutes: subtask.plannedMinutes || 0,
+      actualTimeSeconds: subtask.actualTimeSeconds || 0
+    }))
+  };
+}
+
+function createTaskFromRepeatSeries(series, isoDate) {
+  const template = series.templateTask || {};
+  const task = {
+    id: createRepeatOccurrenceTaskId(series.id, isoDate),
+    title: template.title || '',
+    timeEstimateMinutes: template.timeEstimateMinutes || 0,
+    actualTimeSeconds: 0,
+    ownPlannedMinutes: template.timeEstimateMinutes || 0,
+    ownActualTimeSeconds: 0,
+    scheduledTime: null,
+    complete: false,
+    completedOnDate: null,
+    tag: template.tag || null,
+    integrationColor: template.integrationColor || null,
+    subtasks: (template.subtasks || []).map(subtask => ({
+      id: subtask.id || uid(),
+      label: subtask.label || '',
+      done: !!subtask.done,
+      plannedMinutes: subtask.plannedMinutes || 0,
+      actualTimeSeconds: subtask.actualTimeSeconds || 0
+    })),
+    showSubtasks: !!(template.subtasks || []).length,
+    startDate: isoDate,
+    dueDate: null,
+    notes: template.notes || '',
+    dailyActualTime: {},
+    subtaskCompletionsByDate: {},
+    systemType: null,
+    backlogHorizon: null,
+    backlogOrder: 0,
+    archivedAt: null,
+    archiveSourceDate: null,
+    repeatSeriesId: series.id,
+    repeatOccurrenceDate: isoDate,
+    repeatModified: false,
+    isRepeatingTask: true,
+    __derivedRepeat: true
+  };
+  ensureTaskTimeState(task);
+  return task;
+}
+
+function getRepeatRuntimeTaskById(taskId) {
+  return repeatRuntimeState.tasksById.get(taskId) || null;
+}
+
+function getRepeatTasksForDate(isoDate) {
+  return repeatRuntimeState.tasksByDate.get(isoDate) || [];
+}
+
+function clearRepeatRuntimeState() {
+  repeatRuntimeState.tasksById.clear();
+  repeatRuntimeState.tasksByDate.clear();
+}
+
+function isRepeatOccurrenceSkipped(series, isoDate) {
+  if (!series || !isoDate || !Array.isArray(series.skippedOccurrences) || series.skippedOccurrences.length === 0) return false;
+  const fingerprint = getRepeatRuleFingerprint(series);
+  return series.skippedOccurrences.some(entry => entry.isoDate === isoDate && entry.ruleFingerprint === fingerprint);
+}
+
+function addSkippedOccurrenceToSeries(series, isoDate, ruleFingerprint = null) {
+  if (!series || !isoDate) return series;
+  const fingerprint = ruleFingerprint || getRepeatRuleFingerprint(series);
+  const skippedOccurrences = normalizeSkippedOccurrences([
+    ...(Array.isArray(series.skippedOccurrences) ? series.skippedOccurrences : []),
+    { isoDate, ruleFingerprint: fingerprint }
+  ], fingerprint);
+  return { ...series, skippedOccurrences };
+}
+
+function removeSkippedOccurrenceFromSeries(series, isoDate) {
+  if (!series || !isoDate || !Array.isArray(series.skippedOccurrences) || series.skippedOccurrences.length === 0) return series;
+  const skippedOccurrences = series.skippedOccurrences.filter(entry => entry.isoDate !== isoDate);
+  if (skippedOccurrences.length === series.skippedOccurrences.length) return series;
+  return { ...series, skippedOccurrences };
+}
+
+function getRepeatWeekStartIso(isoDate) {
+  const date = parseISO(isoDate);
+  const weekStart = getStartOfWeekIndex();
+  const diff = (date.getDay() - weekStart + 7) % 7;
+  date.setDate(date.getDate() - diff);
+  return toISO(date);
+}
+
+function repeatSeriesMatchesDate(series, isoDate) {
+  if (!series || series.status !== 'active') return false;
+  if (!isoDate || isoDate < series.anchorStartDate) return false;
+  if (series.untilDate && isoDate > series.untilDate) return false;
+  if (isRepeatOccurrenceSkipped(series, isoDate)) return false;
+
+  const targetDate = parseISO(isoDate);
+  if (series.cadence === 'daily') {
+    return daysBetween(series.anchorStartDate, isoDate) % series.interval === 0;
+  }
+
+  if (series.cadence === 'weekly') {
+    const weekday = targetDate.getDay();
+    if (!series.weeklyDays.includes(weekday)) return false;
+    const anchorWeek = getRepeatWeekStartIso(series.anchorStartDate);
+    const targetWeek = getRepeatWeekStartIso(isoDate);
+    const weekDiff = Math.floor(daysBetween(anchorWeek, targetWeek) / 7);
+    return weekDiff >= 0 && weekDiff % series.interval === 0;
+  }
+
+  if (series.cadence === 'monthly') {
+    const monthDiff = getMonthDifference(series.anchorStartDate, isoDate);
+    if (monthDiff < 0 || monthDiff % series.interval !== 0) return false;
+    return series.monthlyRules.some(rule => {
+      if (rule.dayType === 'day') {
+        return targetDate.getDate() === getMonthlyDayForOrdinal(targetDate.getFullYear(), targetDate.getMonth(), rule.ordinal);
+      }
+      const day = getWeekdayOrdinalInMonth(targetDate.getFullYear(), targetDate.getMonth(), rule.dayType, rule.ordinal);
+      return targetDate.getDate() === day;
+    });
+  }
+
+  if (series.cadence === 'yearly') {
+    const yearDiff = targetDate.getFullYear() - parseISO(series.anchorStartDate).getFullYear();
+    if (yearDiff < 0 || yearDiff % series.interval !== 0) return false;
+    return series.yearlyRules.some(rule => {
+      if (targetDate.getMonth() !== rule.month) return false;
+      if (rule.dayType === 'day') {
+        return targetDate.getDate() === getMonthlyDayForOrdinal(targetDate.getFullYear(), targetDate.getMonth(), rule.ordinal);
+      }
+      const day = getWeekdayOrdinalInMonth(targetDate.getFullYear(), targetDate.getMonth(), rule.dayType, rule.ordinal);
+      return targetDate.getDate() === day;
+    });
+  }
+
+  return false;
+}
+
+function getAdjacentRepeatOccurrenceDate(series, currentIsoDate, direction) {
+  if (!series || !currentIsoDate || !direction) return null;
+  const delta = direction < 0 ? -1 : 1;
+  let cursor = addDays(currentIsoDate, delta);
+  for (let i = 0; i < 3660; i++) {
+    if (repeatSeriesMatchesDate(series, cursor)) return cursor;
+    cursor = addDays(cursor, delta);
+  }
+  return null;
+}
+
+function getKnownRepeatOccurrenceDates(seriesId) {
+  const dates = new Set();
+  const addTask = (task, location = 'column') => {
+    if (!task || task.repeatSeriesId !== seriesId || !task.repeatOccurrenceDate) return;
+    if (location !== 'trash' && shouldHideUntouchedRepeatInstance(task)) return;
+    dates.add(task.repeatOccurrenceDate);
+  };
+  state.columns.forEach(column => column.tasks.forEach(task => addTask(task, 'column')));
+  state.backlog.forEach(task => addTask(task, 'backlog'));
+  state.archive.forEach(task => addTask(task, 'archive'));
+  state.trash.forEach(entry => addTask(entry?.task, 'trash'));
+  repeatRuntimeState.tasksById.forEach(addTask);
+  return Array.from(dates).sort();
+}
+
+function getRepeatNavigationDate(series, currentIsoDate, direction) {
+  if (!series || !currentIsoDate || !direction) return null;
+  const knownDates = new Set(getKnownRepeatOccurrenceDates(series.id));
+  const delta = direction < 0 ? -1 : 1;
+  let cursor = addDays(currentIsoDate, delta);
+  for (let i = 0; i < 3660; i++) {
+    if (knownDates.has(cursor)) return cursor;
+    if (series.status === 'active' && repeatSeriesMatchesDate(series, cursor)) return cursor;
+    cursor = addDays(cursor, delta);
+  }
+  return null;
+}
+
+function getRepeatTaskIdForOccurrence(seriesId, isoDate) {
+  if (!seriesId || !isoDate) return null;
+  const findTaskId = (task, location = 'column') => {
+    if (!(task && task.repeatSeriesId === seriesId && task.repeatOccurrenceDate === isoDate)) return null;
+    if (location !== 'trash' && shouldHideUntouchedRepeatInstance(task)) return null;
+    return task.id;
+  };
+  for (const column of state.columns) {
+    for (const task of column.tasks) {
+      const taskId = findTaskId(task, 'column');
+      if (taskId) return taskId;
+    }
+  }
+  for (const task of state.backlog) {
+    const taskId = findTaskId(task, 'backlog');
+    if (taskId) return taskId;
+  }
+  for (const task of state.archive) {
+    const taskId = findTaskId(task, 'archive');
+    if (taskId) return taskId;
+  }
+  for (const entry of state.trash) {
+    const taskId = findTaskId(entry?.task, 'trash');
+    if (taskId) return taskId;
+  }
+  const runtimeTask = (repeatRuntimeState.tasksByDate.get(isoDate) || []).find(task => task.repeatSeriesId === seriesId);
+  return runtimeTask ? runtimeTask.id : createRepeatOccurrenceTaskId(seriesId, isoDate);
+}
+
+function formatRepeatDayList(dayIndexes) {
+  const ordered = getOrderedWeekdayIndexes();
+  const days = [...new Set(dayIndexes || [])]
+    .filter(day => Number.isInteger(day) && day >= 0 && day <= 6)
+    .sort((a, b) => ordered.indexOf(a) - ordered.indexOf(b))
+    .map(day => REPEAT_DAY_NAMES[day]);
+  if (days.length === 0) return '';
+  if (days.length === 1) return days[0];
+  if (days.length === 2) return `${days[0]} and ${days[1]}`;
+  return `${days.slice(0, -1).join(', ')}, and ${days[days.length - 1]}`;
+}
+
+function formatRepeatRuleSummary(series) {
+  if (!series) return 'This task repeats.';
+  const untilSuffix = series.untilDate ? `, until ${formatLongDate(series.untilDate)}` : '';
+  if (series.cadence === 'daily') {
+    return series.interval === 1
+      ? `This task repeats every day${untilSuffix}.`
+      : `This task repeats every ${series.interval} days${untilSuffix}.`;
+  }
+  if (series.cadence === 'weekly') {
+    const days = formatRepeatDayList(series.weeklyDays);
+    const intervalLabel = series.interval === 1 ? 'every week' : `every ${series.interval} weeks`;
+    return `This task repeats ${intervalLabel}${days ? ` on ${days}` : ''}${untilSuffix}.`;
+  }
+  if (series.cadence === 'monthly') {
+    const rule = series.monthlyRules[0] || { ordinal: '1st', dayType: 'day' };
+    const intervalLabel = series.interval === 1 ? 'every month' : `every ${series.interval} months`;
+    const tail = rule.dayType === 'day'
+      ? `on the ${rule.ordinal} day`
+      : `on the ${rule.ordinal} ${REPEAT_DAY_NAMES[rule.dayType]}`;
+    return `This task repeats ${intervalLabel} ${tail}${untilSuffix}.`;
+  }
+  if (series.cadence === 'yearly') {
+    const rule = series.yearlyRules[0] || { ordinal: '1st', dayType: 'day', month: 0 };
+    const intervalLabel = series.interval === 1 ? 'every year' : `every ${series.interval} years`;
+    const tail = rule.dayType === 'day'
+      ? `on the ${rule.ordinal} day in ${REPEAT_MONTH_NAMES[rule.month]}`
+      : `on the ${rule.ordinal} ${REPEAT_DAY_NAMES[rule.dayType]} in ${REPEAT_MONTH_NAMES[rule.month]}`;
+    return `This task repeats ${intervalLabel} ${tail}${untilSuffix}.`;
+  }
+  return 'This task repeats.';
+}
+
+function getPersistedRepeatInstanceMap() {
+  const map = new Map();
+  const addTask = task => {
+    if (!isRepeatRuntimeTask(task)) return;
+    map.set(`${task.repeatSeriesId}:${task.repeatOccurrenceDate}`, task);
+  };
+  state.columns.forEach(column => column.tasks.forEach(addTask));
+  state.backlog.forEach(addTask);
+  state.archive.forEach(addTask);
+  state.trash.forEach(entry => {
+    if (entry && entry.task) addTask(entry.task);
+  });
+  return map;
+}
+
+function reconcileVisibleRepeatTasks() {
+  purgeExpiredTrash();
+  clearRepeatRuntimeState();
+  if (!state.dayWindow.startISO || !state.dayWindow.endISO) return;
+  const persistedMap = getPersistedRepeatInstanceMap();
+  const todayISO = getTodayISO();
+  state.repeatSeries
+    .filter(series => series.status === 'active')
+    .forEach(series => {
+      const dueDates = [];
+      let cursor = state.dayWindow.startISO;
+      while (cursor <= state.dayWindow.endISO) {
+        if (repeatSeriesMatchesDate(series, cursor)) dueDates.push(cursor);
+        cursor = addDays(cursor, 1);
+      }
+
+      const desiredDates = new Set();
+      const currentAndFutureDueDates = dueDates.filter(isoDate => isoDate >= todayISO);
+      const overdueDates = dueDates.filter(isoDate => isoDate < todayISO && !persistedMap.has(`${series.id}:${isoDate}`));
+      if (overdueDates.length > 0 && currentAndFutureDueDates.length === 0) {
+        desiredDates.add(overdueDates[overdueDates.length - 1]);
+      }
+      currentAndFutureDueDates.forEach(isoDate => desiredDates.add(isoDate));
+      repeatRuntimeState.pinnedOccurrenceKeys.forEach(key => {
+        const [seriesId, isoDate] = key.split(':');
+        if (seriesId === series.id && isoDate >= state.dayWindow.startISO && isoDate <= state.dayWindow.endISO) {
+          desiredDates.add(isoDate);
+        }
+      });
+
+      desiredDates.forEach(isoDate => {
+        const key = `${series.id}:${isoDate}`;
+        if (persistedMap.has(key)) return;
+        const task = createTaskFromRepeatSeries(series, isoDate);
+        repeatRuntimeState.tasksById.set(task.id, task);
+        const existing = repeatRuntimeState.tasksByDate.get(isoDate) || [];
+        existing.push(task);
+        repeatRuntimeState.tasksByDate.set(isoDate, existing);
+      });
+    });
+}
+
+function getColumnVisibleTasks(column) {
+  const persisted = Array.isArray(column?.tasks)
+    ? column.tasks.filter(task => !shouldHideUntouchedRepeatInstance(task))
+    : [];
+  const derived = column?.isoDate ? getRepeatTasksForDate(column.isoDate) : [];
+  return persisted.concat(derived);
+}
+
+function shouldHideUntouchedRepeatInstance(task) {
+  if (!task || !task.repeatSeriesId || !task.repeatOccurrenceDate) return false;
+  if (task.complete || task.repeatModified) return false;
+  const series = getRepeatSeriesById(task.repeatSeriesId);
+  if (!series || series.status !== 'active') return false;
+  return !repeatSeriesMatchesDate(series, task.repeatOccurrenceDate);
+}
+
+function materializeDerivedTask(task) {
+  if (!isDerivedRepeatTask(task)) return task;
+  const column = ensureColumnForDate(task.repeatOccurrenceDate || task.startDate || getTodayISO());
+  const existingIndex = column.tasks.findIndex(item => item.id === task.id);
+  if (existingIndex === -1) {
+    column.tasks.push(task);
+  } else {
+    column.tasks[existingIndex] = task;
+  }
+  task.__derivedRepeat = false;
+  repeatRuntimeState.tasksById.delete(task.id);
+  const byDate = repeatRuntimeState.tasksByDate.get(column.isoDate) || [];
+  repeatRuntimeState.tasksByDate.set(column.isoDate, byDate.filter(item => item.id !== task.id));
+  return task;
+}
+
+function persistRepeatSeries(series, debounceMs = 0) {
+  if (!_currentUserId || !series) return;
+  const normalized = normalizeRepeatSeries(series);
+  const existingIndex = state.repeatSeries.findIndex(item => item.id === normalized.id);
+  if (existingIndex === -1) state.repeatSeries.push(normalized);
+  else state.repeatSeries.splice(existingIndex, 1, normalized);
+  const save = () => DB.saveRepeatSeries(_currentUserId, normalized).catch(err =>
+    console.error('Failed to save repeat series:', err)
+  );
+  if (debounceMs > 0) setTimeout(save, debounceMs);
+  else save();
+}
+
+function persistDeleteRepeatSeries(seriesId) {
+  if (!_currentUserId || !seriesId) return;
+  state.repeatSeries = state.repeatSeries.filter(series => series.id !== seriesId);
+  DB.deleteRepeatSeries(_currentUserId, seriesId).catch(err =>
+    console.error('Failed to delete repeat series:', err)
+  );
 }
 
 function getWorkingDaysSet() {
@@ -755,20 +1377,22 @@ function formatActualMinutesForShare(seconds) {
 }
 
 function formatColumnTimeSummary(column) {
+  const filterId = getActiveTaskFilterId();
+  const visibleTasks = filterTasksByChannel(getColumnVisibleTasks(column), filterId);
   const todayISO = getTodayISO();
   const isPastCol = column.isoDate < todayISO;
-  let plannedMinutes = column.tasks.reduce((sum, task) => {
+  let plannedMinutes = visibleTasks.reduce((sum, task) => {
     ensureTaskTimeState(task);
     return sum + (isPastCol ? getPlannedMinutesForDate(task, column.isoDate) : (task.timeEstimateMinutes || 0));
   }, 0);
   // Use daily actual time for the column's date
-  const actualSeconds = column.tasks.reduce((sum, task) => {
+  const actualSeconds = visibleTasks.reduce((sum, task) => {
     return sum + getTaskDailyActualSeconds(task, column.isoDate);
   }, 0);
   // Also include ghost tasks' daily time and planned time for past columns
   let ghostActualSeconds = 0;
   if (isPastCol) {
-    const ghosts = getGhostTasksForDate(column.isoDate);
+    const ghosts = filterTasksByChannel(getGhostTasksForDate(column.isoDate), filterId);
     ghostActualSeconds = ghosts.reduce((sum, task) => sum + getTaskDailyActualSeconds(task, column.isoDate), 0);
     plannedMinutes += ghosts.reduce((sum, task) => {
       ensureTaskTimeState(task);
@@ -800,15 +1424,16 @@ function formatActualDisplay(actualSeconds) {
 }
 
 function computeProgress(column) {
+  const visibleTasks = filterTasksByChannel(getColumnVisibleTasks(column), getActiveTaskFilterId());
   const getVisibleSubtasks = task => (Array.isArray(task.subtasks) ? task.subtasks : [])
     .filter(subtaskShouldShowOnCard);
 
-  const total = column.tasks.reduce((sum, task) => {
+  const total = visibleTasks.reduce((sum, task) => {
     ensureTaskTimeState(task);
     return sum + 1 + getVisibleSubtasks(task).length;
   }, 0);
   if (total === 0) return 0;
-  const done = column.tasks.reduce((sum, task) => {
+  const done = visibleTasks.reduce((sum, task) => {
     const taskDone = task.complete ? 1 : 0;
     const doneSubtasks = getVisibleSubtasks(task)
       .reduce((subtaskSum, subtask) => subtaskSum + (subtask.done ? 1 : 0), 0);
@@ -899,6 +1524,11 @@ function findTaskById(taskId) {
     ensureTaskTimeState(archiveTask);
     return archiveTask;
   }
+  const derivedTask = getRepeatRuntimeTaskById(taskId);
+  if (derivedTask) {
+    ensureTaskTimeState(derivedTask);
+    return derivedTask;
+  }
   return null;
 }
 
@@ -909,6 +1539,15 @@ function findTaskContext(taskId) {
       ensureTaskTimeState(col.tasks[index]);
       return { column: col, task: col.tasks[index], index };
     }
+  }
+  const derivedTask = getRepeatRuntimeTaskById(taskId);
+  if (derivedTask) {
+    ensureTaskTimeState(derivedTask);
+    return {
+      column: ensureColumnForDate(derivedTask.repeatOccurrenceDate || derivedTask.startDate || getTodayISO()),
+      task: derivedTask,
+      index: -1
+    };
   }
   return null;
 }
@@ -966,7 +1605,29 @@ function getContextChildChannelIds(contextLabel) {
     .map(ch => ch.id);
 }
 
-function taskMatchesBacklogFilter(task, filterId = backlogPanelState.filterId) {
+function normalizeTaskFilterId(filterId) {
+  const nextId = typeof filterId === 'string' && filterId ? filterId : 'all';
+  if (nextId === 'all') return 'all';
+  return getSearchChannelOptions().some(option => option.id === nextId) ? nextId : 'all';
+}
+
+function getTaskFilterScopeKey() {
+  if (dailyPlanningState.isActive) return 'dailyPlanning';
+  if (dailyShutdownState.isActive) return 'dailyShutdown';
+  return 'homeToday';
+}
+
+function getTaskFilterIdForScope(scopeKey = getTaskFilterScopeKey()) {
+  const normalized = normalizeTaskFilterId(topbarTaskFilterState[scopeKey]);
+  topbarTaskFilterState[scopeKey] = normalized;
+  return normalized;
+}
+
+function getActiveTaskFilterId() {
+  return getTaskFilterIdForScope(getTaskFilterScopeKey());
+}
+
+function taskMatchesChannelFilterId(task, filterId = getActiveTaskFilterId()) {
   if (!task) return false;
   if (!filterId || filterId === 'all') return true;
   const channel = getChannelById(filterId);
@@ -983,7 +1644,22 @@ function taskMatchesBacklogFilter(task, filterId = backlogPanelState.filterId) {
   });
 }
 
-function getBacklogTasksForHorizon(horizonId, filterId = backlogPanelState.filterId) {
+function filterTasksByChannel(tasks, filterId = getActiveTaskFilterId()) {
+  return (Array.isArray(tasks) ? tasks : []).filter(task => taskMatchesChannelFilterId(task, filterId));
+}
+
+function getSharedHomeTodayFilterId() {
+  const normalized = normalizeTaskFilterId(topbarTaskFilterState.homeToday);
+  topbarTaskFilterState.homeToday = normalized;
+  backlogPanelState.filterId = normalized;
+  return normalized;
+}
+
+function taskMatchesBacklogFilter(task, filterId = getSharedHomeTodayFilterId()) {
+  return taskMatchesChannelFilterId(task, filterId);
+}
+
+function getBacklogTasksForHorizon(horizonId, filterId = getSharedHomeTodayFilterId()) {
   return sortBacklogTasks(
     state.backlog.filter(task => task.backlogHorizon === horizonId && taskMatchesBacklogFilter(task, filterId))
   );
@@ -1104,10 +1780,23 @@ function purgeExpiredTrash() {
     return true;
   });
   // Permanently delete expired entries from Firestore
+  let repeatSeriesChanged = false;
   for (const entry of expired) {
+    const task = entry?.task;
+    if (task?.repeatSeriesId && task.repeatOccurrenceDate) {
+      const series = getRepeatSeriesById(task.repeatSeriesId);
+      if (series) {
+        const nextSeries = addSkippedOccurrenceToSeries(series, task.repeatOccurrenceDate, entry.repeatSkipFingerprint || null);
+        if (JSON.stringify(nextSeries.skippedOccurrences) !== JSON.stringify(series.skippedOccurrences)) {
+          persistRepeatSeries(nextSeries);
+          repeatSeriesChanged = true;
+        }
+      }
+    }
     const entryId = entry.id || (entry.task && entry.task.id);
     if (entryId) persistRemoveFromTrash(entryId);
   }
+  return { expiredCount: expired.length, repeatSeriesChanged };
 }
 
 function getTaskLocation(taskId) {
@@ -1795,6 +2484,11 @@ function toggleTaskCompletionForShortcut(taskId) {
   }
 
   if (loc.location !== 'column') return false;
+  if (loc.index === -1 && isDerivedRepeatTask(loc.task)) {
+    materializeDerivedTask(loc.task);
+    loc = getTaskLocation(taskId);
+    if (!loc || loc.location !== 'column') return false;
+  }
 
   const { column, task, index } = loc;
   const todayISO = getTodayISO();
@@ -1825,6 +2519,8 @@ function toggleTaskCompletionForShortcut(taskId) {
       renderColumn(column);
       renderColumn(todayCol);
       persistTask(task, 0);
+      reconcileVisibleRepeatTasks();
+      renderAllColumns();
       refreshTaskDetailModalIfOpen(task.id);
       setActiveTaskSelection(task.id, 'keyboard', todayISO);
       return true;
@@ -1850,6 +2546,8 @@ function toggleTaskCompletionForShortcut(taskId) {
 
   renderColumn(column);
   persistTask(task, 0);
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
   refreshTaskDetailModalIfOpen(task.id);
   setActiveTaskSelection(task.id, 'keyboard', column.isoDate);
   return true;
@@ -2201,6 +2899,17 @@ function goHomeForShortcut() {
   return true;
 }
 
+function toggleTopbarFilterForShortcut() {
+  if (openModalTaskId) return false;
+  if (document.getElementById('focus-modal')) return false;
+  const settingsEl = document.getElementById('settings-view');
+  if (settingsEl && !settingsEl.hidden) return false;
+  const shortcutsEl = document.getElementById('shortcuts-overlay');
+  if (shortcutsEl && !shortcutsEl.hidden) return false;
+  toggleTopbarFilterPicker();
+  return true;
+}
+
 function toggleLeftSidebarForShortcut() {
   setSidebarCollapsed(!isSidebarCollapsed());
   return true;
@@ -2361,6 +3070,7 @@ const SHORTCUT_SECTIONS = [
   {
     title: 'Page navigation',
     rows: [
+      { id: 'filter-tasks', label: 'Filter tasks', keysMac: [['⇧', 'F']], keysOther: [['Shift', 'F']], scope: 'global', enabled: true, searchTokens: ['filter tasks channel'], bindings: [{ key: 'f', shiftKey: true }], handler: () => toggleTopbarFilterForShortcut() },
       { id: 'go-home', label: 'Go to home', keysMac: [['H']], keysOther: [['H']], scope: 'global', enabled: true, searchTokens: ['home'], bindings: [{ key: 'h' }], handler: () => runPageNavigationShortcut(() => goHomeForShortcut()) },
       { id: 'go-daily-planning', label: 'Go to daily planning', keysMac: [['P']], keysOther: [['P']], scope: 'global', enabled: true, searchTokens: ['planning ritual'], bindings: [{ key: 'p' }], handler: () => runPageNavigationShortcut(() => { enterDailyPlanningMode(); return true; }) },
       { id: 'go-today-view', label: 'Go to daily task list', keysMac: [['T']], keysOther: [['T']], scope: 'global', enabled: true, searchTokens: ['today daily task list'], bindings: [{ key: 't' }], handler: () => runPageNavigationShortcut(() => { openTodayView(); return true; }) },
@@ -2542,6 +3252,9 @@ function handleGlobalShortcutKeydown(e) {
         if (topbarTodayPickerState) {
           closeTopbarTodayPicker();
         }
+        if (topbarFilterPickerState && row.id !== 'filter-tasks') {
+          closeTopbarFilterPicker();
+        }
         e.preventDefault();
         e.stopImmediatePropagation();
         return;
@@ -2551,8 +3264,12 @@ function handleGlobalShortcutKeydown(e) {
 }
 
 function moveTaskToBacklog(taskId, horizonId, options = {}) {
-  const loc = getTaskLocation(taskId);
+  let loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return null;
+  if (loc.location === 'column' && loc.index === -1 && isDerivedRepeatTask(loc.task)) {
+    materializeDerivedTask(loc.task);
+    loc = getTaskLocation(taskId);
+  }
   const horizon = getBacklogHorizonConfig(horizonId);
   const insertIndex = Number.isFinite(options.insertIndex) ? options.insertIndex : 0;
   let task = loc.task;
@@ -2578,11 +3295,18 @@ function moveTaskToBacklog(taskId, horizonId, options = {}) {
   }
 
   insertTaskIntoBacklog(task, horizon.id, insertIndex);
+  if (task.repeatSeriesId) {
+    markTaskAsRepeatModified(task);
+    const series = getRepeatSeriesById(task.repeatSeriesId);
+    if (series) persistRepeatSeries({ ...series, status: 'paused' });
+  }
   if (loc.location === 'archive') persistArchiveTaskOrder();
   renderBacklogPanel();
   if (loc.location === 'archive') renderArchivePanel();
   renderCalendarEvents();
   persistTask(task, 0);
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
   return { task, horizonId: horizon.id };
 }
 
@@ -2618,6 +3342,12 @@ function restoreBacklogTask(taskId, options = {}) {
   } else {
     task.startDate = targetIso;
   }
+
+  if (task.repeatSeriesId) {
+    const series = getRepeatSeriesById(task.repeatSeriesId);
+    if (series) persistRepeatSeries({ ...series, status: 'active' });
+  }
+  reconcileVisibleRepeatTasks();
 
   return { task, column: targetCol, sourceIso, targetIso, insertIndex };
 }
@@ -2660,6 +3390,14 @@ function restoreTrashTask(taskId, options = {}) {
     }
   } else {
     task.startDate = targetIso;
+  }
+
+  if (task.repeatSeriesId && task.repeatOccurrenceDate) {
+    const series = getRepeatSeriesById(task.repeatSeriesId);
+    if (series) {
+      const nextSeries = removeSkippedOccurrenceFromSeries(series, task.repeatOccurrenceDate);
+      if (nextSeries !== series) persistRepeatSeries(nextSeries);
+    }
   }
 
   return { task, column: targetCol, sourceIso, targetIso, insertIndex };
@@ -2798,6 +3536,10 @@ function ensureTaskRolloverState(task) {
   if (!Number.isFinite(task.backlogOrder) && task.backlogOrder !== null) task.backlogOrder = null;
   if (typeof task.archivedAt !== 'string' && task.archivedAt !== null) task.archivedAt = null;
   if (typeof task.archiveSourceDate !== 'string' && task.archiveSourceDate !== null) task.archiveSourceDate = null;
+  if (typeof task.repeatSeriesId !== 'string' && task.repeatSeriesId !== null) task.repeatSeriesId = null;
+  if (typeof task.repeatOccurrenceDate !== 'string' && task.repeatOccurrenceDate !== null) task.repeatOccurrenceDate = null;
+  if (typeof task.repeatModified !== 'boolean') task.repeatModified = false;
+  if (typeof task.isRepeatingTask !== 'boolean') task.isRepeatingTask = !!task.repeatSeriesId;
 }
 
 function getRolloverCount(task, columnIsoDate) {
@@ -3317,7 +4059,11 @@ function isWorkTask(task) {
 
 function getDailyPlanningWorkloadSummary(isoDate) {
   const col = ensureColumnForDate(isoDate);
-  const tasks = (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task));
+  const filterId = dailyPlanningState.isActive ? getTaskFilterIdForScope('dailyPlanning') : 'all';
+  const tasks = filterTasksByChannel(
+    (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task)),
+    filterId
+  );
   const plannedWorkMinutes = tasks.reduce((sum, task) => {
     ensureTaskTimeState(task);
     return sum + (isWorkTask(task) ? (task.timeEstimateMinutes || 0) : 0);
@@ -3472,11 +4218,13 @@ function ensureDailyShutdownRunDraft() {
 function getDailyShutdownWorkedOnTasks(isoDate) {
   const tasks = [];
   const seen = new Set();
+  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
   for (const col of state.columns) {
     for (const task of col.tasks) {
       if (!task || seen.has(task.id)) continue;
       if (isRitualTask(task)) continue;
       if (!hasShutdownActivityOnDate(task, isoDate)) continue;
+      if (!taskMatchesChannelFilterId(task, filterId)) continue;
       seen.add(task.id);
       tasks.push(task);
     }
@@ -3486,18 +4234,25 @@ function getDailyShutdownWorkedOnTasks(isoDate) {
 
 function getDailyShutdownMissedTasks(isoDate) {
   const col = ensureColumnForDate(isoDate);
-  return (col.tasks || []).filter(task => !isRitualTask(task) && !hasShutdownActivityOnDate(task, isoDate));
+  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
+  return (col.tasks || []).filter(task =>
+    !isRitualTask(task)
+    && !hasShutdownActivityOnDate(task, isoDate)
+    && taskMatchesChannelFilterId(task, filterId)
+  );
 }
 
 function getDailyShutdownTotals(isoDate) {
   const col = ensureColumnForDate(isoDate);
   const seen = new Set();
+  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
   let plannedMinutes = 0;
   let actualSeconds = 0;
 
   function addTask(task) {
     if (!task || seen.has(task.id)) return;
     if (isRitualTask(task)) return;
+    if (!taskMatchesChannelFilterId(task, filterId)) return;
     seen.add(task.id);
     ensureTaskTimeState(task);
     plannedMinutes += getPlannedMinutesForDate(task, isoDate);
@@ -3519,11 +4274,13 @@ function getDailyShutdownTotals(isoDate) {
 function getDailyShutdownChannelBreakdown(isoDate) {
   const totals = new Map();
   const seen = new Set();
+  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
 
   for (const col of state.columns) {
     for (const task of col.tasks) {
       if (!task || seen.has(task.id)) continue;
       if (isRitualTask(task)) continue;
+      if (!taskMatchesChannelFilterId(task, filterId)) continue;
       seen.add(task.id);
       const seconds = getTaskDailyActualSeconds(task, isoDate);
       if (!seconds) continue;
@@ -3707,7 +4464,11 @@ function getDailyPlanningVisibleIsoDates() {
 
 function getDailyPlanningTaskList(isoDate) {
   const col = ensureColumnForDate(isoDate);
-  return (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task));
+  const filterId = dailyPlanningState.isActive ? getTaskFilterIdForScope('dailyPlanning') : 'all';
+  return filterTasksByChannel(
+    (col.tasks || []).filter(task => !isDailyPlanningArtifactTask(task)),
+    filterId
+  );
 }
 
 function formatSnapshotTimestamp(isoDateTime) {
@@ -3864,6 +4625,7 @@ function openTodayView(targetDate = getTodayISO(), options = {}) {
   setRightSidebarCollapsed(false);
   setSidebarActiveNav('today');
   closeTopbarTodayPicker();
+  closeTopbarFilterPicker();
   closeWorkspaceMenu();
   renderTodayViewMode();
 }
@@ -3879,6 +4641,7 @@ function exitTodayView() {
   todayViewState.returnSidebarCollapsed = false;
   todayViewState.returnRightSidebarCollapsed = false;
   closeTopbarTodayPicker();
+  closeTopbarFilterPicker();
   renderTodayViewMode();
   setSidebarCollapsed(returnSidebarCollapsed);
   setRightSidebarCollapsed(returnRightSidebarCollapsed);
@@ -4626,6 +5389,7 @@ function enterDailyPlanningMode(targetDate) {
   const { returnToTodayView, returnDate, returnToTodayDate } = getRitualReturnContext();
   if (dailyShutdownState.isActive) exitDailyShutdownMode({ preferTodayReturn: false });
   const selectedDate = targetDate || getTodayISO();
+  topbarTaskFilterState.homeToday = 'all';
   dailyPlanningState.isActive = true;
   dailyPlanningState.selectedDate = selectedDate;
   dailyPlanningState.returnToDate = returnDate;
@@ -4634,10 +5398,12 @@ function enterDailyPlanningMode(targetDate) {
   dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(selectedDate);
   dailyPlanningState.runDraft.shareText = '';
+  topbarTaskFilterState.dailyPlanning = 'all';
   applyWorkdayBoundsForDate(selectedDate);
   setSidebarCollapsed(false);
   setSidebarActiveNav('daily-planning');
   closeTopbarTodayPicker();
+  closeTopbarFilterPicker();
   renderDailyPlanningMode();
 }
 
@@ -4648,6 +5414,7 @@ function enterDailyShutdownMode(targetDate) {
   // Collapse all timer areas except tasks with an active timer
   collapseAllCardTimers();
   const selectedDate = targetDate || getTodayISO();
+  topbarTaskFilterState.homeToday = 'all';
   dailyShutdownState.isActive = true;
   dailyShutdownState.selectedDate = selectedDate;
   dailyShutdownState.returnToDate = returnDate;
@@ -4655,15 +5422,18 @@ function enterDailyShutdownMode(targetDate) {
   dailyShutdownState.returnToTodayDate = returnToTodayView ? (returnToTodayDate || selectedDate) : null;
   dailyShutdownState.step = DAILY_SHUTDOWN_STEPS.REVIEW;
   dailyShutdownState.runDraft = createDailyShutdownRunDraft(selectedDate);
+  topbarTaskFilterState.dailyShutdown = 'all';
   setSidebarCollapsed(false);
   setSidebarActiveNav('daily-shutdown');
   closeTopbarTodayPicker();
+  closeTopbarFilterPicker();
   renderDailyShutdownMode();
 }
 
 function exitDailyPlanningMode(options = {}) {
   const { restoreTodayFirstColumn = false, preferTodayReturn = true } = options;
   clearActiveTaskSelection();
+  closeTopbarFilterPicker();
   // Collapse all timer areas except tasks with an active timer
   collapseAllCardTimers();
   const returnDate = dailyPlanningState.returnToDate || getTodayISO();
@@ -4689,6 +5459,7 @@ function exitDailyPlanningMode(options = {}) {
 function exitDailyShutdownMode(options = {}) {
   const { restoreTodayFirstColumn = false, preferTodayReturn = true } = options;
   clearActiveTaskSelection();
+  closeTopbarFilterPicker();
   // Collapse all timer areas except tasks with an active timer
   collapseAllCardTimers();
   const returnDate = dailyShutdownState.returnToDate || getTodayISO();
@@ -5319,6 +6090,410 @@ function renderTaskTimeboxEntries(task) {
     </div>`;
 }
 
+function createRepeatDraftFromTask(task, column) {
+  const anchorDate = task.repeatOccurrenceDate || task.startDate || column?.isoDate || getTodayISO();
+  const anchorDateObj = parseISO(anchorDate);
+  const existingSeries = task.repeatSeriesId ? getRepeatSeriesById(task.repeatSeriesId) : null;
+  if (existingSeries) {
+    return {
+      cadence: existingSeries.cadence,
+      interval: existingSeries.interval,
+      weeklyDays: [...existingSeries.weeklyDays],
+      monthlyRules: existingSeries.monthlyRules.map(rule => ({ ...rule })),
+      yearlyRules: existingSeries.yearlyRules.map(rule => ({ ...rule })),
+      showCadenceOptions: false
+    };
+  }
+  return {
+    cadence: 'weekly',
+    interval: 1,
+    weeklyDays: [anchorDateObj.getDay()],
+    monthlyRules: [{ ordinal: formatOrdinalLabel(anchorDateObj.getDate()), dayType: 'day' }],
+    yearlyRules: [{ ordinal: formatOrdinalLabel(anchorDateObj.getDate()), dayType: 'day', month: anchorDateObj.getMonth() }],
+    showCadenceOptions: false
+  };
+}
+
+function normalizeRepeatDraft(draft) {
+  const cadence = ['daily', 'weekly', 'monthly', 'yearly'].includes(draft?.cadence) ? draft.cadence : 'weekly';
+  const interval = Math.max(1, Number.parseInt(draft?.interval, 10) || 1);
+  const weeklyDays = Array.from(new Set((draft?.weeklyDays || [])
+    .map(day => Number.parseInt(day, 10))
+    .filter(day => Number.isInteger(day) && day >= 0 && day <= 6)));
+  const monthlyRules = (draft?.monthlyRules || [{ ordinal: '1st', dayType: 'day' }])
+    .slice(0, 31)
+    .map(rule => normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true }));
+  const yearlyRules = (draft?.yearlyRules || [{ ordinal: '1st', dayType: 'day', month: 0 }])
+    .slice(0, 31)
+    .map(rule => normalizeRepeatRuleEntry(rule, { allowLargeOrdinal: true }));
+  return {
+    cadence,
+    interval,
+    weeklyDays: weeklyDays.length > 0 ? weeklyDays : [getStartOfWeekIndex()],
+    monthlyRules,
+    yearlyRules,
+    showCadenceOptions: !!draft?.showCadenceOptions
+  };
+}
+
+function isRepeatDraftUnchanged(task, normalizedDraft) {
+  if (!task?.repeatSeriesId) return false;
+  const existingSeries = getRepeatSeriesById(task.repeatSeriesId);
+  if (!existingSeries) return false;
+  return (
+    existingSeries.cadence === normalizedDraft.cadence
+    && existingSeries.interval === normalizedDraft.interval
+    && JSON.stringify(existingSeries.weeklyDays || []) === JSON.stringify(normalizedDraft.weeklyDays || [])
+    && JSON.stringify(existingSeries.monthlyRules || []) === JSON.stringify(normalizedDraft.monthlyRules || [])
+    && JSON.stringify(existingSeries.yearlyRules || []) === JSON.stringify(normalizedDraft.yearlyRules || [])
+  );
+}
+
+function renderRepeatCadenceOption(option, selectedCadence) {
+  return `<button class="repeat-menu__cadence-option${selectedCadence === option.value ? ' repeat-menu__cadence-option--selected' : ''}" type="button" data-repeat-set-cadence="${option.value}">`
+    + `<span class="repeat-menu__cadence-icon-wrap${selectedCadence === option.value ? ' repeat-menu__cadence-icon-wrap--selected' : ''}" aria-hidden="true">`
+    + `<span class="repeat-menu__cadence-icon"></span>`
+    + `</span>`
+    + `<span>${escapeHtml(option.label)}</span>`
+    + `</button>`;
+}
+
+function isRepeatDropdownOpen(type, rowIndex) {
+  return !!(ellipsisMenuState
+    && ellipsisMenuState.mode === 'repeat'
+    && ellipsisMenuState.repeatOpenDropdown
+    && ellipsisMenuState.repeatOpenDropdown.type === type
+    && ellipsisMenuState.repeatOpenDropdown.rowIndex === rowIndex);
+}
+
+function renderRepeatSelect(type, rowIndex, selectedValue, options, label, modifierClass = '') {
+  const selectedOption = options.find(option => String(option.value) === String(selectedValue)) || options[0];
+  const isOpen = isRepeatDropdownOpen(type, rowIndex);
+  const triggerClass = modifierClass ? ` repeat-menu__select-trigger--${modifierClass}` : '';
+  const itemsHtml = options.map(option => {
+    const isSelected = String(option.value) === String(selectedValue);
+    const disabled = !!option.disabled;
+    return `<button class="settings-view__dropdown-item repeat-menu__dropdown-item${disabled ? ' repeat-menu__dropdown-item--disabled' : ''}" type="button" data-repeat-select-option="${escapeHtml(type)}" data-repeat-select-row="${rowIndex}" data-value="${escapeHtml(String(option.value))}"${disabled ? ' disabled' : ''}>`
+      + `<span>${escapeHtml(option.label)}</span>`
+      + `<span class="settings-view__dropdown-check">${isSelected ? '✓' : ''}</span>`
+      + `</button>`;
+  }).join('');
+  return `<div class="settings-view__dropdown-anchor repeat-menu__select-anchor">`
+    + `<button class="settings-view__select repeat-menu__select-trigger${triggerClass}" type="button" aria-label="${escapeHtml(label)}" data-repeat-select-toggle="${escapeHtml(type)}" data-repeat-select-row="${rowIndex}">`
+    + `<span>${escapeHtml(selectedOption?.label || '')}</span>`
+    + `<i data-lucide="chevron-down" class="settings-view__select-icon"></i>`
+    + `</button>`
+    + `${isOpen ? `<div class="settings-view__dropdown repeat-menu__dropdown" data-repeat-select-dropdown><div class="settings-view__dropdown-arrow"></div><div class="settings-view__dropdown-items">${itemsHtml}</div></div>` : ''}`
+    + `</div>`;
+}
+
+function getRepeatDayOptions(selectedDay, usedDays) {
+  return getOrderedWeekdayIndexes().map(day => ({
+    value: day,
+    label: REPEAT_DAY_NAMES[day],
+    disabled: usedDays.includes(day) && day !== selectedDay
+  }));
+}
+
+function getRepeatOrdinalOptions(selectedOrdinal, allowLargeOrdinal) {
+  return REPEAT_ORDINAL_OPTIONS
+    .filter(option => allowLargeOrdinal || ['1st', '2nd', '3rd', '4th', 'Last'].includes(option))
+    .map(option => ({ value: option, label: option }));
+}
+
+function getRepeatDayTypeOptions() {
+  return [
+    { value: 'day', label: 'day' }
+  ].concat(getOrderedWeekdayIndexes().map(day => ({
+    value: day,
+    label: REPEAT_DAY_NAMES[day]
+  })));
+}
+
+function getRepeatMonthOptions() {
+  return REPEAT_MONTH_NAMES.map((month, index) => ({
+    value: index,
+    label: month
+  }));
+}
+
+function isMonthlyRuleDuplicate(rules, rowIndex, ordinal, dayType) {
+  return rules.some((rule, index) => (
+    index !== rowIndex
+    && rule.ordinal === ordinal
+    && String(rule.dayType) === String(dayType)
+  ));
+}
+
+function isYearlyRuleDuplicate(rules, rowIndex, ordinal, dayType, month) {
+  return rules.some((rule, index) => (
+    index !== rowIndex
+    && rule.ordinal === ordinal
+    && String(rule.dayType) === String(dayType)
+    && Number(rule.month) === Number(month)
+  ));
+}
+
+function getNextAvailableMonthlyRule(rules) {
+  for (const ordinal of REPEAT_ORDINAL_OPTIONS) {
+    if (!isMonthlyRuleDuplicate(rules, -1, ordinal, 'day')) {
+      return { ordinal, dayType: 'day' };
+    }
+  }
+  const weekdayOrdinals = ['1st', '2nd', '3rd', '4th', 'Last'];
+  for (const day of getOrderedWeekdayIndexes()) {
+    for (const ordinal of weekdayOrdinals) {
+      if (!isMonthlyRuleDuplicate(rules, -1, ordinal, day)) {
+        return { ordinal, dayType: day };
+      }
+    }
+  }
+  return { ordinal: '1st', dayType: 'day' };
+}
+
+function getNextAvailableYearlyRule(rules) {
+  for (const month of REPEAT_MONTH_NAMES.map((_, index) => index)) {
+    for (const ordinal of REPEAT_ORDINAL_OPTIONS) {
+      if (!isYearlyRuleDuplicate(rules, -1, ordinal, 'day', month)) {
+        return { ordinal, dayType: 'day', month };
+      }
+    }
+    for (const day of getOrderedWeekdayIndexes()) {
+      for (const ordinal of ['1st', '2nd', '3rd', '4th', 'Last']) {
+        if (!isYearlyRuleDuplicate(rules, -1, ordinal, day, month)) {
+          return { ordinal, dayType: day, month };
+        }
+      }
+    }
+  }
+  return { ordinal: '1st', dayType: 'day', month: 0 };
+}
+
+function renderRepeatDaySelect(selectedDay, usedDays, rowIndex) {
+  return renderRepeatSelect('weekly-day', rowIndex, selectedDay, getRepeatDayOptions(selectedDay, usedDays), 'Repeat weekday', 'weekday');
+}
+
+function renderRepeatOrdinalSelect(selectedOrdinal, allowLargeOrdinal, rowIndex, attr, rules) {
+  const type = attr === 'data-repeat-monthly-ordinal' ? 'monthly-ordinal' : 'yearly-ordinal';
+  let options = getRepeatOrdinalOptions(selectedOrdinal, allowLargeOrdinal);
+  if (type === 'monthly-ordinal') {
+    const dayType = rules[rowIndex]?.dayType ?? 'day';
+    options = options.map(option => ({
+      ...option,
+      disabled: isMonthlyRuleDuplicate(rules, rowIndex, option.value, dayType)
+    }));
+  } else {
+    const dayType = rules[rowIndex]?.dayType ?? 'day';
+    const month = rules[rowIndex]?.month ?? 0;
+    options = options.map(option => ({
+      ...option,
+      disabled: isYearlyRuleDuplicate(rules, rowIndex, option.value, dayType, month)
+    }));
+  }
+  return renderRepeatSelect(type, rowIndex, selectedOrdinal, options, 'Repeat ordinal', 'ordinal');
+}
+
+function renderRepeatDayTypeSelect(selectedValue, rowIndex, attr, rules) {
+  const type = attr === 'data-repeat-monthly-day-type' ? 'monthly-day-type' : 'yearly-day-type';
+  let options = getRepeatDayTypeOptions();
+  if (type === 'monthly-day-type') {
+    const ordinal = rules[rowIndex]?.ordinal ?? '1st';
+    options = options.map(option => ({
+      ...option,
+      disabled: isMonthlyRuleDuplicate(rules, rowIndex, ordinal, option.value)
+    }));
+  } else {
+    const ordinal = rules[rowIndex]?.ordinal ?? '1st';
+    const month = rules[rowIndex]?.month ?? 0;
+    options = options.map(option => ({
+      ...option,
+      disabled: isYearlyRuleDuplicate(rules, rowIndex, ordinal, option.value, month)
+    }));
+  }
+  return renderRepeatSelect(type, rowIndex, selectedValue, options, 'Repeat day type', 'day-type');
+}
+
+function renderRepeatMonthSelect(selectedMonth, rowIndex, rules) {
+  const ordinal = rules[rowIndex]?.ordinal ?? '1st';
+  const dayType = rules[rowIndex]?.dayType ?? 'day';
+  const options = getRepeatMonthOptions().map(option => ({
+    ...option,
+    disabled: isYearlyRuleDuplicate(rules, rowIndex, ordinal, dayType, option.value)
+  }));
+  return renderRepeatSelect('yearly-month', rowIndex, selectedMonth, options, 'Repeat month', 'month');
+}
+
+function renderRepeatEditorHtml(task, column, draft) {
+  const normalized = normalizeRepeatDraft(draft);
+  const isUnchangedSeriesDraft = isRepeatDraftUnchanged(task, normalized);
+  const cadenceOptions = [
+    { value: 'daily', label: 'Daily' },
+    { value: 'weekly', label: 'Weekly' },
+    { value: 'monthly', label: 'Monthly' },
+    { value: 'yearly', label: 'Yearly' }
+  ];
+  const cadenceLabel = cadenceOptions.find(option => option.value === normalized.cadence)?.label || 'Weekly';
+
+  let configHtml = '';
+  if (normalized.cadence === 'daily') {
+    configHtml = `<div class="repeat-menu__rule-row">Every <input class="repeat-menu__interval-input" type="text" inputmode="numeric" value="${normalized.interval}" data-repeat-interval> days</div>`;
+  } else if (normalized.cadence === 'weekly') {
+    configHtml = `<div class="repeat-menu__weekly-grid">` + normalized.weeklyDays.map((day, index, allDays) => {
+      const canAdd = allDays.length < 7;
+      const canRemove = allDays.length > 1;
+      return `<div class="repeat-menu__rule-row repeat-menu__rule-row--weekly">`
+        + `<div class="repeat-menu__weekly-prefix${index === 0 ? '' : ' repeat-menu__weekly-prefix--secondary'}">`
+        + `${index === 0
+          ? `Every <input class="repeat-menu__interval-input" type="text" inputmode="numeric" value="${normalized.interval}" data-repeat-interval> weeks on`
+          : '<span class="repeat-menu__rule-prefix">and on</span>'}`
+        + `</div>`
+        + `${renderRepeatDaySelect(day, allDays, index)}`
+        + `<div class="repeat-menu__row-actions">`
+        + `${canAdd ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-weekly-add="${index}">+</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `${canRemove ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-weekly-remove="${index}">−</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `</div>`
+        + `</div>`;
+    }).join('') + `</div>`;
+  } else if (normalized.cadence === 'monthly') {
+    configHtml = `<div class="repeat-menu__series-grid repeat-menu__series-grid--monthly">` + normalized.monthlyRules.map((rule, index, allRules) => {
+      const allowLargeOrdinal = rule.dayType === 'day';
+      const canAdd = allRules.length < 31;
+      const canRemove = allRules.length > 1;
+      return `<div class="repeat-menu__rule-row repeat-menu__rule-row--series">`
+        + `<div class="repeat-menu__series-prefix${index === 0 ? '' : ' repeat-menu__series-prefix--secondary'}">`
+        + `${index === 0
+          ? `Every <input class="repeat-menu__interval-input" type="text" inputmode="numeric" value="${normalized.interval}" data-repeat-interval> months on the`
+          : '<span class="repeat-menu__rule-prefix">and on the</span>'}`
+        + `</div>`
+        + `${renderRepeatOrdinalSelect(rule.ordinal, allowLargeOrdinal, index, 'data-repeat-monthly-ordinal', normalized.monthlyRules)}`
+        + `${renderRepeatDayTypeSelect(rule.dayType, index, 'data-repeat-monthly-day-type', normalized.monthlyRules)}`
+        + `<div class="repeat-menu__row-actions">`
+        + `${canAdd ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-monthly-add="${index}">+</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `${canRemove ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-monthly-remove="${index}">−</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `</div>`
+        + `</div>`;
+    }).join('') + `</div>`;
+  } else if (normalized.cadence === 'yearly') {
+    configHtml = `<div class="repeat-menu__series-grid repeat-menu__series-grid--yearly">` + normalized.yearlyRules.map((rule, index, allRules) => {
+      const allowLargeOrdinal = rule.dayType === 'day';
+      const canAdd = allRules.length < 31;
+      const canRemove = allRules.length > 1;
+      return `<div class="repeat-menu__rule-row repeat-menu__rule-row--series">`
+        + `<div class="repeat-menu__series-prefix${index === 0 ? '' : ' repeat-menu__series-prefix--secondary'}">`
+        + `${index === 0
+          ? `Every <input class="repeat-menu__interval-input" type="text" inputmode="numeric" value="${normalized.interval}" data-repeat-interval> years on the`
+          : '<span class="repeat-menu__rule-prefix">and on the</span>'}`
+        + `</div>`
+        + `${renderRepeatOrdinalSelect(rule.ordinal, allowLargeOrdinal, index, 'data-repeat-yearly-ordinal', normalized.yearlyRules)}`
+        + `${renderRepeatDayTypeSelect(rule.dayType, index, 'data-repeat-yearly-day-type', normalized.yearlyRules)}`
+        + `<div class="repeat-menu__month-group"><span class="repeat-menu__inline-text">in</span>${renderRepeatMonthSelect(rule.month, index, normalized.yearlyRules)}</div>`
+        + `<div class="repeat-menu__row-actions">`
+        + `${canAdd ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-yearly-add="${index}">+</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `${canRemove ? `<button class="repeat-menu__icon-btn" type="button" data-repeat-yearly-remove="${index}">−</button>` : '<span class="repeat-menu__icon-btn-placeholder" aria-hidden="true"></span>'}`
+        + `</div>`
+        + `</div>`;
+    }).join('') + `</div>`;
+  }
+
+  const footerActionLabel = isUnchangedSeriesDraft ? 'Back' : 'Save';
+  const footerActionVariant = isUnchangedSeriesDraft ? ' repeat-menu__save--secondary' : '';
+  const footerAction = isUnchangedSeriesDraft ? 'back' : 'save';
+
+  return `
+    <div class="ellipsis-menu repeat-menu repeat-menu--${escapeHtml(normalized.cadence)}" data-ellipsis-menu>
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Repeats:</span>
+        <div class="repeat-menu__cadence-body">
+          ${normalized.showCadenceOptions
+            ? `<div class="repeat-menu__cadence-list">${cadenceOptions.map(option => renderRepeatCadenceOption(option, normalized.cadence)).join('')}</div>`
+            : `<button class="repeat-menu__cadence-trigger" type="button" data-repeat-toggle-cadence>
+              <span>${escapeHtml(cadenceLabel)}</span>
+              <i data-lucide="chevron-down" class="repeat-menu__cadence-chevron"></i>
+            </button>`}
+        </div>
+      </div>
+      <div class="sdp__divider"></div>
+      <div class="sdp__section repeat-menu__rules">
+        ${configHtml}
+      </div>
+      <div class="sdp__divider"></div>
+      <div class="sdp__section repeat-menu__footer-section">
+        <div class="repeat-menu__footer">
+          <button class="repeat-menu__save${footerActionVariant}" type="button" data-repeat-save="${footerAction}">${footerActionLabel}</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderRepeatSeriesActionsHtml(task) {
+  const series = task.repeatSeriesId ? getRepeatSeriesById(task.repeatSeriesId) : null;
+  const currentDate = task.repeatOccurrenceDate || task.startDate || series?.anchorStartDate || null;
+  const nextDate = series && currentDate ? getRepeatNavigationDate(series, currentDate, 1) : null;
+  const isLastSeriesInstance = !!(series && series.untilDate && !nextDate);
+  const canExtendSeries = isLastSeriesInstance;
+  const canStopSeries = !!(series && !isLastSeriesInstance);
+  return `
+    <div class="ellipsis-menu repeat-series-menu" data-ellipsis-menu>
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">Task recurrence:</span>
+        ${canStopSeries ? `<button class="sdp__menu-item" type="button" data-repeat-series-action="stop">
+          <span class="ellipsis-menu__item-content"><i data-lucide="hand" class="ellipsis-menu__icon"></i><span>Stop repeating</span></span>
+        </button>` : ''}
+        <button class="sdp__menu-item" type="button" data-repeat-series-action="change">
+          <span class="ellipsis-menu__item-content"><i data-lucide="repeat" class="ellipsis-menu__icon"></i><span>Change repeat frequency</span></span>
+        </button>
+        <button class="sdp__menu-item" type="button" data-repeat-series-action="update-incomplete">
+          <span class="ellipsis-menu__item-content"><i data-lucide="files" class="ellipsis-menu__icon"></i><span>Update all incomplete instances to match this task</span></span>
+        </button>
+        <button class="sdp__menu-item" type="button" data-repeat-series-action="delete-incomplete-stop">
+          <span class="ellipsis-menu__item-content"><i data-lucide="trash" class="ellipsis-menu__icon"></i><span>Delete all incomplete instances and stop repeating</span></span>
+        </button>
+        ${canExtendSeries ? `<button class="sdp__menu-item" type="button" data-repeat-series-action="extend">
+          <span class="ellipsis-menu__item-content"><i data-lucide="arrow-right" class="ellipsis-menu__icon"></i><span>Extend series</span></span>
+        </button>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderRepeatBannerHtml(task) {
+  if (!task.isRepeatingTask || !task.repeatSeriesId) return '';
+  const series = getRepeatSeriesById(task.repeatSeriesId);
+  if (!series) return '';
+  const isTrash = !!findTrashEntry(task.id);
+  const currentDate = task.repeatOccurrenceDate || task.startDate || series.anchorStartDate;
+  const prevDate = getRepeatNavigationDate(series, currentDate, -1);
+  const nextDate = getRepeatNavigationDate(series, currentDate, 1);
+  const boundaryText = !prevDate && !nextDate
+    ? ' This is the first and last instance of this series.'
+    : !prevDate
+      ? ' This is the first instance of this series.'
+      : !nextDate
+      ? ' This is the last instance of this series.'
+      : '';
+  return `<div class="task-modal__trash-banner task-modal__series-banner">`
+    + `<div class="task-modal__series-copy${isTrash ? ' task-modal__series-copy--trash' : ''}">`
+    + `${isTrash
+      ? `<div class="task-modal__series-copy-row task-modal__series-copy-row--trash">
+          <span>${escapeHtml(`This task has been deleted (and will be permanently deleted in ${getTrashDaysRemaining(findTrashEntry(task.id))} days).`)}</span>
+          <button class="task-modal__trash-link" type="button" data-restore-task>Restore Task</button>
+        </div>`
+      : ''}`
+    + `<div class="task-modal__series-copy-row task-modal__series-copy-row--repeat">
+        <span>${escapeHtml(formatRepeatRuleSummary(series) + boundaryText)} </span>
+        <button class="task-modal__trash-link" type="button" data-repeat-series-edit>Edit task series</button>
+      </div>`
+    + `</div>`
+    + `<div class="task-modal__series-nav">`
+    + `<button class="task-modal__series-nav-btn${!prevDate ? ' task-modal__series-nav-btn--disabled' : ''}" type="button" data-repeat-nav="prev"${!prevDate ? ' disabled' : ''}><i data-lucide="chevron-left"></i><span>Previous</span></button>`
+    + `<button class="task-modal__series-nav-btn${!nextDate ? ' task-modal__series-nav-btn--disabled' : ''}" type="button" data-repeat-nav="next"${!nextDate ? ' disabled' : ''}><span>Next</span><i data-lucide="chevron-right"></i></button>`
+    + `</div>`
+    + `</div>`;
+}
+
 function renderTaskDetailModal(task, column, options = {}) {
   ensureTaskTimeState(task);
   const isTrash = options.isTrash === true;
@@ -5355,14 +6530,15 @@ function renderTaskDetailModal(task, column, options = {}) {
     .map(entry => `<li class="task-modal__timeline-item">${escapeHtml(entry)}</li>`)
     .join('');
 
-  const trashBanner = isTrash
+  const trashBanner = isTrash && !task.isRepeatingTask
     ? `
       <div class="task-modal__trash-banner">
-        <span>This task has been deleted (and will be permantly deleted in ${getTrashDaysRemaining(findTrashEntry(task.id))} days).</span>
+        <span>This task has been deleted (and will be permanently deleted in ${getTrashDaysRemaining(findTrashEntry(task.id))} days).</span>
         <button class="task-modal__trash-link" type="button" data-restore-task>Restore Task</button>
       </div>
     `
     : '';
+  const repeatBanner = task.isRepeatingTask ? renderRepeatBannerHtml(task) : '';
 
   return `
     <div class="task-modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
@@ -5394,6 +6570,7 @@ function renderTaskDetailModal(task, column, options = {}) {
       </div>
 
       ${trashBanner}
+      ${repeatBanner}
       <div class="task-modal__body">
         <div class="task-modal__hero">
           <div class="task-modal__title-wrap">
@@ -5663,10 +6840,35 @@ function renderDueDateDropdown(currentDueDate, viewYear, viewMonth) {
 
 let startDatePickerState = null;
 let topbarTodayPickerState = null; // { selectedIsoDate, viewYear, viewMonth }
-let ellipsisMenuState = null; // { taskId }
+let ellipsisMenuState = null; // { taskId, mode, repeatDraft, repeatOpenDropdown }
 
-function openEllipsisMenu(taskId) {
-  ellipsisMenuState = { taskId };
+function markTaskAsRepeatModified(task) {
+  if (!task || !task.repeatSeriesId) return;
+  task.repeatModified = true;
+  task.isRepeatingTask = true;
+}
+
+function openEllipsisMenu(taskId, mode = 'main') {
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
+  ellipsisMenuState = {
+    taskId,
+    mode,
+    repeatDraft: createRepeatDraftFromTask(loc.task, loc.column),
+    repeatOpenDropdown: null
+  };
+  renderEllipsisMenuInModal();
+}
+
+function openRepeatSeriesActionsMenu(taskId) {
+  const loc = getTaskLocation(taskId);
+  if (!loc) return;
+  ellipsisMenuState = {
+    taskId,
+    mode: 'series-actions',
+    repeatDraft: createRepeatDraftFromTask(loc.task, loc.column),
+    repeatOpenDropdown: null
+  };
   renderEllipsisMenuInModal();
 }
 
@@ -5676,6 +6878,198 @@ function closeEllipsisMenu() {
   if (existing) existing.remove();
 }
 
+function updateCurrentTaskRepeatFlags(task, seriesId, occurrenceDate) {
+  task.repeatSeriesId = seriesId || null;
+  task.repeatOccurrenceDate = occurrenceDate || null;
+  task.repeatModified = false;
+  task.isRepeatingTask = !!seriesId;
+}
+
+function applyRepeatDropdownSelection(type, rowIndex, rawValue) {
+  if (!ellipsisMenuState) return;
+  if (type === 'weekly-day') {
+    ellipsisMenuState.repeatDraft.weeklyDays[rowIndex] = Number.parseInt(rawValue, 10);
+  } else if (type === 'monthly-ordinal') {
+    ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].ordinal = rawValue;
+    if (ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].dayType !== 'day'
+      && !['1st', '2nd', '3rd', '4th', 'Last'].includes(rawValue)) {
+      ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].dayType = 'day';
+    }
+  } else if (type === 'monthly-day-type') {
+    const value = normalizeRepeatDayTypeValue(rawValue);
+    ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].dayType = value;
+    if (value !== 'day' && !['1st', '2nd', '3rd', '4th', 'Last'].includes(ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].ordinal)) {
+      ellipsisMenuState.repeatDraft.monthlyRules[rowIndex].ordinal = 'Last';
+    }
+  } else if (type === 'yearly-ordinal') {
+    ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].ordinal = rawValue;
+    if (ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].dayType !== 'day'
+      && !['1st', '2nd', '3rd', '4th', 'Last'].includes(rawValue)) {
+      ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].dayType = 'day';
+    }
+  } else if (type === 'yearly-day-type') {
+    const value = normalizeRepeatDayTypeValue(rawValue);
+    ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].dayType = value;
+    if (value !== 'day' && !['1st', '2nd', '3rd', '4th', 'Last'].includes(ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].ordinal)) {
+      ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].ordinal = 'Last';
+    }
+  } else if (type === 'yearly-month') {
+    ellipsisMenuState.repeatDraft.yearlyRules[rowIndex].month = Number.parseInt(rawValue, 10);
+  }
+  ellipsisMenuState.repeatOpenDropdown = null;
+  renderEllipsisMenuInModal();
+}
+
+function saveRepeatDraftForTask(taskId) {
+  if (openModalTaskId === taskId) {
+    syncOpenModalTaskEdits(taskId);
+  }
+  const loc = getTaskLocation(taskId);
+  if (!loc || !ellipsisMenuState) return;
+  const task = loc.task;
+  const occurrenceDate = task.repeatOccurrenceDate || task.startDate || loc.column.isoDate || getTodayISO();
+  const existingSeries = task.repeatSeriesId ? getRepeatSeriesById(task.repeatSeriesId) : null;
+  const nextSeries = normalizeRepeatSeries({
+    id: existingSeries?.id || uid(),
+    status: 'active',
+    timezone: settings.timezone,
+    anchorStartDate: existingSeries?.anchorStartDate || occurrenceDate,
+    untilDate: existingSeries?.untilDate || null,
+    skippedOccurrences: existingSeries?.skippedOccurrences || [],
+    cadence: ellipsisMenuState.repeatDraft.cadence,
+    interval: ellipsisMenuState.repeatDraft.interval,
+    weeklyDays: ellipsisMenuState.repeatDraft.weeklyDays,
+    monthlyRules: ellipsisMenuState.repeatDraft.monthlyRules,
+    yearlyRules: ellipsisMenuState.repeatDraft.yearlyRules,
+    templateTask: createRepeatTemplateFromTask(task)
+  });
+
+  updateCurrentTaskRepeatFlags(task, nextSeries.id, occurrenceDate);
+  persistRepeatSeries(nextSeries);
+  const shouldPersistCurrentTask = !isDerivedRepeatTask(task)
+    || !existingSeries
+    || task.repeatModified
+    || task.complete
+    || repeatSeriesMatchesDate(nextSeries, occurrenceDate);
+  if (shouldPersistCurrentTask) persistTask(task, 0);
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  refreshSearchPanelIfVisible();
+  closeEllipsisMenu();
+  rerenderOpenTaskDetailModal();
+}
+
+function stopRepeatingForTask(taskId, options = {}) {
+  const loc = getTaskLocation(taskId);
+  if (!loc || !loc.task.repeatSeriesId) return;
+  const task = loc.task;
+  const series = getRepeatSeriesById(task.repeatSeriesId);
+  if (series) {
+    const currentDate = task.repeatOccurrenceDate || task.startDate || loc.column?.isoDate || getTodayISO();
+    persistRepeatSeries({ ...series, untilDate: currentDate, status: 'active' });
+  }
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  refreshSearchPanelIfVisible();
+  if (!options.skipModalRerender) rerenderOpenTaskDetailModal();
+}
+
+function extendRepeatSeriesForTask(taskId) {
+  const loc = getTaskLocation(taskId);
+  if (!loc || !loc.task.repeatSeriesId) return;
+  const series = getRepeatSeriesById(loc.task.repeatSeriesId);
+  if (!series || !series.untilDate) return;
+  persistRepeatSeries({ ...series, untilDate: null, status: 'active' });
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  refreshSearchPanelIfVisible();
+  rerenderOpenTaskDetailModal();
+}
+
+function updateIncompleteRepeatInstancesToMatchTask(taskId) {
+  if (openModalTaskId === taskId) {
+    syncOpenModalTaskEdits(taskId);
+  }
+  const loc = getTaskLocation(taskId);
+  if (!loc || !loc.task.repeatSeriesId) return;
+  const series = getRepeatSeriesById(loc.task.repeatSeriesId);
+  if (!series) return;
+  const templateTask = createRepeatTemplateFromTask(loc.task);
+  persistRepeatSeries({ ...series, templateTask });
+  const applyTemplate = task => {
+    if (!task || task.complete || task.repeatSeriesId !== series.id) return;
+    task.title = templateTask.title;
+    task.notes = templateTask.notes;
+    task.tag = templateTask.tag;
+    task.integrationColor = templateTask.integrationColor;
+    task.timeEstimateMinutes = templateTask.timeEstimateMinutes;
+    task.subtasks = templateTask.subtasks.map(subtask => ({ ...subtask, id: subtask.id || uid() }));
+    task.showSubtasks = task.subtasks.length > 0;
+    syncTaskAggregateTimes(task);
+    persistTask(task, 0);
+  };
+  state.columns.forEach(column => column.tasks.forEach(applyTemplate));
+  state.backlog.forEach(applyTemplate);
+  state.archive.forEach(applyTemplate);
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  renderBacklogPanel();
+  renderArchivePanel();
+  refreshSearchPanelIfVisible();
+  rerenderOpenTaskDetailModal();
+}
+
+function deleteIncompleteRepeatInstancesAndStop(taskId) {
+  const loc = getTaskLocation(taskId);
+  if (!loc || !loc.task.repeatSeriesId) return;
+  const seriesId = loc.task.repeatSeriesId;
+
+  state.columns.forEach(column => {
+    const removed = column.tasks.filter(task => task.repeatSeriesId === seriesId && !task.complete);
+    if (removed.length > 0) {
+      column.tasks = column.tasks.filter(task => !(task.repeatSeriesId === seriesId && !task.complete));
+      removed.forEach(task => persistDeleteTask(task.id));
+    }
+  });
+
+  state.backlog = state.backlog.filter(task => {
+    const shouldRemove = task.repeatSeriesId === seriesId && !task.complete;
+    if (shouldRemove) persistDeleteTask(task.id);
+    return !shouldRemove;
+  });
+
+  state.archive = state.archive.filter(task => {
+    const shouldRemove = task.repeatSeriesId === seriesId && !task.complete;
+    if (shouldRemove) persistDeleteTask(task.id);
+    return !shouldRemove;
+  });
+
+  const series = getRepeatSeriesById(seriesId);
+  if (series) persistRepeatSeries({ ...series, status: 'stopped' });
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  renderBacklogPanel();
+  renderArchivePanel();
+  refreshSearchPanelIfVisible();
+  closeEllipsisMenu();
+  closeTaskDetailModal();
+}
+
+function openAdjacentRepeatOccurrence(taskId, direction) {
+  const loc = getTaskLocation(taskId);
+  if (!loc || !loc.task.repeatSeriesId) return;
+  const series = getRepeatSeriesById(loc.task.repeatSeriesId);
+  if (!series) return;
+  const currentDate = loc.task.repeatOccurrenceDate || loc.task.startDate || loc.column.isoDate || getTodayISO();
+  const nextDate = getRepeatNavigationDate(series, currentDate, direction);
+  if (!nextDate) return;
+  repeatRuntimeState.pinnedOccurrenceKeys.add(`${series.id}:${nextDate}`);
+  ensureDateIsVisibleInWindow(nextDate);
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
+  openTaskDetailModal(getRepeatTaskIdForOccurrence(series.id, nextDate));
+}
+
 function renderEllipsisMenuInModal() {
   if (!ellipsisMenuState) return;
 
@@ -5683,12 +7077,21 @@ function renderEllipsisMenuInModal() {
   if (existing) existing.remove();
 
   const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return;
   const wrap = overlay.querySelector('.ellipsis-menu-wrap');
   if (!wrap) return;
 
-  const isTrashed = ellipsisMenuState?.taskId ? isTaskInTrash(ellipsisMenuState.taskId) : false;
-  const html = isTrashed
-    ? `
+  const loc = getTaskLocation(ellipsisMenuState.taskId);
+  if (!loc) return;
+  const isTrashed = loc.location === 'trash';
+  let html = '';
+
+  if (ellipsisMenuState.mode === 'repeat') {
+    html = renderRepeatEditorHtml(loc.task, loc.column, ellipsisMenuState.repeatDraft);
+  } else if (ellipsisMenuState.mode === 'series-actions' && loc.task.repeatSeriesId) {
+    html = renderRepeatSeriesActionsHtml(loc.task);
+  } else if (isTrashed) {
+    html = `
       <div class="ellipsis-menu" data-ellipsis-menu>
         <div class="sdp__arrow"></div>
         <div class="sdp__section">
@@ -5701,12 +7104,21 @@ function renderEllipsisMenuInModal() {
           </button>
         </div>
       </div>
-    `
-    : `
+    `;
+  } else {
+    const repeatActionLabel = loc.task.repeatSeriesId ? 'Edit task series' : 'Repeat';
+    const repeatAction = loc.task.repeatSeriesId ? 'open-repeat-series-menu' : 'open-repeat-menu';
+    html = `
       <div class="ellipsis-menu" data-ellipsis-menu>
         <div class="sdp__arrow"></div>
         <div class="sdp__section">
           <span class="sdp__section-label">Other actions:</span>
+          <button class="sdp__menu-item" data-action="${repeatAction}" type="button">
+            <span class="ellipsis-menu__item-content">
+              <i data-lucide="repeat" class="ellipsis-menu__icon"></i>
+              <span>${repeatActionLabel}</span>
+            </span>
+          </button>
           <button class="sdp__menu-item" data-action="duplicate-task" type="button">
             <span class="ellipsis-menu__item-content">
               <i data-lucide="files" class="ellipsis-menu__icon"></i>
@@ -5724,6 +7136,7 @@ function renderEllipsisMenuInModal() {
         </div>
       </div>
     `;
+  }
 
   const wrapper = document.createElement('div');
   wrapper.innerHTML = html;
@@ -5731,6 +7144,13 @@ function renderEllipsisMenuInModal() {
   wrap.appendChild(dropdown);
 
   if (typeof lucide !== 'undefined') lucide.createIcons();
+  const intervalInput = dropdown.querySelector('[data-repeat-interval]');
+  if (ellipsisMenuState.mode === 'repeat' && ellipsisMenuState.repeatDraft.cadence === 'daily' && intervalInput) {
+    requestAnimationFrame(() => {
+      intervalInput.focus();
+      intervalInput.select();
+    });
+  }
 }
 
 /* ── Duplicate & Delete Handlers ─────────────── */
@@ -5799,10 +7219,16 @@ function handleDuplicateTask(taskId) {
 }
 
 function handleDeleteTask(taskId) {
-  const loc = getTaskLocation(taskId);
+  let loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return;
+  if (loc.location === 'column' && loc.index === -1 && isDerivedRepeatTask(loc.task)) {
+    materializeDerivedTask(loc.task);
+    loc = getTaskLocation(taskId);
+    if (!loc) return;
+  }
 
   const task = loc.task;
+  const repeatSeries = task.repeatSeriesId ? getRepeatSeriesById(task.repeatSeriesId) : null;
   const sourceIsoDate = loc.location === 'backlog'
     ? getBacklogSourceIsoDate(task)
     : (loc.location === 'archive' ? getArchiveSourceIsoDate(task) : loc.column.isoDate);
@@ -5828,6 +7254,7 @@ function handleDeleteTask(taskId) {
   state.trash.push({
     task,
     deletedFrom: { columnId: sourceColumnId, isoDate: sourceIsoDate },
+    repeatSkipFingerprint: repeatSeries ? getRepeatRuleFingerprint(repeatSeries) : null,
     deletedAt: new Date().toISOString()
   });
 
@@ -5841,6 +7268,8 @@ function handleDeleteTask(taskId) {
   persistDeleteTask(taskId);
   persistTrashEntry(state.trash[state.trash.length - 1]);
   removedCalEventsForDelete.forEach(ev => persistDeleteCalendarEvent(ev.id));
+  reconcileVisibleRepeatTasks();
+  renderAllColumns();
   showToast('Deleted', 'dark');
 }
 
@@ -6266,21 +7695,39 @@ function getSearchChannelOptions() {
   return options;
 }
 
-function renderChannelListHTML(filtered, currentTag) {
-  const normalizedCurrent = normalizeTag(currentTag);
-  return filtered.map((ch, i) => {
-    const isSelected = ch.id === 'unassigned'
-      ? !currentTag
-      : normalizedCurrent === '#' + ch.label;
+function renderChannelOptionListHTML(options, config = {}) {
+  const {
+    selectedId = null,
+    highlightIndex = -1,
+    itemIdAttr = 'data-channel-id',
+    itemIndexAttr = 'data-channel-idx'
+  } = config;
+
+  return options.map((ch, i) => {
+    const isSelected = ch.id === selectedId;
     const nested = ch.context ? ' channel-picker__item--nested' : '';
     const selected = isSelected ? ' channel-picker__item--selected' : '';
-    const highlighted = (channelPickerState && channelPickerState.highlightIndex === i)
-      ? ' channel-picker__item--highlighted' : '';
+    const highlighted = highlightIndex === i ? ' channel-picker__item--highlighted' : '';
     const checkmark = isSelected ? '<span class="channel-picker__check">\u2713</span>' : '';
-    return `<div class="channel-picker__item${nested}${selected}${highlighted}" data-channel-id="${ch.id}" data-channel-idx="${i}">` +
+    return `<div class="channel-picker__item${nested}${selected}${highlighted}" ${itemIdAttr}="${escapeHtml(ch.id)}" ${itemIndexAttr}="${i}">` +
       `<span class="channel-picker__hash" style="color:${escapeHtml(ch.hashColor)};">#</span>` +
       `<span class="channel-picker__label">${escapeHtml(ch.label)}</span>${checkmark}</div>`;
   }).join('');
+}
+
+function renderChannelListHTML(filtered, currentTag) {
+  const normalizedCurrent = normalizeTag(currentTag);
+  const selectedOption = filtered.find(ch => (
+    ch.id === 'unassigned'
+      ? !currentTag
+      : normalizedCurrent === '#' + ch.label
+  ));
+  return renderChannelOptionListHTML(filtered, {
+    selectedId: selectedOption ? selectedOption.id : null,
+    highlightIndex: channelPickerState ? channelPickerState.highlightIndex : -1,
+    itemIdAttr: 'data-channel-id',
+    itemIndexAttr: 'data-channel-idx'
+  });
 }
 
 function renderChannelPicker() {
@@ -6452,6 +7899,7 @@ function selectChannel(taskId, channel) {
   } else {
     loc.task.tag = '#' + channel.label;
   }
+  markTaskAsRepeatModified(loc.task);
 
   closeChannelPicker();
   renderTaskLocation(loc);
@@ -6508,14 +7956,14 @@ function openBacklogFilterPicker() {
     closeBacklogFilterPicker();
     return;
   }
-  backlogFilterPickerState = { filterId: backlogPanelState.filterId, highlightIndex: 0 };
+  backlogFilterPickerState = { filterId: getSharedHomeTodayFilterId(), highlightIndex: 0 };
   renderBacklogFilterPicker();
 }
 
 function renderBacklogFilterPicker() {
   if (!backlogFilterPickerState) return;
   closeBacklogFilterPicker();
-  backlogFilterPickerState = { filterId: backlogPanelState.filterId, highlightIndex: 0 };
+  backlogFilterPickerState = { filterId: getSharedHomeTodayFilterId(), highlightIndex: 0 };
 
   const panel = document.querySelector('[data-right-panel="backlog"]');
   const button = panel ? panel.querySelector('[data-backlog-filter-btn]') : null;
@@ -6529,7 +7977,7 @@ function renderBacklogFilterPicker() {
     `<div class="channel-picker__arrow"></div>` +
     `<div class="channel-picker__header">Filter backlog:</div>` +
     `<input class="channel-picker__search" placeholder="Search..." type="text">` +
-    `<div class="channel-picker__list">${renderBacklogFilterListHTML(options, backlogPanelState.filterId)}</div>`;
+    `<div class="channel-picker__list">${renderBacklogFilterListHTML(options, getSharedHomeTodayFilterId())}</div>`;
 
   dropdown.style.position = 'absolute';
   dropdown.style.zIndex = '7000';
@@ -6558,12 +8006,12 @@ function renderBacklogFilterPicker() {
     requestAnimationFrame(() => searchInput.focus());
     searchInput.addEventListener('input', () => {
       if (!backlogFilterPickerState) return;
-      backlogFilterPickerState.highlightIndex = 0;
-      list.innerHTML = renderBacklogFilterListHTML(
-        getBacklogFilterOptions(searchInput.value),
-        backlogPanelState.filterId
-      );
-    });
+        backlogFilterPickerState.highlightIndex = 0;
+        list.innerHTML = renderBacklogFilterListHTML(
+          getBacklogFilterOptions(searchInput.value),
+          getSharedHomeTodayFilterId()
+        );
+      });
     searchInput.addEventListener('keydown', e => {
       if (!backlogFilterPickerState) return;
       const filtered = getBacklogFilterOptions(searchInput.value);
@@ -6601,9 +8049,16 @@ function updateBacklogFilterHighlight(dropdown) {
 }
 
 function selectBacklogFilter(filterId) {
-  backlogPanelState.filterId = filterId || 'all';
+  const nextFilterId = normalizeTaskFilterId(filterId || 'all');
+  topbarTaskFilterState.homeToday = nextFilterId;
+  backlogPanelState.filterId = nextFilterId;
   closeBacklogFilterPicker();
-  renderBacklogPanel();
+  if (getTaskFilterScopeKey() === 'homeToday') {
+    rerenderActiveFilteredView();
+  } else {
+    renderBacklogPanel();
+    updateTopbarFilterButton();
+  }
 }
 
 /* ── Modal Channel Picker ───────────────────── */
@@ -6763,6 +8218,7 @@ function selectModalChannel(taskId, channel) {
   } else {
     loc.task.tag = '#' + channel.label;
   }
+  markTaskAsRepeatModified(loc.task);
 
   closeModalChannelPicker();
   renderTaskLocation(loc);
@@ -7054,6 +8510,7 @@ function applyPlannedTime(minutes) {
     const subtaskPlanned = task.subtasks.reduce((sum, s) => sum + (s.plannedMinutes || 0), 0);
     task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
   }
+  markTaskAsRepeatModified(task);
   syncTaskAggregateTimes(task);
   closePlannedPicker();
   const overlay = document.getElementById('task-modal-overlay');
@@ -7326,6 +8783,7 @@ function applyActualTime(minutes) {
     }
     task.ownActualTimeSeconds = totalOwnSeconds;
   }
+  markTaskAsRepeatModified(task);
   syncTaskAggregateTimes(task);
 
   // Actual-time calendar events: create/remove for today only
@@ -7820,6 +9278,7 @@ function applyCardPickerTime(minutes) {
       task.ownPlannedMinutes = Math.max(0, minutes - subtaskPlanned);
     }
   }
+  markTaskAsRepeatModified(task);
   syncTaskAggregateTimes(task);
 
   // Actual-time calendar events: create/remove for today only
@@ -7907,6 +9366,10 @@ function openFocusMode(taskId, autoStart, from, subtaskId = null) {
   if (isTaskInTrash(taskId) || isTaskInBacklog(taskId)) {
     showToast('Must focus on today');
     return;
+  }
+  const derivedTask = getRepeatRuntimeTaskById(taskId);
+  if (derivedTask) {
+    materializeDerivedTask(derivedTask);
   }
   if (isTaskInArchive(taskId)) {
     const restored = restoreArchiveTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: false });
@@ -9130,14 +10593,22 @@ function closeTaskDetailModal() {
     const ctx = findTaskContext(openModalTaskId);
     if (ctx) {
       const titleEl = overlay.querySelector('.task-modal__title');
+      let changed = false;
       if (titleEl) {
         const newTitle = titleEl.textContent.trim();
-        if (newTitle) {
+        if (newTitle && newTitle !== ctx.task.title) {
           ctx.task.title = newTitle;
+          markTaskAsRepeatModified(ctx.task);
+          changed = true;
         }
       }
       if (taskModalQuill) {
-        ctx.task.notes = getQuillHtml(taskModalQuill);
+        const nextNotes = getQuillHtml(taskModalQuill);
+        if (nextNotes !== ctx.task.notes) {
+          ctx.task.notes = nextNotes;
+          markTaskAsRepeatModified(ctx.task);
+          changed = true;
+        }
         taskModalQuill = null;
       }
       syncTaskAggregateTimes(ctx.task);
@@ -9147,7 +10618,9 @@ function closeTaskDetailModal() {
         if (key) cardTimerExpanded.add(key);
       }
       renderColumn(ctx.column);
-      persistTask(ctx.task, 0);
+      if (!isDerivedRepeatTask(ctx.task) || changed) {
+        persistTask(ctx.task, 0);
+      }
     }
     if (!ctx && openModalIsBacklog) {
       const task = findBacklogTask(openModalTaskId);
@@ -9206,6 +10679,8 @@ function closeTaskDetailModal() {
     openModalIsArchive = false;
   }
 
+  repeatRuntimeState.pinnedOccurrenceKeys.clear();
+  reconcileVisibleRepeatTasks();
   overlay.hidden = true;
   overlay.innerHTML = '';
   document.body.classList.remove('modal-open');
@@ -9230,6 +10705,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
   if (columnIsoDate) card.dataset.columnDate = columnIsoDate;
   if (isBacklog) card.dataset.backlogCard = 'true';
   if (isArchive) card.dataset.archiveCard = 'true';
+  if (isDerivedRepeatTask(task)) card.dataset.repeatDerived = 'true';
 
   // Show scheduled pills for all timebox events on THIS column's date
   const columnEvents = !isBacklog && columnIsoDate
@@ -9406,6 +10882,8 @@ function renderColumn(column) {
 
   moveCompletedTasksToBottom(column);
   column.tasks.forEach(ensureTaskTimeState);
+  const filterId = getActiveTaskFilterId();
+  const visibleTasks = filterTasksByChannel(getColumnVisibleTasks(column), filterId);
 
   const progress = computeProgress(column);
   const progressFill = colEl.querySelector('.progress-bar__fill');
@@ -9425,10 +10903,10 @@ function renderColumn(column) {
   const dpBadgeMap = dailyPlanningState.isActive
     && dailyPlanningState.step >= DAILY_PLANNING_STEPS.WORKLOAD
     && column.isoDate === dailyPlanningState.selectedDate
-    ? getDailyPlanningBadgeStatuses(column.tasks, column.isoDate)
+    ? getDailyPlanningBadgeStatuses(visibleTasks, column.isoDate)
     : null;
 
-  column.tasks.forEach(task => {
+  visibleTasks.forEach(task => {
     const dpStatus = dpBadgeMap ? dpBadgeMap.get(task.id) || null : null;
     taskList.appendChild(renderTaskCard(task, column.isoDate, false, dpStatus));
   });
@@ -9436,7 +10914,7 @@ function renderColumn(column) {
   // Render ghost cards for past columns
   const todayISO = getTodayISO();
   if (column.isoDate <= todayISO) {
-    const ghosts = getGhostTasksForDate(column.isoDate);
+    const ghosts = filterTasksByChannel(getGhostTasksForDate(column.isoDate), filterId);
     ghosts.forEach(task => taskList.appendChild(renderTaskCard(task, column.isoDate, true)));
   }
 
@@ -9454,7 +10932,15 @@ function renderTrashPanel() {
   const listEl = panel.querySelector('[data-trash-list]');
   if (!listEl) return;
 
-  purgeExpiredTrash();
+  const purgeResult = purgeExpiredTrash();
+  if (purgeResult.expiredCount > 0) {
+    reconcileVisibleRepeatTasks();
+    renderAllColumns();
+    if (openModalTaskId) {
+      if (getTaskLocation(openModalTaskId)) rerenderOpenTaskDetailModal();
+      else closeTaskDetailModal();
+    }
+  }
   const now = Date.now();
   const maxAgeMs = 30 * 24 * 60 * 60 * 1000;
   const visibleEntries = state.trash.filter(entry => {
@@ -9625,23 +11111,24 @@ function renderArchivePanel() {
   const daysLabel = panel.querySelector('[data-archive-days-label]');
   const listEl = panel.querySelector('[data-archive-list]');
   if (!titleEl || !toggleEl || !enabledView || !disabledView || !deleteAllBtn || !daysLabel || !listEl) return;
+  const visibleArchiveTasks = filterTasksByChannel(state.archive, getActiveTaskFilterId());
 
   titleEl.textContent = 'Auto-archive';
   toggleEl.classList.toggle('settings-toggle--on', !!settings.autoArchiveEnabled);
   enabledView.hidden = !settings.autoArchiveEnabled;
   disabledView.hidden = !!settings.autoArchiveEnabled;
-  deleteAllBtn.hidden = state.archive.length === 0;
+  deleteAllBtn.hidden = visibleArchiveTasks.length === 0;
   daysLabel.textContent = getSettingsDisplayLabel('autoArchiveDays', settings.autoArchiveDays);
 
   listEl.innerHTML = '';
   if (settings.autoArchiveEnabled) {
-    if (state.archive.length === 0) {
+    if (visibleArchiveTasks.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'archive-panel__empty';
       empty.textContent = 'Empty';
       listEl.appendChild(empty);
     } else {
-      state.archive.forEach(task => {
+      visibleArchiveTasks.forEach(task => {
         const card = renderTaskCard(task, getArchiveSourceIsoDate(task), false, null, { isArchive: true });
         card.dataset.archiveCard = 'true';
         listEl.appendChild(card);
@@ -9655,10 +11142,20 @@ function renderArchivePanel() {
   refreshSearchPanelIfVisible();
 }
 
-function getBacklogFilterLabel(filterId = backlogPanelState.filterId) {
+function getBacklogFilterLabel(filterId = getSharedHomeTodayFilterId()) {
   if (!filterId || filterId === 'all') return '#all';
   const channel = getChannelById(filterId);
   return channel ? `#${channel.label}` : '#all';
+}
+
+function renderBacklogFilterLabelHtml(filterId = getSharedHomeTodayFilterId()) {
+  const label = getBacklogFilterLabel(filterId);
+  const word = label.startsWith('#') ? label.slice(1) : label;
+  const option = filterId === 'all'
+    ? { hashColor: '#787878' }
+    : (getChannelById(filterId) || { hashColor: '#787878' });
+  return `<span class="backlog-panel__filter-hash" style="color:${escapeHtml(option.hashColor || '#787878')};">#</span>`
+    + `<span class="backlog-panel__filter-name">${escapeHtml(word)}</span>`;
 }
 
 function getBacklogFilterOptions(query = '') {
@@ -9675,7 +11172,8 @@ function renderBacklogPanel() {
   const filterText = panel.querySelector('.backlog-panel__filter-text');
   if (!listEl || !filterText) return;
 
-  filterText.textContent = getBacklogFilterLabel();
+  const currentFilterId = getSharedHomeTodayFilterId();
+  filterText.innerHTML = renderBacklogFilterLabelHtml(currentFilterId);
   listEl.innerHTML = '';
 
   BACKLOG_HORIZONS.forEach(horizon => {
@@ -9712,7 +11210,7 @@ function renderBacklogPanel() {
       sectionList.appendChild(composer);
     }
 
-    getBacklogTasksForHorizon(horizon.id).forEach(task => {
+    getBacklogTasksForHorizon(horizon.id, currentFilterId).forEach(task => {
       const card = renderTaskCard(task, getBacklogSourceIsoDate(task), false, null, { isBacklog: true });
       card.dataset.backlogCard = 'true';
       card.dataset.backlogHorizon = horizon.id;
@@ -9741,7 +11239,7 @@ function getSearchDateRangeLabel(rangeId = settings.searchDateRange) {
 
 function hasActiveSearchFilters() {
   const filters = settings.searchFilters || DEFAULT_SEARCH_FILTERS;
-  return !!(filters.hideCompleted || filters.hideIncomplete || filters.hidePlanningTasks);
+  return !!(filters.hideCompleted || filters.hideIncomplete || filters.hidePlanningTasks || filters.hideRepeatingTasks);
 }
 
 function getSearchChannelControlLabel() {
@@ -9763,7 +11261,7 @@ function getSearchResultSourceIsoDate(task, location, columnIsoDate = null) {
 function getSearchSourceTasks() {
   const sources = [];
   state.columns.forEach(column => {
-    column.tasks.forEach(task => {
+    getColumnVisibleTasks(column).forEach(task => {
       sources.push({
         task,
         location: 'column',
@@ -9789,20 +11287,7 @@ function getSearchSourceTasks() {
 }
 
 function taskMatchesChannelFilter(task, filterId = settings.searchChannelFilterId) {
-  if (!task) return false;
-  if (!filterId || filterId === 'all') return true;
-  const channel = getChannelById(filterId);
-  if (!channel) return true;
-  const normalizedTaskTag = normalizeTag(task.tag);
-  if (channel.id === 'unassigned') return !normalizedTaskTag;
-  const exactTag = '#' + channel.label;
-  if (!channel.isContext) return normalizedTaskTag === exactTag;
-  if (normalizedTaskTag === exactTag) return true;
-  const childChannelIds = getContextChildChannelIds(channel.label);
-  return childChannelIds.some(id => {
-    const child = getChannelById(id);
-    return child && normalizedTaskTag === '#' + child.label;
-  });
+  return taskMatchesChannelFilterId(task, filterId);
 }
 
 function taskMatchesSearchDateRange(task, sourceIsoDate, rangeId = settings.searchDateRange) {
@@ -9822,6 +11307,7 @@ function taskMatchesSearchFilters(task) {
   if (filters.hideCompleted && task.complete) return false;
   if (filters.hideIncomplete && !task.complete) return false;
   if (filters.hidePlanningTasks && (task.systemType === 'daily_planning' || task.systemType === 'daily_shutdown')) return false;
+  if (filters.hideRepeatingTasks && task.isRepeatingTask) return false;
   return true;
 }
 
@@ -9920,7 +11406,8 @@ function renderSearchFilterDropdownHTML() {
   const options = [
     { id: 'hideCompleted', label: 'Hide completed tasks' },
     { id: 'hideIncomplete', label: 'Hide incomplete tasks' },
-    { id: 'hidePlanningTasks', label: 'Hide planning tasks' }
+    { id: 'hidePlanningTasks', label: 'Hide planning tasks' },
+    { id: 'hideRepeatingTasks', label: 'Hide repeating tasks' }
   ];
 
   let html = '<div class="settings-view__dropdown search-panel__dropdown search-panel__dropdown--filter" data-search-dropdown="filter">';
@@ -9933,10 +11420,6 @@ function renderSearchFilterDropdownHTML() {
       + `<span class="settings-view__dropdown-check"${filters[option.id] ? '' : ' hidden'}>\u2713</span>`
       + `</button>`;
   });
-  html += `<button class="settings-view__dropdown-item search-panel__dropdown-item search-panel__dropdown-item--disabled" type="button" disabled>`
-    + `<span>Hide repeating tasks</span>`
-    + `<span class="search-panel__coming-soon">Soon</span>`
-    + `</button>`;
   html += '</div></div>';
   return html;
 }
@@ -10103,8 +11586,14 @@ function refreshSearchPanelIfVisible() {
 }
 
 function getCalendarEventsForDate(isoDate) {
+  const filterId = getActiveTaskFilterId();
   // 1. Get stored calendar events for this date
-  const stored = state.calendarEvents.filter(evt => evt.date === isoDate);
+  const stored = state.calendarEvents.filter(evt => {
+    if (evt.date !== isoDate) return false;
+    if (!evt.taskId) return true;
+    const task = findTaskById(evt.taskId);
+    return taskMatchesChannelFilterId(task, filterId);
+  });
   const taskIdsInStored = new Set(stored.filter(e => e.taskId).map(e => e.taskId));
 
   // 2. Find tasks with scheduledTime in the matching column that don't already have a stored event
@@ -10112,7 +11601,7 @@ function getCalendarEventsForDate(isoDate) {
   const dynamic = [];
   if (col) {
     for (const task of col.tasks) {
-      if (task.scheduledTime && !taskIdsInStored.has(task.id)) {
+      if (task.scheduledTime && !taskIdsInStored.has(task.id) && taskMatchesChannelFilterId(task, filterId)) {
         const offset = scheduledTimeToOffset(task.scheduledTime);
         const duration = (task.timeEstimateMinutes || 30) / 60;
         dynamic.push({
@@ -10492,6 +11981,7 @@ function renderAllColumns() {
   const container = document.getElementById('day-columns');
   const { startISO, endISO } = state.dayWindow;
   if (!startISO || !endISO) return;
+  reconcileVisibleRepeatTasks();
   ensureColumnsForWindow(startISO, endISO);
   const visibleCols = getColumnsInWindow(startISO, endISO);
   container.innerHTML = '';
@@ -10502,6 +11992,7 @@ function renderAllColumns() {
   });
   syncActiveTaskCardUI();
   refreshSearchPanelIfVisible();
+  updateTopbarFilterButton();
 }
 
 function getColumnSpanPx(container) {
@@ -10721,8 +12212,13 @@ function findOrCreateColumn(isoDate) {
 }
 
 function moveTaskToDate(taskId, targetIsoDate) {
-  const ctx = findTaskContext(taskId);
+  let ctx = findTaskContext(taskId);
   if (!ctx) return;
+  if (ctx.index === -1 && isDerivedRepeatTask(ctx.task)) {
+    materializeDerivedTask(ctx.task);
+    ctx = findTaskContext(taskId);
+    if (!ctx) return;
+  }
 
   const sourceCol = ctx.column;
   const targetCol = findOrCreateColumn(targetIsoDate);
@@ -10734,6 +12230,7 @@ function moveTaskToDate(taskId, targetIsoDate) {
 
   ensureTaskRolloverState(ctx.task);
   ctx.task.startDate = targetIsoDate;
+  markTaskAsRepeatModified(ctx.task);
 
   // Moving to a past date completes the task as of that date
   const todayISO = getTodayISO();
@@ -10835,6 +12332,7 @@ function commitAddTask(colEl) {
   const colId  = colEl.dataset.colId;
   const column = state.columns.find(c => c.id === colId);
   if (!column) return;
+  const todayISO = getTodayISO();
 
   column.tasks.unshift({
     id: uid(),
@@ -10856,6 +12354,10 @@ function commitAddTask(colEl) {
   });
 
   const newTask = column.tasks[0];
+  if (column.isoDate < todayISO) {
+    completeTaskAsOf(newTask, column.isoDate);
+    moveCompletedTasksToBottom(column);
+  }
   hideAddTaskInput(colEl);
   renderColumn(column);
   persistTask(newTask, 0);
@@ -11020,6 +12522,13 @@ function attachEvents() {
       document.body.classList.add('is-task-reordering');
       scheduleTaskDragClass(card);
       return true;
+    }
+
+    if (card.dataset.repeatDerived === 'true') {
+      const derivedTask = getRepeatRuntimeTaskById(dragState.taskId);
+      if (derivedTask) {
+        materializeDerivedTask(derivedTask);
+      }
     }
 
     // For ghost cards, find the actual column where the task lives
@@ -11409,95 +12918,7 @@ function attachEvents() {
     if (!btn) return;
     const card   = btn.closest('.task-card');
     const taskId = card.dataset.taskId;
-    for (const col of state.columns) {
-      const task = col.tasks.find(t => t.id === taskId);
-      if (task) {
-        if (!task.complete) {
-          const incompleteTasks = col.tasks.filter(t => !t.complete);
-          task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
-          task.complete = true;
-          ensureTaskRolloverState(task);
-          const todayISO = getTodayISO();
-          task.completedOnDate = todayISO;
-          if (task.subtasks) {
-            task.subtasks.forEach(s => {
-              if (!s.done) {
-                s.done = true;
-                if (!task.subtaskCompletionsByDate[todayISO]) task.subtaskCompletionsByDate[todayISO] = [];
-                if (!task.subtaskCompletionsByDate[todayISO].includes(s.id)) {
-                  task.subtaskCompletionsByDate[todayISO].push(s.id);
-                }
-              }
-            });
-          }
-          // Auto-set actual time to planned time when completing without actual time
-          if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
-            task.actualTimeSeconds = task.timeEstimateMinutes * 60;
-          }
-          if (col.isoDate > todayISO) {
-            const taskIndex = col.tasks.findIndex(t => t.id === task.id);
-            if (taskIndex !== -1) col.tasks.splice(taskIndex, 1);
-            const todayCol = ensureColumnForDate(todayISO);
-            todayCol.tasks.push(task);
-            task.startDate = todayISO;
-            moveCompletedTasksToBottom(todayCol);
-            renderColumn(col);
-            renderColumn(todayCol);
-            persistTask(task, 0);
-            break;
-          }
-          moveCompletedTasksToBottom(col);
-        } else {
-          // Handle past card uncomplete
-          if (btn.hasAttribute('data-past-uncomplete')) {
-            task.complete = false;
-            ensureTaskRolloverState(task);
-            task.completedOnDate = null;
-            // Clear scheduledTime so it doesn't create a phantom timebox on today
-            task.scheduledTime = null;
-            // Move to today
-            const taskIndex = col.tasks.findIndex(t => t.id === task.id);
-            if (taskIndex !== -1) {
-              col.tasks.splice(taskIndex, 1);
-              const todayCol = ensureColumnForDate(getTodayISO());
-              todayCol.tasks.push(task);
-              const archived = reevaluateAutoArchive();
-              if (archived.some(item => item.id === task.id)) {
-                renderAllColumns();
-              } else {
-                renderColumn(col);
-                renderColumn(todayCol);
-              }
-              renderCalendarEvents();
-              persistTask(task, 0);
-            }
-            break;
-          }
-
-          const taskIndex = col.tasks.findIndex(t => t.id === task.id);
-          if (taskIndex === -1) break;
-
-          task.complete = false;
-          ensureTaskRolloverState(task);
-          task.completedOnDate = null;
-          const [uncompletedTask] = col.tasks.splice(taskIndex, 1);
-
-          const firstCompletedIndex = col.tasks.findIndex(t => t.complete);
-          const incompleteCount = firstCompletedIndex === -1 ? col.tasks.length : firstCompletedIndex;
-          const requestedIndex = Number.isInteger(uncompletedTask.previousIncompleteIndex)
-            ? uncompletedTask.previousIncompleteIndex
-            : incompleteCount;
-          const insertionIndex = Math.max(0, Math.min(requestedIndex, incompleteCount));
-
-          col.tasks.splice(insertionIndex, 0, uncompletedTask);
-          delete uncompletedTask.previousIncompleteIndex;
-        }
-
-        renderColumn(col);
-        persistTask(task, 0);
-        break;
-      }
-    }
+    toggleTaskCompletionForShortcut(taskId);
   });
 
   // ── Kanban subtask completion toggle ────────
@@ -11519,6 +12940,7 @@ function attachEvents() {
 
     subtask.done = !subtask.done;
     subtask.deleteReady = false;
+    markTaskAsRepeatModified(ctx.task);
     ensureTaskRolloverState(ctx.task);
     const todayISO = getTodayISO();
     if (subtask.done) {
@@ -13017,6 +14439,11 @@ function closeAnyPicker() {
   if (dueDatePickerState) { closeDueDatePicker(); return true; }
   if (focusPickerState) { closeFocusPicker(); return true; }
   if (modalChannelPickerState) { closeModalChannelPicker(); return true; }
+  if (ellipsisMenuState && ellipsisMenuState.repeatOpenDropdown) {
+    ellipsisMenuState.repeatOpenDropdown = null;
+    renderEllipsisMenuInModal();
+    return true;
+  }
   if (ellipsisMenuState) { closeEllipsisMenu(); return true; }
   if (searchPanelState.dropdownOpen) { closeSearchDropdown(); return true; }
   return false;
@@ -13047,6 +14474,38 @@ function focusModalSubtaskInput(subtaskId) {
   selection.addRange(range);
 }
 
+function syncOpenModalTaskEdits(taskId = openModalTaskId, options = {}) {
+  if (!taskId) return { changed: false, loc: null };
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay) return { changed: false, loc: null };
+  const loc = getTaskLocation(taskId);
+  if (!loc) return { changed: false, loc: null };
+
+  let changed = false;
+  const titleEl = overlay.querySelector('.task-modal__title');
+  if (titleEl) {
+    const newTitle = titleEl.textContent.trim();
+    if (newTitle && newTitle !== loc.task.title) {
+      loc.task.title = newTitle;
+      markTaskAsRepeatModified(loc.task);
+      changed = true;
+    }
+  }
+
+  if (taskModalQuill) {
+    const nextNotes = getQuillHtml(taskModalQuill);
+    if (nextNotes !== loc.task.notes) {
+      loc.task.notes = nextNotes;
+      markTaskAsRepeatModified(loc.task);
+      changed = true;
+    }
+    if (options.releaseQuill) taskModalQuill = null;
+  }
+
+  syncTaskAggregateTimes(loc.task);
+  return { changed, loc };
+}
+
 function rerenderOpenTaskDetailModal(focusSubtaskId = null) {
   if (!openModalTaskId) return;
   const loc = getTaskLocation(openModalTaskId);
@@ -13055,10 +14514,7 @@ function rerenderOpenTaskDetailModal(focusSubtaskId = null) {
   if (!overlay) return;
 
   // Save Quill content before re-render destroys the instance
-  if (taskModalQuill) {
-    loc.task.notes = getQuillHtml(taskModalQuill);
-    taskModalQuill = null;
-  }
+  syncOpenModalTaskEdits(openModalTaskId, { releaseQuill: true });
 
   overlay.innerHTML = renderTaskDetailModal(loc.task, loc.column, {
     isTrash: loc.location === 'trash',
@@ -13081,6 +14537,7 @@ function addModalSubtask(task, insertAt = null) {
   const index = Number.isInteger(insertAt) ? Math.max(0, Math.min(insertAt, task.subtasks.length)) : task.subtasks.length;
   task.subtasks.splice(index, 0, subtask);
   task.showSubtasks = true;
+  markTaskAsRepeatModified(task);
   syncTaskAggregateTimes(task);
   return subtask;
 }
@@ -13091,6 +14548,7 @@ function removeModalSubtask(task, subtaskId) {
   if (index === -1) return null;
   const [removed] = task.subtasks.splice(index, 1);
   if (task.subtasks.length === 0) task.showSubtasks = false;
+  markTaskAsRepeatModified(task);
   syncTaskAggregateTimes(task);
   return removed;
 }
@@ -13271,13 +14729,168 @@ function attachTaskModalEvents() {
       return;
     }
 
+    if (e.target.closest('[data-repeat-series-edit]')) {
+      if (!openModalTaskId) return;
+      openRepeatSeriesActionsMenu(openModalTaskId);
+      return;
+    }
+
+    const repeatNavBtn = e.target.closest('[data-repeat-nav]');
+    if (repeatNavBtn) {
+      if (!openModalTaskId) return;
+      openAdjacentRepeatOccurrence(openModalTaskId, repeatNavBtn.getAttribute('data-repeat-nav') === 'prev' ? -1 : 1);
+      return;
+    }
+
     // Inside ellipsis menu
     const ellMenu = e.target.closest('[data-ellipsis-menu]');
     if (ellMenu) {
+      const repeatSelectToggle = e.target.closest('[data-repeat-select-toggle]');
+      if (repeatSelectToggle && ellipsisMenuState) {
+        const type = repeatSelectToggle.getAttribute('data-repeat-select-toggle');
+        const rowIndex = Number.parseInt(repeatSelectToggle.getAttribute('data-repeat-select-row'), 10);
+        const isOpen = ellipsisMenuState.repeatOpenDropdown
+          && ellipsisMenuState.repeatOpenDropdown.type === type
+          && ellipsisMenuState.repeatOpenDropdown.rowIndex === rowIndex;
+        ellipsisMenuState.repeatOpenDropdown = isOpen ? null : { type, rowIndex };
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const repeatSelectOption = e.target.closest('[data-repeat-select-option]');
+      if (repeatSelectOption && ellipsisMenuState) {
+        if (repeatSelectOption.hasAttribute('disabled')) return;
+        const type = repeatSelectOption.getAttribute('data-repeat-select-option');
+        const rowIndex = Number.parseInt(repeatSelectOption.getAttribute('data-repeat-select-row'), 10);
+        const value = repeatSelectOption.getAttribute('data-value');
+        applyRepeatDropdownSelection(type, rowIndex, value);
+        return;
+      }
+      if (e.target.closest('[data-repeat-toggle-cadence]') && ellipsisMenuState) {
+        ellipsisMenuState.repeatDraft.showCadenceOptions = !ellipsisMenuState.repeatDraft.showCadenceOptions;
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const cadenceOption = e.target.closest('[data-repeat-set-cadence]');
+      if (cadenceOption && ellipsisMenuState) {
+        ellipsisMenuState.repeatDraft = normalizeRepeatDraft({
+          ...ellipsisMenuState.repeatDraft,
+          cadence: cadenceOption.getAttribute('data-repeat-set-cadence'),
+          showCadenceOptions: false
+        });
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const repeatSaveBtn = e.target.closest('[data-repeat-save]');
+      if (repeatSaveBtn && openModalTaskId) {
+        const action = repeatSaveBtn.getAttribute('data-repeat-save');
+        if (action === 'back') {
+          ellipsisMenuState.mode = 'series-actions';
+          ellipsisMenuState.repeatOpenDropdown = null;
+          renderEllipsisMenuInModal();
+        } else {
+          saveRepeatDraftForTask(openModalTaskId);
+        }
+        return;
+      }
+      if (e.target.closest('[data-repeat-cancel]')) {
+        closeEllipsisMenu();
+        return;
+      }
+      if (e.target.closest('[data-repeat-weekly-add]') && ellipsisMenuState) {
+        const addBtn = e.target.closest('[data-repeat-weekly-add]');
+        const index = Number.parseInt(addBtn.getAttribute('data-repeat-weekly-add'), 10);
+        const used = new Set(ellipsisMenuState.repeatDraft.weeklyDays);
+        const nextDay = getOrderedWeekdayIndexes().find(day => !used.has(day));
+        if (nextDay !== undefined) ellipsisMenuState.repeatDraft.weeklyDays.splice(index + 1, 0, nextDay);
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const weeklyRemoveBtn = e.target.closest('[data-repeat-weekly-remove]');
+      if (weeklyRemoveBtn && ellipsisMenuState) {
+        const index = Number.parseInt(weeklyRemoveBtn.getAttribute('data-repeat-weekly-remove'), 10);
+        if (ellipsisMenuState.repeatDraft.weeklyDays.length > 1) {
+          ellipsisMenuState.repeatDraft.weeklyDays.splice(index, 1);
+        }
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      if (e.target.closest('[data-repeat-monthly-add]') && ellipsisMenuState) {
+        const addBtn = e.target.closest('[data-repeat-monthly-add]');
+        const index = Number.parseInt(addBtn.getAttribute('data-repeat-monthly-add'), 10);
+        if (ellipsisMenuState.repeatDraft.monthlyRules.length < 31) {
+          ellipsisMenuState.repeatDraft.monthlyRules.splice(index + 1, 0, getNextAvailableMonthlyRule(ellipsisMenuState.repeatDraft.monthlyRules));
+        }
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const monthlyRemoveBtn = e.target.closest('[data-repeat-monthly-remove]');
+      if (monthlyRemoveBtn && ellipsisMenuState) {
+        const index = Number.parseInt(monthlyRemoveBtn.getAttribute('data-repeat-monthly-remove'), 10);
+        if (ellipsisMenuState.repeatDraft.monthlyRules.length > 1) {
+          ellipsisMenuState.repeatDraft.monthlyRules.splice(index, 1);
+        }
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      if (e.target.closest('[data-repeat-yearly-add]') && ellipsisMenuState) {
+        const addBtn = e.target.closest('[data-repeat-yearly-add]');
+        const index = Number.parseInt(addBtn.getAttribute('data-repeat-yearly-add'), 10);
+        if (ellipsisMenuState.repeatDraft.yearlyRules.length < 31) {
+          ellipsisMenuState.repeatDraft.yearlyRules.splice(index + 1, 0, getNextAvailableYearlyRule(ellipsisMenuState.repeatDraft.yearlyRules));
+        }
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const yearlyRemoveBtn = e.target.closest('[data-repeat-yearly-remove]');
+      if (yearlyRemoveBtn && ellipsisMenuState) {
+        const index = Number.parseInt(yearlyRemoveBtn.getAttribute('data-repeat-yearly-remove'), 10);
+        if (ellipsisMenuState.repeatDraft.yearlyRules.length > 1) {
+          ellipsisMenuState.repeatDraft.yearlyRules.splice(index, 1);
+        }
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
+        return;
+      }
+      const seriesActionBtn = e.target.closest('[data-repeat-series-action]');
+      if (seriesActionBtn && openModalTaskId) {
+        const action = seriesActionBtn.getAttribute('data-repeat-series-action');
+        if (action === 'stop') {
+          stopRepeatingForTask(openModalTaskId, { skipModalRerender: true });
+          closeEllipsisMenu();
+          rerenderOpenTaskDetailModal();
+        } else if (action === 'extend') {
+          extendRepeatSeriesForTask(openModalTaskId);
+          closeEllipsisMenu();
+        } else if (action === 'change') {
+          ellipsisMenuState.mode = 'repeat';
+          renderEllipsisMenuInModal();
+        } else if (action === 'update-incomplete') {
+          updateIncompleteRepeatInstancesToMatchTask(openModalTaskId);
+          closeEllipsisMenu();
+        } else if (action === 'delete-incomplete-stop') {
+          deleteIncompleteRepeatInstancesAndStop(openModalTaskId);
+        }
+        return;
+      }
       const menuItem = e.target.closest('.sdp__menu-item');
       if (menuItem && menuItem.dataset.action && openModalTaskId) {
         const action = menuItem.dataset.action;
-        if (action === 'duplicate-task') {
+        if (action === 'open-repeat-menu') {
+          ellipsisMenuState.mode = 'repeat';
+          ellipsisMenuState.repeatOpenDropdown = null;
+          renderEllipsisMenuInModal();
+        } else if (action === 'open-repeat-series-menu') {
+          ellipsisMenuState.mode = 'series-actions';
+          ellipsisMenuState.repeatOpenDropdown = null;
+          renderEllipsisMenuInModal();
+        } else if (action === 'duplicate-task') {
           handleDuplicateTask(openModalTaskId);
         } else if (action === 'delete-task') {
           handleDeleteTask(openModalTaskId);
@@ -13286,6 +14899,10 @@ function attachTaskModalEvents() {
           closeTaskDetailModal();
           showToast('Restored', 'dark');
         }
+      }
+      if (ellipsisMenuState && ellipsisMenuState.repeatOpenDropdown) {
+        ellipsisMenuState.repeatOpenDropdown = null;
+        renderEllipsisMenuInModal();
       }
       return;
     }
@@ -13321,6 +14938,7 @@ function attachTaskModalEvents() {
       if (!subtask) return;
       subtask.done = !subtask.done;
       subtask.deleteReady = false;
+      markTaskAsRepeatModified(loc.task);
       ensureTaskRolloverState(loc.task);
       const todayISO = getTodayISO();
       if (subtask.done) {
@@ -13483,71 +15101,8 @@ function attachTaskModalEvents() {
         openTaskDetailModal(openModalTaskId);
         return;
       }
-      let task = null;
-      let col = null;
-      for (const c of state.columns) {
-        const t = c.tasks.find(t => t.id === openModalTaskId);
-        if (t) { task = t; col = c; break; }
-      }
-      if (!task) return;
-      task.complete = !task.complete;
-      ensureTaskRolloverState(task);
-      task.completedOnDate = task.complete ? getTodayISO() : null;
-      if (task.complete && task.subtasks) {
-        const todayISO = getTodayISO();
-        task.subtasks.forEach(s => {
-          if (!s.done) {
-            s.done = true;
-            if (!task.subtaskCompletionsByDate[todayISO]) task.subtaskCompletionsByDate[todayISO] = [];
-            if (!task.subtaskCompletionsByDate[todayISO].includes(s.id)) {
-              task.subtaskCompletionsByDate[todayISO].push(s.id);
-            }
-          }
-        });
-      }
-      // Auto-set actual time to planned time when completing without actual time
-      if (task.complete && !task.actualTimeSeconds && task.timeEstimateMinutes) {
-        task.ownActualTimeSeconds = task.timeEstimateMinutes * 60;
-        syncTaskAggregateTimes(task);
-        const actualMetric = overlay.querySelector('[data-actual-btn]');
-        if (actualMetric) {
-          const valEl = actualMetric.querySelector('.task-modal__metric-value');
-          if (valEl) {
-            valEl.textContent = formatMinutes(task.timeEstimateMinutes);
-            valEl.className = 'task-modal__metric-value task-modal__metric-value--set';
-          }
-        }
-      }
-      const btn = overlay.querySelector('[data-modal-check]');
-      if (btn) {
-        btn.classList.toggle('task-modal__check--complete', task.complete);
-      }
-      if (task.complete && task.subtasks) {
-        overlay.querySelectorAll('[data-modal-subtask-check]').forEach(cb => {
-          cb.classList.add('task-modal__check--complete');
-        });
-      }
-      const todayISO = getTodayISO();
-      // Uncompleting a task in a past column → move it to today (ghost will show in past)
-      if (!task.complete && col && col.isoDate < todayISO) {
-        task.scheduledTime = null;
-        const taskIndex = col.tasks.findIndex(t => t.id === task.id);
-        if (taskIndex !== -1) col.tasks.splice(taskIndex, 1);
-        const todayCol = ensureColumnForDate(todayISO);
-        todayCol.tasks.push(task);
-        const archived = reevaluateAutoArchive();
-        if (archived.some(item => item.id === task.id)) {
-          renderAllColumns();
-          openTaskDetailModal(openModalTaskId);
-        } else {
-          renderColumn(col);
-          renderColumn(todayCol);
-          renderCalendarEvents();
-        }
-      } else {
-        if (col) renderColumn(col);
-      }
-      persistTask(task, 0);
+      toggleTaskCompletionForShortcut(openModalTaskId);
+      rerenderOpenTaskDetailModal();
       return;
     }
 
@@ -13817,6 +15372,11 @@ function attachTaskModalEvents() {
   overlay.addEventListener('input', e => {
     const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
     if (!(targetEl instanceof Element)) return;
+    if (targetEl.matches('[data-repeat-interval]') && ellipsisMenuState) {
+      targetEl.value = targetEl.value.replace(/[^\d]/g, '');
+      ellipsisMenuState.repeatDraft.interval = Math.max(1, Number.parseInt(targetEl.value, 10) || 1);
+      return;
+    }
     // Notes are now handled by Quill editor — skip old contenteditable cleanup
     const labelEl = targetEl.closest('[data-modal-subtask-label]');
     if (!labelEl) return;
@@ -13834,7 +15394,70 @@ function attachTaskModalEvents() {
     }
     subtask.label = cleanText;
     subtask.deleteReady = false;
+    markTaskAsRepeatModified(loc.task);
     labelEl.classList.toggle('task-modal__subtask-text--filled', !!cleanText);
+  });
+
+  overlay.addEventListener('change', e => {
+    const targetEl = e.target instanceof Element ? e.target : e.target && e.target.parentElement;
+    if (!(targetEl instanceof Element) || !ellipsisMenuState) return;
+    const weeklyDaySelect = targetEl.closest('[data-repeat-weekly-day]');
+    if (weeklyDaySelect) {
+      const index = Number.parseInt(weeklyDaySelect.getAttribute('data-repeat-weekly-day'), 10);
+      ellipsisMenuState.repeatDraft.weeklyDays[index] = Number.parseInt(weeklyDaySelect.value, 10);
+      renderEllipsisMenuInModal();
+      return;
+    }
+    const monthlyOrdinal = targetEl.closest('[data-repeat-monthly-ordinal]');
+    if (monthlyOrdinal) {
+      const index = Number.parseInt(monthlyOrdinal.getAttribute('data-repeat-monthly-ordinal'), 10);
+      ellipsisMenuState.repeatDraft.monthlyRules[index].ordinal = monthlyOrdinal.value;
+      if (ellipsisMenuState.repeatDraft.monthlyRules[index].dayType !== 'day'
+        && !['1st', '2nd', '3rd', '4th', 'Last'].includes(monthlyOrdinal.value)) {
+        ellipsisMenuState.repeatDraft.monthlyRules[index].dayType = 'day';
+      }
+      renderEllipsisMenuInModal();
+      return;
+    }
+    const monthlyDayType = targetEl.closest('[data-repeat-monthly-day-type]');
+    if (monthlyDayType) {
+      const index = Number.parseInt(monthlyDayType.getAttribute('data-repeat-monthly-day-type'), 10);
+      const value = normalizeRepeatDayTypeValue(monthlyDayType.value);
+      ellipsisMenuState.repeatDraft.monthlyRules[index].dayType = value;
+      if (value !== 'day' && !['1st', '2nd', '3rd', '4th', 'Last'].includes(ellipsisMenuState.repeatDraft.monthlyRules[index].ordinal)) {
+        ellipsisMenuState.repeatDraft.monthlyRules[index].ordinal = 'Last';
+      }
+      renderEllipsisMenuInModal();
+      return;
+    }
+    const yearlyOrdinal = targetEl.closest('[data-repeat-yearly-ordinal]');
+    if (yearlyOrdinal) {
+      const index = Number.parseInt(yearlyOrdinal.getAttribute('data-repeat-yearly-ordinal'), 10);
+      ellipsisMenuState.repeatDraft.yearlyRules[index].ordinal = yearlyOrdinal.value;
+      if (ellipsisMenuState.repeatDraft.yearlyRules[index].dayType !== 'day'
+        && !['1st', '2nd', '3rd', '4th', 'Last'].includes(yearlyOrdinal.value)) {
+        ellipsisMenuState.repeatDraft.yearlyRules[index].dayType = 'day';
+      }
+      renderEllipsisMenuInModal();
+      return;
+    }
+    const yearlyDayType = targetEl.closest('[data-repeat-yearly-day-type]');
+    if (yearlyDayType) {
+      const index = Number.parseInt(yearlyDayType.getAttribute('data-repeat-yearly-day-type'), 10);
+      const value = normalizeRepeatDayTypeValue(yearlyDayType.value);
+      ellipsisMenuState.repeatDraft.yearlyRules[index].dayType = value;
+      if (value !== 'day' && !['1st', '2nd', '3rd', '4th', 'Last'].includes(ellipsisMenuState.repeatDraft.yearlyRules[index].ordinal)) {
+        ellipsisMenuState.repeatDraft.yearlyRules[index].ordinal = 'Last';
+      }
+      renderEllipsisMenuInModal();
+      return;
+    }
+    const yearlyMonth = targetEl.closest('[data-repeat-yearly-month]');
+    if (yearlyMonth) {
+      const index = Number.parseInt(yearlyMonth.getAttribute('data-repeat-yearly-month'), 10);
+      ellipsisMenuState.repeatDraft.yearlyRules[index].month = Number.parseInt(yearlyMonth.value, 10);
+      renderEllipsisMenuInModal();
+    }
   });
 
   overlay.addEventListener('focusout', e => {
@@ -14065,6 +15688,243 @@ function renderTopbarTodayPicker() {
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
+function getTaskFilterHashColor(option) {
+  if (!option) return '#787878';
+  if (option.id === 'all') return '#787878';
+  if (option.id === 'unassigned') return option.hashColor || '#90a4ae';
+  return option.hashColor || '#787878';
+}
+
+function getTaskFilterOptionById(filterId = getActiveTaskFilterId()) {
+  const normalized = normalizeTaskFilterId(filterId);
+  return getSearchChannelOptions().find(option => option.id === normalized) || getSearchChannelOptions()[0];
+}
+
+function getTopbarTaskFilterOptions(query = '') {
+  const options = getSearchChannelOptions();
+  if (!query) return options;
+  const normalized = String(query || '').trim().toLowerCase();
+  return options.filter(option => option.label.toLowerCase().includes(normalized));
+}
+
+function renderTopbarTaskFilterListHTML(options, selectedId = getActiveTaskFilterId()) {
+  const normalizedOptions = options.map(option => ({
+    ...option,
+    hashColor: getTaskFilterHashColor(option)
+  }));
+  return renderChannelOptionListHTML(normalizedOptions, {
+    selectedId,
+    highlightIndex: topbarFilterPickerState ? topbarFilterPickerState.highlightIndex : -1,
+    itemIdAttr: 'data-topbar-filter-id',
+    itemIndexAttr: 'data-topbar-filter-idx'
+  });
+}
+
+function renderTopbarTaskFilterDropdown() {
+  const selectedId = getActiveTaskFilterId();
+  const options = getTopbarTaskFilterOptions('');
+  return `<div class="channel-picker" data-topbar-filter-picker>`
+    + '<div class="channel-picker__arrow"></div>'
+    + '<div class="channel-picker__header">Filter tasks by channel:</div>'
+    + '<input class="channel-picker__search" placeholder="Search..." type="text">'
+    + `<div class="channel-picker__list">${renderTopbarTaskFilterListHTML(options, selectedId)}</div>`
+    + '<div class="channel-picker__divider"></div>'
+    + '<a class="channel-picker__manage" href="#">Manage channels</a>'
+    + '</div>';
+}
+
+function rerenderActiveFilteredView() {
+  if (dailyPlanningState.isActive) {
+    renderDailyPlanningMode();
+    renderCalendarEvents();
+    if (rightSidebarState.activePanel === 'backlog') renderBacklogPanel();
+    if (rightSidebarState.activePanel === 'archive') renderArchivePanel();
+    return true;
+  }
+  if (dailyShutdownState.isActive) {
+    renderDailyShutdownMode();
+    renderCalendarEvents();
+    if (rightSidebarState.activePanel === 'backlog') renderBacklogPanel();
+    if (rightSidebarState.activePanel === 'archive') renderArchivePanel();
+    return true;
+  }
+  if (todayViewState.isActive) {
+    renderTodayViewMode();
+    renderCalendarEvents();
+    if (rightSidebarState.activePanel === 'backlog') renderBacklogPanel();
+    if (rightSidebarState.activePanel === 'archive') renderArchivePanel();
+    return true;
+  }
+  renderAllColumns();
+  renderCalendarEvents();
+  if (rightSidebarState.activePanel === 'backlog') renderBacklogPanel();
+  if (rightSidebarState.activePanel === 'archive') renderArchivePanel();
+  updateTopbarFilterButton();
+  return true;
+}
+
+function setTaskFilterForScope(scopeKey, filterId) {
+  if (!scopeKey || !(scopeKey in topbarTaskFilterState)) return;
+  const normalized = normalizeTaskFilterId(filterId);
+  topbarTaskFilterState[scopeKey] = normalized;
+  if (scopeKey === 'homeToday') {
+    backlogPanelState.filterId = normalized;
+  }
+}
+
+function setActiveTaskFilter(filterId) {
+  setTaskFilterForScope(getTaskFilterScopeKey(), filterId);
+  rerenderActiveFilteredView();
+}
+
+function clearActiveTaskFilter() {
+  if (getActiveTaskFilterId() === 'all') return;
+  setActiveTaskFilter('all');
+}
+
+function updateTopbarFilterButton() {
+  const btn = document.querySelector('[data-view-filter]');
+  if (!btn) return;
+
+  const filterId = getActiveTaskFilterId();
+  const option = getTaskFilterOptionById(filterId);
+  const isActive = filterId !== 'all';
+  btn.classList.toggle('view-btn--filter-active', isActive);
+  btn.setAttribute('aria-expanded', String(!!topbarFilterPickerState));
+  btn.setAttribute('aria-label', isActive ? `Filter tasks: ${option ? option.label : 'filter active'}` : 'Filter tasks');
+
+  if (!isActive) {
+    btn.innerHTML = '<i data-lucide="list-filter" class="view-icon"></i><span class="view-btn__label">Filter</span>';
+  } else {
+    const hashColor = getTaskFilterHashColor(option);
+    btn.innerHTML = `<span class="view-btn__filter-hash" style="color:${escapeHtml(hashColor)};">#</span>`
+      + `<span class="view-btn__filter-label">${escapeHtml(option.label)}</span>`
+      + '<span class="view-btn__close" data-filter-close><i data-lucide="x"></i></span>';
+  }
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  if (topbarFilterPickerState && !document.querySelector('[data-topbar-filter-picker]')) {
+    renderTopbarFilterPicker();
+  }
+}
+
+function closeTopbarFilterPicker() {
+  topbarFilterPickerState = null;
+  const existing = document.querySelector('[data-topbar-filter-picker]');
+  if (existing) existing.remove();
+  updateTopbarFilterButton();
+}
+
+function updateTopbarTaskFilterHighlight(dropdown) {
+  if (!topbarFilterPickerState || !dropdown) return;
+  const items = dropdown.querySelectorAll('[data-topbar-filter-id]');
+  items.forEach((item, index) => {
+    item.classList.toggle('channel-picker__item--highlighted', index === topbarFilterPickerState.highlightIndex);
+  });
+  const highlighted = dropdown.querySelector('.channel-picker__item--highlighted');
+  if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+}
+
+function selectTopbarTaskFilter(filterId) {
+  closeTopbarFilterPicker();
+  setActiveTaskFilter(filterId || 'all');
+}
+
+function attachTopbarTaskFilterEvents(searchInput, dropdown) {
+  searchInput.addEventListener('input', () => {
+    if (!topbarFilterPickerState) return;
+    topbarFilterPickerState.highlightIndex = 0;
+    const list = dropdown.querySelector('.channel-picker__list');
+    if (!list) return;
+    list.innerHTML = renderTopbarTaskFilterListHTML(
+      getTopbarTaskFilterOptions(searchInput.value),
+      getActiveTaskFilterId()
+    );
+  });
+
+  searchInput.addEventListener('keydown', e => {
+    if (!topbarFilterPickerState) return;
+    const options = getTopbarTaskFilterOptions(searchInput.value);
+    if (options.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      topbarFilterPickerState.highlightIndex = Math.min(topbarFilterPickerState.highlightIndex + 1, options.length - 1);
+      updateTopbarTaskFilterHighlight(dropdown);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      topbarFilterPickerState.highlightIndex = Math.max(topbarFilterPickerState.highlightIndex - 1, 0);
+      updateTopbarTaskFilterHighlight(dropdown);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const option = options[topbarFilterPickerState.highlightIndex];
+      if (option) selectTopbarTaskFilter(option.id);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeTopbarFilterPicker();
+    }
+  });
+}
+
+function renderTopbarFilterPicker() {
+  if (!topbarFilterPickerState) return;
+  const filterBtn = document.querySelector('[data-view-filter]');
+  if (!filterBtn) return;
+
+  const existing = document.querySelector('[data-topbar-filter-picker]');
+  if (existing) existing.remove();
+
+  const wrapper = document.createElement('div');
+  wrapper.innerHTML = renderTopbarTaskFilterDropdown();
+  const dropdown = wrapper.firstElementChild;
+  const ddWidth = 220;
+  dropdown.style.position = 'fixed';
+  dropdown.style.zIndex = '7000';
+  dropdown.style.width = ddWidth + 'px';
+  document.body.appendChild(dropdown);
+
+  requestAnimationFrame(() => {
+    const btnRect = filterBtn.getBoundingClientRect();
+    const left = btnRect.left;
+    const clampedLeft = Math.max(12, Math.min(left, window.innerWidth - ddWidth - 12));
+    dropdown.style.left = clampedLeft + 'px';
+    dropdown.style.top = (btnRect.bottom + 12) + 'px';
+
+    const arrow = dropdown.querySelector('.channel-picker__arrow');
+    if (arrow) {
+      const ddRect = dropdown.getBoundingClientRect();
+      const arrowLeft = btnRect.left + btnRect.width / 2 - ddRect.left - 6;
+      arrow.style.left = Math.max(8, arrowLeft) + 'px';
+    }
+  });
+
+  const searchInput = dropdown.querySelector('.channel-picker__search');
+  if (searchInput) {
+    requestAnimationFrame(() => searchInput.focus());
+    attachTopbarTaskFilterEvents(searchInput, dropdown);
+  }
+}
+
+function openTopbarFilterPicker() {
+  const filterId = getActiveTaskFilterId();
+  const options = getTopbarTaskFilterOptions('');
+  const selectedIndex = Math.max(0, options.findIndex(option => option.id === filterId));
+  topbarFilterPickerState = {
+    filterId,
+    highlightIndex: selectedIndex
+  };
+  closeTopbarTodayPicker();
+  updateTopbarFilterButton();
+}
+
+function toggleTopbarFilterPicker() {
+  if (topbarFilterPickerState) {
+    closeTopbarFilterPicker();
+  } else {
+    openTopbarFilterPicker();
+  }
+}
+
 function getFirstVisibleDate() {
   if (dailyShutdownState.isActive && dailyShutdownState.selectedDate) {
     return dailyShutdownState.selectedDate;
@@ -14089,7 +15949,10 @@ function getFirstVisibleDate() {
 
 function updateTodayButtonLabel(overrideDate) {
   const btn = document.querySelector('[data-view="today"]');
-  if (!btn) return;
+  if (!btn) {
+    updateTopbarFilterButton();
+    return;
+  }
   const firstDate = overrideDate || getFirstVisibleDate();
   ensureDateDataLoaded(firstDate);
   const todayISO = getTodayISO();
@@ -14140,6 +16003,7 @@ function updateTodayButtonLabel(overrideDate) {
   }
 
   updateCurrentTimeLine();
+  updateTopbarFilterButton();
 }
 
 function updateCalendarDayHeader(isoDate) {
@@ -14273,6 +16137,7 @@ function handleTopbarTodayAction(action, data) {
 
 function attachBoardTopbarEvents() {
   const todayBtn = document.querySelector('[data-view="today"]');
+  const filterBtn = document.querySelector('[data-view-filter]');
   const closeBtn = document.querySelector('[data-today-view-close]');
   if (!todayBtn) return;
 
@@ -14297,9 +16162,26 @@ function attachBoardTopbarEvents() {
     if (topbarTodayPickerState) {
       closeTopbarTodayPicker();
     } else {
+      closeTopbarFilterPicker();
       openTopbarTodayPicker();
     }
   });
+
+  if (filterBtn) {
+    filterBtn.addEventListener('click', e => {
+      if (e.target.closest('[data-topbar-filter-picker]')) return;
+      if (e.target.closest('[data-filter-close]')) {
+        e.preventDefault();
+        e.stopPropagation();
+        closeTopbarFilterPicker();
+        clearActiveTaskFilter();
+        return;
+      }
+      e.preventDefault();
+      closeTopbarTodayPicker();
+      toggleTopbarFilterPicker();
+    });
+  }
 
   if (closeBtn) {
     closeBtn.addEventListener('click', e => {
@@ -14735,6 +16617,7 @@ function attachDailyPlanningEscapeEvents() {
     if (overlay && !overlay.hidden) return;
     if (document.getElementById('focus-modal')) return;
     if (topbarTodayPickerState) return;
+    if (topbarFilterPickerState) return;
     if (cardDatePickerState) return;
     if (channelPickerState) return;
     if (cardPickerState) return;
@@ -14760,6 +16643,7 @@ function attachDailyShutdownEscapeEvents() {
     if (overlay && !overlay.hidden) return;
     if (document.getElementById('focus-modal')) return;
     if (topbarTodayPickerState) return;
+    if (topbarFilterPickerState) return;
     if (cardDatePickerState) return;
     if (channelPickerState) return;
     if (cardPickerState) return;
@@ -14785,6 +16669,7 @@ function attachTodayViewEscapeEvents() {
     if (overlay && !overlay.hidden) return;
     if (document.getElementById('focus-modal')) return;
     if (topbarTodayPickerState) return;
+    if (topbarFilterPickerState) return;
     if (cardDatePickerState) return;
     if (channelPickerState) return;
     if (cardPickerState) return;
@@ -15239,6 +17124,38 @@ document.addEventListener('click', e => {
   closeTopbarTodayPicker();
 });
 
+document.addEventListener('click', e => {
+  if (!topbarFilterPickerState) return;
+  if (!(e.target instanceof Element)) {
+    closeTopbarFilterPicker();
+    return;
+  }
+
+  const picker = e.target.closest('[data-topbar-filter-picker]');
+  if (picker) {
+    e.stopImmediatePropagation();
+    const item = e.target.closest('[data-topbar-filter-id]');
+    if (item) {
+      selectTopbarTaskFilter(item.dataset.topbarFilterId || 'all');
+      return;
+    }
+    if (e.target.closest('.channel-picker__manage')) {
+      e.preventDefault();
+      closeTopbarFilterPicker();
+      openSettingsView();
+      setTimeout(() => {
+        const section = document.getElementById('settings-section-channels');
+        if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        setSettingsActiveNav('channels');
+      }, 50);
+    }
+    return;
+  }
+
+  if (e.target.closest('[data-view-filter]')) return;
+  closeTopbarFilterPicker();
+});
+
 // Daily planning shutdown time dropdown: close on outside click
 document.addEventListener('click', e => {
   if (!dailyPlanningState.isActive) return;
@@ -15252,6 +17169,13 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && topbarTodayPickerState) {
     e.preventDefault();
     closeTopbarTodayPicker();
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && topbarFilterPickerState) {
+    e.preventDefault();
+    closeTopbarFilterPicker();
   }
 });
 
@@ -16689,7 +18613,11 @@ function taskToDoc(task, columnDate, orderIndex) {
     backlogHorizon: task.backlogHorizon || null,
     backlogOrder: task.backlogOrder || 0,
     archivedAt: task.archivedAt || null,
-    archiveSourceDate: task.archiveSourceDate || null
+    archiveSourceDate: task.archiveSourceDate || null,
+    repeatSeriesId: task.repeatSeriesId || null,
+    repeatOccurrenceDate: task.repeatOccurrenceDate || null,
+    repeatModified: !!task.repeatModified,
+    isRepeatingTask: !!task.isRepeatingTask
   };
   return doc;
 }
@@ -16724,7 +18652,11 @@ function docToTask(doc) {
     backlogHorizon: doc.backlogHorizon || null,
     backlogOrder: doc.backlogOrder || 0,
     archivedAt: doc.archivedAt || null,
-    archiveSourceDate: doc.archiveSourceDate || null
+    archiveSourceDate: doc.archiveSourceDate || null,
+    repeatSeriesId: doc.repeatSeriesId || null,
+    repeatOccurrenceDate: doc.repeatOccurrenceDate || null,
+    repeatModified: !!doc.repeatModified,
+    isRepeatingTask: !!doc.isRepeatingTask
   };
 }
 
@@ -16736,6 +18668,7 @@ function persistTask(task, debounceMs) {
   if (debounceMs <= 0) {
     clearTimeout(_taskWriteTimers[taskId]);
     delete _taskWriteTimers[taskId];
+    if (isDerivedRepeatTask(task)) materializeDerivedTask(task);
     const ctx = getTaskContext(task);
     if (!ctx) return;
     DB.saveTask(_currentUserId, taskToDoc(task, ctx.columnDate, ctx.orderIndex)).catch(err =>
@@ -16747,6 +18680,7 @@ function persistTask(task, debounceMs) {
   clearTimeout(_taskWriteTimers[taskId]);
   _taskWriteTimers[taskId] = setTimeout(() => {
     delete _taskWriteTimers[taskId];
+    if (isDerivedRepeatTask(task)) materializeDerivedTask(task);
     const ctx = getTaskContext(task);
     if (!ctx) return;
     DB.saveTask(_currentUserId, taskToDoc(task, ctx.columnDate, ctx.orderIndex)).catch(err =>
@@ -16772,7 +18706,8 @@ function persistTrashEntry(entry) {
   DB.addToTrash(_currentUserId, {
     id: entry.id || entry.taskId || entry.task.id,
     task: entry.task,
-    deletedFrom: entry.deletedFrom || {}
+    deletedFrom: entry.deletedFrom || {},
+    repeatSkipFingerprint: entry.repeatSkipFingerprint || null
   }).catch(err => console.error('Failed to add to trash:', err));
 }
 
@@ -16824,6 +18759,7 @@ function populateColumnsFromTasks(tasks) {
       col.tasks = docs.map(docToTask);
     }
   }
+  reconcileVisibleRepeatTasks();
 }
 
 /* ═══════════════════════════════════════════════
@@ -16950,6 +18886,13 @@ async function onAuthReady(userId) {
     console.error('Failed to load archive:', err);
   }
 
+  try {
+    const repeatSeriesDocs = await DB.loadRepeatSeries(userId);
+    state.repeatSeries = repeatSeriesDocs.map(normalizeRepeatSeries);
+  } catch (err) {
+    console.error('Failed to load repeat series:', err);
+  }
+
   // Load calendar events for today
   try {
     const todayISO = getTodayISO();
@@ -16984,6 +18927,7 @@ async function onAuthReady(userId) {
 
   // Re-render with loaded data
   initializeTaskTimeState();
+  reconcileVisibleRepeatTasks();
   performRollover();
   renderAllColumns();
   renderCalendarEvents();
@@ -17009,9 +18953,12 @@ function onAuthClear() {
   state.columns = [];
   state.backlog = [];
   state.archive = [];
+  state.repeatSeries = [];
   state.calendarEvents = [];
   state.trash = [];
   state.dayWindow = { startISO: null, endISO: null };
+  clearRepeatRuntimeState();
+  repeatRuntimeState.pinnedOccurrenceKeys.clear();
   searchPanelState.query = '';
   closeSearchDropdown();
   todayViewState.isActive = false;

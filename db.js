@@ -146,6 +146,28 @@ const DB = {
       .collection('rituals').doc('rituals').set(ritualsObj);
   },
 
+  /* ─── Repeat Series ─── */
+
+  async loadRepeatSeries(userId) {
+    const snap = await db.collection('users').doc(userId)
+      .collection('repeatSeries')
+      .get();
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  },
+
+  async saveRepeatSeries(userId, seriesDoc) {
+    const ref = db.collection('users').doc(userId)
+      .collection('repeatSeries').doc(seriesDoc.id);
+    const doc = { ...seriesDoc, updatedAt: firebase.firestore.FieldValue.serverTimestamp() };
+    delete doc.id;
+    await ref.set(doc, { merge: true });
+  },
+
+  async deleteRepeatSeries(userId, seriesId) {
+    await db.collection('users').doc(userId)
+      .collection('repeatSeries').doc(seriesId).delete();
+  },
+
   /* ─── Backlog ─── */
 
   async loadBacklog(userId) {

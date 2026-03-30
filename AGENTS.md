@@ -25,7 +25,12 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
 - Script order matters. Keep `firebase-config.js`, `auth.js`, and `db.js` loaded before `app.js`.
 - Stay compatible with the current global-script style. Do not introduce ESM imports, bundler-only syntax, or a Node-based runtime assumption unless the user explicitly asks for a larger refactor.
 - The app state is primarily stored in module-level objects such as `state`, `settings`, `dailyPlanningState`, `dailyShutdownState`, `todayViewState`, and several drag/overlay state objects.
+- View-level task filtering is transient UI state, not persisted settings. The shared Home/Today filter also drives Backlog, Archive, and task-linked calendar events; Daily Planning and Daily Shutdown each have their own temporary filter state and both reset their own filter plus the shared Home/Today filter when entering the ritual.
 - Task persistence depends on `taskToDoc`, `docToTask`, `getTaskContext`, and `persistTask`. If task fields change, update both serialization and deserialization paths.
+- Repeating tasks use two layers:
+  - persisted `repeatSeries` records in `state.repeatSeries`
+  - derived visible occurrences in `repeatRuntimeState`
+- Untouched repeating occurrences are often rendered from series rules without creating Firestore task docs. Be careful not to accidentally materialize or persist derived occurrences unless the interaction truly needs a durable task instance.
 - Special task locations use sentinel `columnDate` values:
   - `__backlog__`
   - `__archive__`
@@ -47,6 +52,12 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
   - `docToTask()`
   - any renderers or modal editors that expose the field
   - any archive/backlog/trash flows that copy task objects
+- When changing repeating-task behavior, verify all of these areas stay aligned:
+  - `normalizeRepeatSeries()`
+  - `reconcileVisibleRepeatTasks()`
+  - repeat navigation helpers such as `getRepeatNavigationDate()`
+  - `renderRepeatBannerHtml()`
+  - trash restore / expiration flows
 - When changing channels or settings behavior, verify `rebuildChannelColors()`, `settings.channelEnabled`, settings rendering, and saved-settings hydration still agree.
 
 ## Frontend Expectations
@@ -65,6 +76,7 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
   - `tasks`
   - `calendarEvents`
   - `trash`
+  - `repeatSeries`
   - `rituals/rituals`
 - Prefer backward-compatible schema changes. If a new field is optional, default it safely in `docToTask()` or the relevant loader.
 
@@ -77,7 +89,13 @@ Recommended smoke checks:
 - Log in and confirm the app shell replaces the login screen.
 - Create, edit, and reorder a task, then confirm it persists after refresh.
 - Move a task between a day column, backlog, archive, and trash if your change touches task location logic.
+- Create or edit a repeating task and confirm:
+  - the repeat rule persists after refresh
+  - visible future occurrences derive correctly without creating extra task docs
+  - past missed untouched occurrences do not linger when a current/future occurrence already exists
+  - series nav, stop/extend, and trash/restore behavior still make sense
 - Check calendar rendering and event interactions if your change touches scheduling or timeboxing.
+- Check topbar filtering if your change touches channels, board rendering, backlog/archive panels, or the calendar timeline. Home/Today/Backlog/Archive should stay aligned; Search and Trash should not be affected by the active topbar filter.
 - Open Settings and verify updated values persist if your change touches settings or channels.
 - Confirm icons and Quill editors still initialize after any markup or script-order changes.
 
@@ -91,6 +109,11 @@ Recommended smoke checks:
 
 - Expect local uncommitted changes from the user, especially in `app.js`. Read before editing and avoid reverting unrelated work.
 - If you cannot fully verify a change because it requires Firebase credentials or browser interaction, say exactly what you were able to validate and what remains manual.
+- Repeating tasks are series-driven. `repeatSeries` docs can include cadence config, `untilDate`, and `skippedOccurrences`. A deleted repeating occurrence should not stop the whole series; trashed occurrences stay navigable until permanently deleted, and permanent trash expiry turns that date into a skipped gap for the current rule fingerprint.
+- Repeat-series visibility is coupled to Trash. `purgeExpiredTrash()` now affects repeat navigation/rendering, so changes to trash lifecycle can have repeat-series side effects even if the task cards themselves are derived.
 - The right-sidebar search panel now has its own UI state in `searchPanelState`, but its persistent controls live in `settings.searchFilters`, `settings.searchDateRange`, and `settings.searchChannelFilterId`. If you change search behavior, keep `normalizeSearchSettings()`, `persistSettings()`, and the right-panel render path in sync.
+- Search can hide repeating tasks via `settings.searchFilters.hideRepeatingTasks`. Keep that filter aligned with both persisted repeat instances and derived visible repeat occurrences.
 - The search results intentionally use a dedicated renderer instead of `renderTaskCard()`. Search cards are clickable but non-draggable, exclude trash, and combine column tasks, backlog, and archive in one list.
 - The search panel channel dropdown is intentionally grouped like the regular channel picker: contexts first, enabled child channels nested under them, uncategorized enabled channels next, and `Unassigned` last. Keep it aligned with `CHANNELS` plus `settings.channelEnabled` behavior.
+- The topbar filter picker intentionally mirrors the regular channel picker styling and grouping, but with `#all` first and `#Unassigned` last. Keep its item rendering and typography aligned with the regular channel picker instead of introducing a separate visual treatment.
+- The shared Home/Today filter is coupled to Backlog and Archive panel filtering and to task-linked calendar timeline filtering. Search and Trash intentionally ignore the active topbar filter.
