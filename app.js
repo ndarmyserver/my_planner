@@ -5,8 +5,12 @@ let taskModalQuill = null;
 let focusModalQuill = null;
 let dpShareQuill = null;
 let dsShareQuill = null;
-let rolloverTooltipEl = null;
-let activeRolloverTooltipTarget = null;
+let floatingTooltipEl = null;
+let activeFloatingTooltipTarget = null;
+let activeFloatingTooltipConfig = null;
+let floatingTooltipShowTimer = null;
+
+const FLOATING_TOOLTIP_DELAY_MS = 1000;
 
 const QUILL_EDITOR_CONFIG = {
   theme: 'snow',
@@ -457,6 +461,10 @@ const repeatRuntimeState = {
   tasksById: new Map(),
   tasksByDate: new Map(),
   pinnedOccurrenceKeys: new Set()
+};
+
+const columnTimeBadgeState = {
+  modeByDate: {}
 };
 
 const DAILY_PLANNING_STEPS = {
@@ -1381,14 +1389,44 @@ function formatActualMinutesForShare(seconds) {
   return formatMinutes(Math.floor(seconds / 60));
 }
 
-function formatColumnTimeSummary(column) {
+function getColumnTimeBadgeMode(isoDate) {
+  return columnTimeBadgeState.modeByDate[isoDate] || 'remaining';
+}
+
+function toggleColumnTimeBadgeMode(isoDate) {
+  if (!isoDate) return;
+  columnTimeBadgeState.modeByDate[isoDate] = getColumnTimeBadgeMode(isoDate) === 'actual-planned'
+    ? 'remaining'
+    : 'actual-planned';
+}
+
+function formatActualPlannedSummary(actualMinutes, plannedMinutes) {
+  if (actualMinutes > 0 && plannedMinutes > 0) {
+    return `${formatMinutes(actualMinutes)} / ${formatMinutes(plannedMinutes)}`;
+  }
+  if (actualMinutes > 0) {
+    return `${formatMinutes(actualMinutes)} / --:--`;
+  }
+  if (plannedMinutes > 0) {
+    return `--:-- / ${formatMinutes(plannedMinutes)}`;
+  }
+  return '';
+}
+
+function getColumnTimeSummaryMetrics(column) {
   const filterId = getActiveTaskFilterId();
   const visibleTasks = filterTasksByChannel(getColumnVisibleTasks(column), filterId);
   const todayISO = getTodayISO();
   const isPastCol = column.isoDate < todayISO;
+  const isTodayCol = column.isoDate === todayISO;
   let plannedMinutes = visibleTasks.reduce((sum, task) => {
     ensureTaskTimeState(task);
-    return sum + (isPastCol ? getPlannedMinutesForDate(task, column.isoDate) : (task.timeEstimateMinutes || 0));
+    return sum + getPlannedMinutesForDate(task, column.isoDate);
+  }, 0);
+  let remainingPlannedMinutes = visibleTasks.reduce((sum, task) => {
+    ensureTaskTimeState(task);
+    if (isTodayCol && (task.complete || task.completedOnDate === column.isoDate)) return sum;
+    return sum + getPlannedMinutesForDate(task, column.isoDate);
   }, 0);
   // Use daily actual time for the column's date
   const actualSeconds = visibleTasks.reduce((sum, task) => {
@@ -1403,19 +1441,95 @@ function formatColumnTimeSummary(column) {
       ensureTaskTimeState(task);
       return sum + getPlannedMinutesForDate(task, column.isoDate);
     }, 0);
+    remainingPlannedMinutes += ghosts.reduce((sum, task) => {
+      ensureTaskTimeState(task);
+      return sum + getPlannedMinutesForDate(task, column.isoDate);
+    }, 0);
   }
   const actualMinutes = Math.floor((actualSeconds + ghostActualSeconds) / 60);
 
-  if (isPastCol) {
-    if (actualMinutes > 0 && plannedMinutes > 0) {
-      return `${formatMinutes(actualMinutes)} / ${formatMinutes(plannedMinutes)}`;
-    }
-    if (actualMinutes > 0) {
-      return `${formatMinutes(actualMinutes)} / --:--`;
-    }
+  return {
+    isPastCol,
+    isTodayCol,
+    plannedMinutes,
+    remainingPlannedMinutes,
+    actualMinutes
+  };
+}
+
+function formatColumnTimeSummary(column, options = {}) {
+  const metrics = getColumnTimeSummaryMetrics(column);
+
+  if (metrics.isPastCol) {
+    return formatActualPlannedSummary(metrics.actualMinutes, metrics.plannedMinutes);
   }
 
-  return plannedMinutes > 0 ? formatMinutes(plannedMinutes) : '';
+  if (options.mode === 'actual-planned') {
+    return formatActualPlannedSummary(metrics.actualMinutes, metrics.plannedMinutes);
+  }
+
+  if (options.mode === 'remaining') {
+    return metrics.remainingPlannedMinutes > 0 ? formatMinutes(metrics.remainingPlannedMinutes) : '';
+  }
+
+  return metrics.plannedMinutes > 0 ? formatMinutes(metrics.plannedMinutes) : '';
+}
+
+function getColumnTimeBadgeConfig(column) {
+  const todayISO = getTodayISO();
+  const isTodayCol = column.isoDate === todayISO;
+  if (!isTodayCol) {
+    return {
+      text: formatColumnTimeSummary(column),
+      tooltip: '',
+      interactive: false
+    };
+  }
+
+  const mode = getColumnTimeBadgeMode(column.isoDate);
+  if (mode === 'actual-planned') {
+    return {
+      text: formatColumnTimeSummary(column, { mode: 'actual-planned' }),
+      tooltip: 'Actual vs Planned',
+      interactive: true
+    };
+  }
+
+  return {
+    text: formatColumnTimeSummary(column, { mode: 'remaining' }),
+    tooltip: 'Total: time remaining',
+    interactive: true
+  };
+}
+
+function renderColumnTimeBadgeHtml(column) {
+  const badge = getColumnTimeBadgeConfig(column);
+  const attrs = [];
+  if (badge.tooltip) attrs.push(`data-tooltip="${escapeHtml(badge.tooltip)}"`);
+  if (badge.interactive) {
+    attrs.push('data-column-time-total-toggle');
+    attrs.push('role="button"');
+    attrs.push('tabindex="0"');
+  }
+  const attrText = attrs.length ? ` ${attrs.join(' ')}` : '';
+  const className = `column-time-total task-card__time-badge${badge.interactive ? ' column-time-total--interactive' : ''}`;
+  return `<span class="${className}"${badge.text ? '' : ' hidden'}${attrText}>${escapeHtml(badge.text || '')}</span>`;
+}
+
+function renderAddTaskButtonHtml(options = {}) {
+  const showShortcut = options.showShortcut === true;
+  return `
+    <button class="add-task-btn">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+      <span class="add-task-btn__content">
+        <span class="add-task-btn__label">Add task</span>
+        <span class="add-task-btn__meta${showShortcut ? '' : ' add-task-btn__meta--hidden'}" aria-hidden="true">
+          <span class="add-task-btn__separator">&middot;</span>
+          <span class="add-task-btn__shortcut">A</span>
+        </span>
+      </span>
+    </button>
+  `;
 }
 
 function hasActualTime(actualSeconds) {
@@ -2281,6 +2395,14 @@ function withActiveTask(handler) {
   return handler(loc) !== false;
 }
 
+function getHoveredModalSubtaskId() {
+  if (!openModalTaskId) return null;
+  const overlay = document.getElementById('task-modal-overlay');
+  if (!overlay || overlay.hidden) return null;
+  const hoveredRow = overlay.querySelector('[data-modal-subtask-row]:hover');
+  return hoveredRow ? (hoveredRow.getAttribute('data-modal-subtask-id') || null) : null;
+}
+
 function showAddTaskInputForShortcut() {
   if (openModalTaskId) return false;
   const activeCard = resolveVisibleTaskCard(shortcutState.activeTaskId);
@@ -2348,11 +2470,12 @@ function expandCardTimerForShortcut(taskId) {
 function openPlannedPickerForShortcut(taskId) {
   if (!taskId) return false;
   if (openModalTaskId === taskId) {
+    const subtaskId = getHoveredModalSubtaskId();
     closeStartDatePicker();
     closeDueDatePicker();
     closeActualPicker();
     closeEllipsisMenu();
-    openPlannedPicker();
+    openPlannedPicker(subtaskId);
     return true;
   }
   const result = expandCardTimerForShortcut(taskId);
@@ -2368,12 +2491,19 @@ function openPlannedPickerForShortcut(taskId) {
 
 function openActualPickerForShortcut(taskId) {
   if (openModalTaskId === taskId) {
-    if (focusState.running && focusState.taskId === taskId) return false;
+    const subtaskId = getHoveredModalSubtaskId();
+    if (focusState.running && focusState.taskId === taskId) {
+      if (subtaskId) {
+        if (focusState.subtaskId === subtaskId) return false;
+      } else {
+        return false;
+      }
+    }
     closeStartDatePicker();
     closeDueDatePicker();
     closePlannedPicker();
     closeEllipsisMenu();
-    openActualPicker();
+    openActualPicker(subtaskId);
     return true;
   }
   const result = expandCardTimerForShortcut(taskId);
@@ -2430,6 +2560,21 @@ function openFocusModeForShortcut() {
 
 function toggleFocusTimerForShortcut(taskId) {
   if (!taskId) return false;
+  if (openModalTaskId === taskId) {
+    const subtaskId = getHoveredModalSubtaskId();
+    if (subtaskId) {
+      const isSameRunning = focusState.running
+        && focusState.taskId === taskId
+        && focusState.subtaskId === subtaskId;
+      if (isSameRunning) {
+        stopFocusTimer();
+        return true;
+      }
+      if (focusState.running) stopFocusTimer();
+      openFocusMode(taskId, true, getFocusShortcutSource(taskId), subtaskId);
+      return true;
+    }
+  }
   if (focusState.running && focusState.taskId === taskId) {
     stopFocusTimer();
     return true;
@@ -3229,12 +3374,14 @@ function handleGlobalShortcutKeydown(e) {
     && !!target.closest('input, textarea, select, [contenteditable="true"], .ql-editor');
 
   if (handleOpenPickerArrowNavigation(e)) {
+    hideFloatingTooltip();
     e.preventDefault();
     e.stopImmediatePropagation();
     return;
   }
 
   if (handleOpenPickerEnterActivation(e)) {
+    hideFloatingTooltip();
     e.preventDefault();
     e.stopImmediatePropagation();
     return;
@@ -3271,6 +3418,7 @@ function handleGlobalShortcutKeydown(e) {
       if (!row.bindings.some(binding => matchesShortcutBinding(e, binding))) continue;
       const handled = row.handler(e);
       if (handled) {
+        hideFloatingTooltip();
         if (topbarTodayPickerState) {
           closeTopbarTodayPicker();
         }
@@ -5290,57 +5438,177 @@ function attachDailyShutdownDonutEvents(panelEl) {
   });
 }
 
-function ensureRolloverTooltip() {
-  if (rolloverTooltipEl && rolloverTooltipEl.isConnected) return rolloverTooltipEl;
-  rolloverTooltipEl = document.createElement('div');
-  rolloverTooltipEl.className = 'app-tooltip app-tooltip--floating';
-  rolloverTooltipEl.hidden = true;
-  document.body.appendChild(rolloverTooltipEl);
-  return rolloverTooltipEl;
+function ensureFloatingTooltip() {
+  if (floatingTooltipEl && floatingTooltipEl.isConnected) return floatingTooltipEl;
+  floatingTooltipEl = document.createElement('div');
+  floatingTooltipEl.className = 'app-tooltip app-tooltip--floating';
+  floatingTooltipEl.hidden = true;
+  document.body.appendChild(floatingTooltipEl);
+  return floatingTooltipEl;
 }
 
-function hideRolloverTooltip() {
-  activeRolloverTooltipTarget = null;
-  if (!rolloverTooltipEl) return;
-  rolloverTooltipEl.hidden = true;
-  rolloverTooltipEl.textContent = '';
+function clearFloatingTooltipTimer() {
+  if (!floatingTooltipShowTimer) return;
+  clearTimeout(floatingTooltipShowTimer);
+  floatingTooltipShowTimer = null;
 }
 
-function positionRolloverTooltip(target) {
-  const tooltip = ensureRolloverTooltip();
-  if (!target || !target.isConnected || tooltip.hidden) {
-    hideRolloverTooltip();
+function hideFloatingTooltip() {
+  clearFloatingTooltipTimer();
+  activeFloatingTooltipTarget = null;
+  activeFloatingTooltipConfig = null;
+  if (!floatingTooltipEl) return;
+  floatingTooltipEl.hidden = true;
+  floatingTooltipEl.innerHTML = '';
+}
+
+function renderFloatingTooltipShortcutHtml(label, shortcutId, shortcutGroupsOverride = null) {
+  const safeLabel = escapeHtml(label || '');
+  const row = shortcutId ? findShortcutRow(shortcutId) : null;
+  const shortcutGroups = Array.isArray(shortcutGroupsOverride)
+    ? shortcutGroupsOverride
+    : (row ? shortcutLabelsForPlatform(row) : []);
+  const shortcutHtml = shortcutGroups.length
+    ? renderShortcutKeyGroups(shortcutGroups)
+    : '';
+
+  if (!shortcutHtml) {
+    return `<span class="app-tooltip__label">${safeLabel}</span>`;
+  }
+
+  return `
+    <span class="app-tooltip__label">${safeLabel}</span>
+    <span class="app-tooltip__separator" aria-hidden="true">&middot;</span>
+    <span class="app-tooltip__keys">${shortcutHtml}</span>
+  `;
+}
+
+function resolveFloatingTooltipConfig(target) {
+  if (!target) return null;
+
+  const rolloverLabel = target.getAttribute('data-rollover-tooltip');
+  if (rolloverLabel) {
+    return {
+      text: rolloverLabel,
+      placement: 'bottom',
+      anchorSelector: '.rollover-icon',
+      offset: 10
+    };
+  }
+
+  const richLabel = target.getAttribute('data-rich-tooltip-label');
+  if (richLabel) {
+    let shortcutGroupsOverride = null;
+    const shortcutGroupsAttr = target.getAttribute('data-rich-tooltip-shortcut-groups');
+    if (shortcutGroupsAttr) {
+      try {
+        const parsed = JSON.parse(shortcutGroupsAttr);
+        if (Array.isArray(parsed)) shortcutGroupsOverride = parsed;
+      } catch (err) {
+        shortcutGroupsOverride = null;
+      }
+    }
+    return {
+      html: renderFloatingTooltipShortcutHtml(
+        richLabel,
+        target.getAttribute('data-rich-tooltip-shortcut-id') || '',
+        shortcutGroupsOverride
+      ),
+      placement: target.getAttribute('data-rich-tooltip-placement') || 'top',
+      anchorSelector: target.getAttribute('data-rich-tooltip-anchor') || '',
+      offset: Number(target.getAttribute('data-rich-tooltip-offset')) || 10
+    };
+  }
+
+  return null;
+}
+
+function getFloatingTooltipTrigger(target) {
+  return target instanceof Element
+    ? target.closest('[data-rollover-tooltip], [data-rich-tooltip-label]')
+    : null;
+}
+
+function positionFloatingTooltip(target, config = activeFloatingTooltipConfig) {
+  const tooltip = ensureFloatingTooltip();
+  if (!target || !target.isConnected || tooltip.hidden || !config) {
+    hideFloatingTooltip();
     return;
   }
 
-  const anchor = target.querySelector('.rollover-icon') || target;
+  const anchor = config.anchorSelector
+    ? (target.querySelector(config.anchorSelector) || target)
+    : target;
   const rect = anchor.getBoundingClientRect();
-  const spacing = 10;
+  const spacing = typeof config.offset === 'number' ? config.offset : 10;
   const viewportPadding = 8;
   const tooltipWidth = tooltip.offsetWidth;
   const tooltipHeight = tooltip.offsetHeight;
+  const placement = config.placement || 'top';
+
+  if (placement === 'left' || placement === 'right') {
+    const left = placement === 'left'
+      ? Math.max(viewportPadding, rect.left - spacing - tooltipWidth)
+      : Math.min(rect.right + spacing, window.innerWidth - viewportPadding - tooltipWidth);
+    const desiredTop = rect.top + (rect.height / 2) - (tooltipHeight / 2);
+    const top = Math.min(
+      Math.max(viewportPadding, desiredTop),
+      window.innerHeight - viewportPadding - tooltipHeight
+    );
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    tooltip.style.transform = 'none';
+    return;
+  }
+
   const desiredCenterX = rect.left + (rect.width / 2);
   const minCenterX = viewportPadding + (tooltipWidth / 2);
   const maxCenterX = window.innerWidth - viewportPadding - (tooltipWidth / 2);
   const centerX = Math.min(Math.max(desiredCenterX, minCenterX), maxCenterX);
-  const top = Math.min(rect.bottom + spacing, window.innerHeight - viewportPadding - tooltipHeight);
+  const desiredTop = placement === 'bottom'
+    ? rect.bottom + spacing
+    : rect.top - spacing - tooltipHeight;
+  const top = placement === 'bottom'
+    ? Math.min(desiredTop, window.innerHeight - viewportPadding - tooltipHeight)
+    : Math.max(viewportPadding, desiredTop);
 
   tooltip.style.left = `${centerX}px`;
   tooltip.style.top = `${top}px`;
+  tooltip.style.transform = 'translateX(-50%)';
 }
 
-function showRolloverTooltip(target) {
-  const label = target ? target.getAttribute('data-rollover-tooltip') : '';
-  if (!target || !label) {
-    hideRolloverTooltip();
+function showFloatingTooltip(target) {
+  const config = resolveFloatingTooltipConfig(target);
+  if (!target || !config) {
+    hideFloatingTooltip();
     return;
   }
 
-  const tooltip = ensureRolloverTooltip();
-  activeRolloverTooltipTarget = target;
-  tooltip.textContent = label;
+  const tooltip = ensureFloatingTooltip();
+  activeFloatingTooltipTarget = target;
+  activeFloatingTooltipConfig = config;
+  if (config.html) {
+    tooltip.innerHTML = config.html;
+  } else {
+    tooltip.textContent = config.text || '';
+  }
   tooltip.hidden = false;
-  positionRolloverTooltip(target);
+  positionFloatingTooltip(target, config);
+}
+
+function scheduleFloatingTooltip(target) {
+  const config = resolveFloatingTooltipConfig(target);
+  if (!target || !config) {
+    hideFloatingTooltip();
+    return;
+  }
+  if (activeFloatingTooltipTarget === target && !floatingTooltipShowTimer) return;
+
+  clearFloatingTooltipTimer();
+  floatingTooltipShowTimer = setTimeout(() => {
+    floatingTooltipShowTimer = null;
+    showFloatingTooltip(target);
+  }, FLOATING_TOOLTIP_DELAY_MS);
 }
 
 function renderDailyShutdownColumns() {
@@ -5376,10 +5644,7 @@ function renderDailyShutdownColumns() {
         ${subtitle ? `<span class="day-date day-date--daily-hint">${escapeHtml(subtitle)}</span>` : ''}
       </div>
       <div class="add-task-row">
-        <button class="add-task-btn">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          <span class="add-task-btn__label">Add task</span>
-        </button>
+        ${renderAddTaskButtonHtml()}
         <span class="column-time-total task-card__time-badge"${badgeText ? '' : ' hidden'}>${escapeHtml(badgeText)}</span>
       </div>
       <div class="add-task-input-wrap" hidden>
@@ -6284,7 +6549,7 @@ function renderTaskTag(tag) {
   const channel = hasTag ? getChannelStyle(raw) : null;
   const hashColor = channel ? channel.hashColor : (hasTag ? '#9b8ec4' : '#999999');
   const unassignedClass = hasTag ? '' : ' task-card__tag--unassigned';
-  return `<span class="task-card__tag${unassignedClass}" data-channel-btn>` +
+  return `<span class="task-card__tag${unassignedClass}" data-channel-btn data-rich-tooltip-label="Assign channel" data-rich-tooltip-shortcut-id="assign-channel" data-rich-tooltip-shortcut-groups='[["Q"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">` +
     `<span class="task-card__tag-hash" style="color:${escapeHtml(hashColor)};">#</span>` +
     `<span class="task-card__tag-word">${escapeHtml(word)}</span></span>`;
 }
@@ -6305,17 +6570,17 @@ function renderTaskDetailSubtaskRow(subtask, options = {}) {
       <button class="task-modal__check task-modal__subtask-check ${subtask.done ? 'task-modal__check--complete' : ''}" type="button" data-modal-subtask-check="${escapeHtml(subtask.id)}">${CHECK_SVG}</button>
       <div class="task-modal__subtask-text${hasLabel ? ' task-modal__subtask-text--filled' : ''}" contenteditable="true" draggable="false" data-modal-subtask-label="${escapeHtml(subtask.id)}" data-placeholder="Subtask description...">${hasLabel ? escapeHtml(subtask.label) : ''}</div>
       <div class="task-modal__subtask-actions">
-        <button class="task-modal__subtask-action" type="button" data-modal-subtask-detach="${escapeHtml(subtask.id)}" aria-label="Convert to standalone task">
-          <i data-lucide="copy"></i>
-        </button>
-        ${isBacklog ? '' : `<button class="task-modal__subtask-action" type="button" data-modal-subtask-play="${escapeHtml(subtask.id)}" aria-label="${isRunning ? 'Pause subtask timer' : 'Start subtask timer'}">
+      <button class="task-modal__subtask-action" type="button" data-modal-subtask-detach="${escapeHtml(subtask.id)}" aria-label="Convert to standalone task" data-rich-tooltip-label="Convert to task" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
+        <i data-lucide="copy"></i>
+      </button>
+        ${isBacklog ? '' : `<button class="task-modal__subtask-action" type="button" data-modal-subtask-play="${escapeHtml(subtask.id)}" aria-label="${isRunning ? 'Pause subtask timer' : 'Start subtask timer'}" data-rich-tooltip-label="${isRunning ? 'Stop timer' : 'Start timer'}" data-rich-tooltip-shortcut-groups='[["Space"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
           <i data-lucide="${isRunning ? 'pause' : 'play'}"></i>
         </button>`}
       </div>
-      ${isBacklog ? '' : `<button class="task-modal__subtask-time" type="button" data-modal-subtask-actual-btn="${escapeHtml(subtask.id)}">
+      ${isBacklog ? '' : `<button class="task-modal__subtask-time" type="button" data-modal-subtask-actual-btn="${escapeHtml(subtask.id)}" data-rich-tooltip-label="Set actual time" data-rich-tooltip-shortcut-groups='[["E"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
         <span class="task-modal__subtask-time-value ${isRunning ? 'task-modal__subtask-time-value--running' : (subtask.actualTimeSeconds ? 'task-modal__subtask-time-value--set' : 'task-modal__subtask-time-value--placeholder')}">${actualDisplay}</span>
       </button>`}
-      <button class="task-modal__subtask-time" type="button" data-modal-subtask-planned-btn="${escapeHtml(subtask.id)}">
+      <button class="task-modal__subtask-time" type="button" data-modal-subtask-planned-btn="${escapeHtml(subtask.id)}" data-rich-tooltip-label="Set planned time" data-rich-tooltip-shortcut-groups='[["W"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
         <span class="task-modal__subtask-time-value ${subtask.plannedMinutes ? 'task-modal__subtask-time-value--set' : 'task-modal__subtask-time-value--placeholder'}">${plannedDisplay}</span>
       </button>
     </div>
@@ -6332,7 +6597,7 @@ function renderTaskDetailSubtasks(task, options = {}) {
       <div class="task-modal__subtask-list" data-modal-subtask-list>
         ${rows}
       </div>
-      <button class="task-modal__add-subtask" type="button" data-modal-add-subtask>
+      <button class="task-modal__add-subtask" type="button" data-modal-add-subtask data-rich-tooltip-label="Add subtasks" data-rich-tooltip-shortcut-id="add-subtask" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
         <span class="task-modal__add-subtask-icon"><i data-lucide="plus"></i></span>
         <span>Add subtask</span>
       </button>
@@ -6813,6 +7078,7 @@ function renderTaskDetailModal(task, column, options = {}) {
   const actualValueClass = hasActualTime(task.actualTimeSeconds)
     ? 'task-modal__metric-value task-modal__metric-value--set'
     : 'task-modal__metric-value task-modal__metric-value--placeholder';
+  const isTaskTimerRunning = focusState.running && focusState.taskId === task.id && !focusState.subtaskId;
   const aggregatePlanned = getAggregatePlannedMinutes(task);
   const plannedTime = formatMinutes(aggregatePlanned);
   const timelineEntries = [
@@ -6839,7 +7105,7 @@ function renderTaskDetailModal(task, column, options = {}) {
       <div class="task-modal__header">
         <div class="task-modal__meta-group">
           <span class="task-modal__meta-label">CHANNEL</span>
-          <span class="task-modal__channel" data-modal-channel-btn>
+          <span class="task-modal__channel" data-modal-channel-btn data-rich-tooltip-label="Assign channel" data-rich-tooltip-shortcut-id="assign-channel" data-rich-tooltip-shortcut-groups='[["Q"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
             <span class="task-modal__channel-hash" style="color:${escapeHtml(hashColor)};">#</span>
             <span class="task-modal__channel-word">${escapeHtml(channelWord)}</span>
           </span>
@@ -6847,18 +7113,18 @@ function renderTaskDetailModal(task, column, options = {}) {
         <div class="task-modal__meta-right">
           <div class="task-modal__meta-group task-modal__meta-group--start">
             <span class="task-modal__meta-label">START</span>
-            <button class="task-modal__meta-start-btn" type="button">${startLabelHtml}</button>
+            <button class="task-modal__meta-start-btn" type="button" data-rich-tooltip-label="Set start date" data-rich-tooltip-shortcut-id="set-start-date" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">${startLabelHtml}</button>
           </div>
           ${task.dueDate ? `<div class="task-modal__meta-group task-modal__due-wrap">
             <span class="task-modal__meta-label">DUE</span>
-            <button class="task-modal__meta-start-btn${task.dueDate < todayISO ? ' task-modal__meta-start-btn--overdue' : ''}" type="button" data-due-btn>${escapeHtml(task.dueDate === todayISO ? 'Today' : formatDateDisplay(task.dueDate))}</button>
+            <button class="task-modal__meta-start-btn${task.dueDate < todayISO ? ' task-modal__meta-start-btn--overdue' : ''}" type="button" data-due-btn data-rich-tooltip-label="Set due date" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">${escapeHtml(task.dueDate === todayISO ? 'Today' : formatDateDisplay(task.dueDate))}</button>
           </div>` : ''}
           <div class="task-modal__top-actions">
-            ${!task.dueDate ? '<div class="task-modal__due-wrap"><button class="task-modal__top-action" type="button" data-due-btn><i data-lucide="calendar"></i><span>Due</span></button></div>' : ''}
-            <button class="task-modal__top-action" type="button" data-modal-add-two-subtasks><i data-lucide="plus"></i><span>Subtasks</span></button>
-            <div class="ellipsis-menu-wrap"><button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More" data-ellipsis-btn><i data-lucide="ellipsis"></i></button></div>
-            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand" data-expand-btn><i data-lucide="maximize-2"></i></button>
-            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close details" data-task-modal-close><i data-lucide="x"></i></button>
+            ${!task.dueDate ? '<div class="task-modal__due-wrap"><button class="task-modal__top-action" type="button" data-due-btn data-rich-tooltip-label="Set due date" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="calendar"></i><span>Due</span></button></div>' : ''}
+            <button class="task-modal__top-action" type="button" data-modal-add-two-subtasks data-rich-tooltip-label="Add subtasks" data-rich-tooltip-shortcut-id="add-subtask" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="plus"></i><span>Subtasks</span></button>
+            <div class="ellipsis-menu-wrap"><button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="More" data-ellipsis-btn data-rich-tooltip-label="Other actions" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="ellipsis"></i></button></div>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand" data-expand-btn data-rich-tooltip-label="Enter focus mode" data-rich-tooltip-shortcut-id="focus-mode" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="maximize-2"></i></button>
+            <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close details" data-task-modal-close data-rich-tooltip-label="Close task" data-rich-tooltip-shortcut-groups='[["Esc"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="x"></i></button>
           </div>
         </div>
       </div>
@@ -6868,19 +7134,19 @@ function renderTaskDetailModal(task, column, options = {}) {
       <div class="task-modal__body">
         <div class="task-modal__hero">
           <div class="task-modal__title-wrap">
-            <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-modal-check>${CHECK_SVG}</button>
+            <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-modal-check data-rich-tooltip-label="Complete task" data-rich-tooltip-shortcut-id="complete-task" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">${CHECK_SVG}</button>
             <h2 class="task-modal__title" id="task-modal-title" contenteditable="true">${escapeHtml(task.title)}</h2>
           </div>
           <div class="task-modal__hero-right${isBacklog ? ' task-modal__hero-right--backlog' : ''}">
-            ${isBacklog ? '' : `<button class="task-modal__start-btn" type="button">
-              <i data-lucide="play"></i>
-              <span>START</span>
+            ${isBacklog ? '' : `<button class="task-modal__start-btn${isTaskTimerRunning ? ' task-modal__start-btn--stop' : ''}" type="button" data-rich-tooltip-label="${isTaskTimerRunning ? 'Stop timer' : 'Start timer'}" data-rich-tooltip-shortcut-groups='[["Space"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
+              <i data-lucide="${isTaskTimerRunning ? 'pause' : 'play'}"></i>
+              <span>${isTaskTimerRunning ? 'STOP' : 'START'}</span>
             </button>`}
-            ${isBacklog ? '' : `<div class="task-modal__metric task-modal__metric--actual" data-actual-btn>
+            ${isBacklog ? '' : `<div class="task-modal__metric task-modal__metric--actual" data-actual-btn data-rich-tooltip-label="Set actual time" data-rich-tooltip-shortcut-groups='[["E"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
               <span class="task-modal__metric-label">ACTUAL</span>
               <span class="${actualValueClass}">${actualTime}</span>
             </div>`}
-            <div class="task-modal__metric task-modal__metric--planned" data-planned-btn>
+            <div class="task-modal__metric task-modal__metric--planned" data-planned-btn data-rich-tooltip-label="Set planned time" data-rich-tooltip-shortcut-groups='[["W"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
               <span class="task-modal__metric-label">PLANNED</span>
               <span class="task-modal__metric-value ${aggregatePlanned ? 'task-modal__metric-value--set' : 'task-modal__metric-value--placeholder'}">${aggregatePlanned ? escapeHtml(plannedTime) : '--:--'}</span>
             </div>
@@ -10027,6 +10293,7 @@ function updateCardDetailTimerState() {
     // Transform START → STOP
     if (startBtn) {
       startBtn.classList.add('task-modal__start-btn--stop');
+      startBtn.setAttribute('data-rich-tooltip-label', 'Stop timer');
       startBtn.innerHTML = '<i data-lucide="pause"></i><span>STOP</span>';
       if (typeof lucide !== 'undefined') lucide.createIcons();
     }
@@ -10043,6 +10310,7 @@ function updateCardDetailTimerState() {
     // Revert STOP → START
     if (startBtn) {
       startBtn.classList.remove('task-modal__start-btn--stop');
+      startBtn.setAttribute('data-rich-tooltip-label', 'Start timer');
       startBtn.innerHTML = '<i data-lucide="play"></i><span>START</span>';
       if (typeof lucide !== 'undefined') lucide.createIcons();
     }
@@ -10073,6 +10341,7 @@ function updateCardDetailTimerState() {
         icon.setAttribute('data-lucide', isRunningSubtask ? 'pause' : 'play');
       }
       btn.setAttribute('aria-label', isRunningSubtask ? 'Pause subtask timer' : 'Start subtask timer');
+      btn.setAttribute('data-rich-tooltip-label', isRunningSubtask ? 'Stop timer' : 'Start timer');
     });
 
     if (task) {
@@ -11084,12 +11353,12 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
 
   // Timer play/pause button: hidden for past and future cards
   const timerPlayBtn = (isPast || isFuture || isBacklog) ? '' : `
-    <button class="task-card__timer-btn" type="button" data-card-timer-toggle>
+    <button class="task-card__timer-btn" type="button" data-card-timer-toggle data-rich-tooltip-label="${isTimerRunning ? 'Stop timer' : 'Start timer'}" data-rich-tooltip-shortcut-groups='[["Space"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
       <i data-lucide="${isTimerRunning ? 'pause' : 'play'}"></i>
     </button>`;
 
   const actualMetric = (isFuture || isBacklog) ? '' : `
-        <div class="task-card__timer-metric${isTimerRunning ? '' : ' task-card__timer-metric--clickable'}" data-card-actual-picker-btn>
+        <div class="task-card__timer-metric${isTimerRunning ? '' : ' task-card__timer-metric--clickable'}" data-card-actual-picker-btn data-rich-tooltip-label="Set actual time" data-rich-tooltip-shortcut-groups='[["E"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
           <span class="task-card__timer-label">ACTUAL</span>
           <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${timerActualDisplay}</span>
         </div>
@@ -11100,7 +11369,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
       ${timerPlayBtn}
       <div class="task-card__timer-metrics">
         ${actualMetric}
-        <div class="task-card__timer-metric${isPast && hasColumnTimebox ? '' : ' task-card__timer-metric--clickable'}"${isPast && hasColumnTimebox ? '' : ' data-card-planned-picker-btn'}>
+        <div class="task-card__timer-metric${isPast && hasColumnTimebox ? '' : ' task-card__timer-metric--clickable'}"${isPast && hasColumnTimebox ? '' : ' data-card-planned-picker-btn'} data-rich-tooltip-label="Set planned time" data-rich-tooltip-shortcut-groups='[["W"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
           <span class="task-card__timer-label">PLANNED</span>
           <span class="task-card__timer-value">${plannedDisplay}</span>
         </div>
@@ -11132,17 +11401,17 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
       completeBtn = '';
     }
   } else {
-    completeBtn = `<button class="task-card__complete-btn" aria-label="Mark complete">
+    completeBtn = `<button class="task-card__complete-btn" data-rich-tooltip-label="Complete task" data-rich-tooltip-shortcut-id="complete-task" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10" aria-label="Mark complete">
       <span class="complete-circle">${CHECK_SVG}</span>
     </button>`;
   }
 
   // Hide hover icons for past columns
   const hoverIcons = isPast ? '' : `
-    <button class="task-card__hover-icon" data-card-date-btn aria-label="Set start date" type="button">
+    <button class="task-card__hover-icon" data-card-date-btn data-rich-tooltip-label="Set start date" data-rich-tooltip-shortcut-id="set-start-date" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13" aria-label="Set start date" type="button">
       <i data-lucide="calendar"></i>
     </button>
-    ${isBacklog ? '' : `<button class="task-card__hover-icon" data-card-clock-btn aria-label="Timer" type="button">
+    ${isBacklog ? '' : `<button class="task-card__hover-icon" data-card-clock-btn data-rich-tooltip-label="Set planned/actual time" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13" aria-label="Timer" type="button">
       <i data-lucide="clock"></i>
     </button>`}
   `;
@@ -11189,9 +11458,24 @@ function renderColumn(column) {
 
   const colTotalEl = colEl.querySelector('.column-time-total');
   if (colTotalEl) {
-    const daySummary = formatColumnTimeSummary(column);
-    colTotalEl.textContent = daySummary;
-    colTotalEl.hidden = !daySummary;
+    const badge = getColumnTimeBadgeConfig(column);
+    colTotalEl.textContent = badge.text;
+    colTotalEl.hidden = !badge.text;
+    colTotalEl.classList.toggle('column-time-total--interactive', badge.interactive);
+    if (badge.tooltip) {
+      colTotalEl.setAttribute('data-tooltip', badge.tooltip);
+    } else {
+      colTotalEl.removeAttribute('data-tooltip');
+    }
+    if (badge.interactive) {
+      colTotalEl.setAttribute('data-column-time-total-toggle', '');
+      colTotalEl.setAttribute('role', 'button');
+      colTotalEl.setAttribute('tabindex', '0');
+    } else {
+      colTotalEl.removeAttribute('data-column-time-total-toggle');
+      colTotalEl.removeAttribute('role');
+      colTotalEl.removeAttribute('tabindex');
+    }
   }
 
   const taskList = colEl.querySelector('.task-list');
@@ -12287,7 +12571,6 @@ function createColumnElement(column) {
   const todayISO = getTodayISO();
   const isToday = column.isoDate === todayISO;
   const isPast = column.isoDate < todayISO;
-  const dayTotal = formatColumnTimeSummary(column);
   const isAfterShutdownSwitch = isToday && new Date().getHours() >= 15;
   let planLabel = 'Plan';
   let planMode = 'plan';
@@ -12313,11 +12596,8 @@ function createColumnElement(column) {
       <div class="progress-bar__fill" style="width:0%"></div>
     </div>
     <div class="add-task-row">
-      <button class="add-task-btn">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-        <span class="add-task-btn__label">Add task</span>
-      </button>
-      <span class="column-time-total task-card__time-badge"${dayTotal ? '' : ' hidden'}>${escapeHtml(dayTotal || '')}</span>
+      ${renderAddTaskButtonHtml({ showShortcut: isToday })}
+      ${renderColumnTimeBadgeHtml(column)}
     </div>
     <div class="add-task-input-wrap" hidden>
       <input type="text" class="add-task-input" placeholder="Task name…">
@@ -13335,6 +13615,36 @@ function attachEvents() {
   });
 
   // ── Show add-task input ─────────────────────
+  container.addEventListener('click', e => {
+    const badge = closestFromTarget(e.target, '[data-column-time-total-toggle]');
+    if (!badge) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const colEl = badge.closest('.day-column');
+    if (!colEl) return;
+    const isoDate = colEl.dataset.isoDate;
+    if (!isoDate || isoDate !== getTodayISO()) return;
+    const column = state.columns.find(c => c.id === colEl.dataset.colId);
+    if (!column) return;
+    toggleColumnTimeBadgeMode(isoDate);
+    renderColumn(column);
+  });
+
+  container.addEventListener('keydown', e => {
+    const badge = closestFromTarget(e.target, '[data-column-time-total-toggle]');
+    if (!badge) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    const colEl = badge.closest('.day-column');
+    if (!colEl) return;
+    const isoDate = colEl.dataset.isoDate;
+    if (!isoDate || isoDate !== getTodayISO()) return;
+    const column = state.columns.find(c => c.id === colEl.dataset.colId);
+    if (!column) return;
+    toggleColumnTimeBadgeMode(isoDate);
+    renderColumn(column);
+  });
+
   container.addEventListener('click', e => {
     const row = closestFromTarget(e.target, '.add-task-row');
     if (!row) return;
@@ -16581,6 +16891,16 @@ function setSidebarCollapsed(isCollapsed) {
   if (!shell || !sidebar) return;
   shell.classList.toggle('sidebar-collapsed', isCollapsed);
   sidebar.setAttribute('aria-hidden', isCollapsed ? 'true' : 'false');
+  const collapseBtn = document.querySelector('[data-sidebar-collapse]');
+  if (collapseBtn) {
+    collapseBtn.setAttribute('aria-label', 'Collapse navigation panel');
+    collapseBtn.setAttribute('data-rich-tooltip-label', 'Collapse navigation panel');
+  }
+  const expandBtn = document.querySelector('[data-sidebar-expand]');
+  if (expandBtn) {
+    expandBtn.setAttribute('aria-label', 'Expand navigation panel');
+    expandBtn.setAttribute('data-rich-tooltip-label', 'Expand navigation panel');
+  }
   const focusModal = document.getElementById('focus-modal');
   if (focusModal) focusModal.classList.toggle('focus-modal--sidebar-collapsed', isCollapsed);
 }
@@ -16595,7 +16915,9 @@ function setRightSidebarCollapsed(isCollapsed) {
   shell.classList.toggle('right-sidebar-collapsed', isCollapsed);
   const collapseBtn = document.querySelector('[data-right-sidebar-collapse]');
   if (collapseBtn) {
-    collapseBtn.setAttribute('aria-label', isCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    const label = isCollapsed ? 'Expand right panel' : 'Collapse right panel';
+    collapseBtn.setAttribute('aria-label', label);
+    collapseBtn.setAttribute('data-rich-tooltip-label', label);
   }
 }
 
@@ -16793,37 +17115,37 @@ function attachShortcutEvents() {
   document.addEventListener('mouseover', handleOpenPickerPointerHover, true);
 
   document.addEventListener('mouseover', e => {
-    const badge = e.target instanceof Element ? e.target.closest('[data-rollover-tooltip]') : null;
-    if (!badge) {
-      hideRolloverTooltip();
+    const trigger = getFloatingTooltipTrigger(e.target);
+    if (!trigger) {
+      hideFloatingTooltip();
       return;
     }
-    const previousBadge = e.relatedTarget instanceof Element ? e.relatedTarget.closest('[data-rollover-tooltip]') : null;
-    if (previousBadge === badge) return;
-    showRolloverTooltip(badge);
+    const previousTrigger = getFloatingTooltipTrigger(e.relatedTarget);
+    if (previousTrigger === trigger) return;
+    scheduleFloatingTooltip(trigger);
   }, true);
 
   document.addEventListener('mouseout', e => {
-    const badge = e.target instanceof Element ? e.target.closest('[data-rollover-tooltip]') : null;
-    if (!badge) return;
-    const nextBadge = e.relatedTarget instanceof Element ? e.relatedTarget.closest('[data-rollover-tooltip]') : null;
-    if (nextBadge === badge) return;
-    hideRolloverTooltip();
+    const trigger = getFloatingTooltipTrigger(e.target);
+    if (!trigger) return;
+    const nextTrigger = getFloatingTooltipTrigger(e.relatedTarget);
+    if (nextTrigger === trigger) return;
+    hideFloatingTooltip();
   }, true);
 
   document.addEventListener('mousemove', e => {
-    if (!activeRolloverTooltipTarget) return;
-    positionRolloverTooltip(activeRolloverTooltipTarget);
+    if (!activeFloatingTooltipTarget) return;
+    positionFloatingTooltip(activeFloatingTooltipTarget);
   }, true);
 
   document.addEventListener('scroll', () => {
-    if (!activeRolloverTooltipTarget) return;
-    positionRolloverTooltip(activeRolloverTooltipTarget);
+    if (!activeFloatingTooltipTarget) return;
+    positionFloatingTooltip(activeFloatingTooltipTarget);
   }, true);
 
   window.addEventListener('resize', () => {
-    if (!activeRolloverTooltipTarget) return;
-    positionRolloverTooltip(activeRolloverTooltipTarget);
+    if (!activeFloatingTooltipTarget) return;
+    positionFloatingTooltip(activeFloatingTooltipTarget);
   });
 
   document.addEventListener('mouseover', e => {
@@ -16851,8 +17173,8 @@ function attachShortcutEvents() {
 
   document.addEventListener('click', e => {
     const card = e.target instanceof Element ? e.target.closest('.task-card') : null;
-    if (activeRolloverTooltipTarget && !(e.target instanceof Element && e.target.closest('[data-rollover-tooltip]'))) {
-      hideRolloverTooltip();
+    if (activeFloatingTooltipTarget) {
+      hideFloatingTooltip();
     }
     if (!card || card.dataset.ghostDate) return;
     shortcutState.suppressHoverUntilPointerMove = false;

@@ -1607,11 +1607,21 @@ button { cursor: pointer; }
   color: currentColor;
 }
 
+.add-task-btn__content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .add-task-btn__label {
   color: currentColor;
 }
 
-.day-column:not(.day-column--today) .add-task-btn__label {
+.add-task-btn__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 0;
   opacity: 0;
   overflow: hidden;
@@ -1619,8 +1629,46 @@ button { cursor: pointer; }
   transition: max-width 0.12s ease, opacity 0.12s ease;
 }
 
-.day-column:not(.day-column--today) .add-task-row:hover .add-task-btn__label,
-.day-column:not(.day-column--today) .add-task-btn:focus-visible .add-task-btn__label {
+.add-task-btn__meta--hidden {
+  display: none;
+}
+
+.add-task-row:hover .add-task-btn__meta,
+.add-task-btn:focus-visible .add-task-btn__meta {
+  max-width: 40px;
+  opacity: 1;
+}
+
+.add-task-btn__separator {
+  color: #b4b4b4;
+  line-height: 1;
+}
+
+.add-task-btn__shortcut {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #f0f0f0;
+  color: #413f39;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.day-column:not(.day-column--today) .add-task-btn__content {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 0.12s ease, opacity 0.12s ease;
+}
+
+.day-column:not(.day-column--today) .add-task-row:hover .add-task-btn__content,
+.day-column:not(.day-column--today) .add-task-btn:focus-visible .add-task-btn__content {
   max-width: 120px;
   opacity: 1;
 }
@@ -1639,6 +1687,10 @@ button { cursor: pointer; }
   font-weight: 600;
   white-space: nowrap;
   cursor: default;
+}
+
+.column-time-total--interactive {
+  cursor: pointer;
 }
 
 /* Inline add task input */
@@ -1877,8 +1929,8 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
 [data-dp-tooltip] {
   position: relative;
 }
-[data-tooltip]:hover::after,
-[data-tooltip]:focus-visible::after {
+
+[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
   padding: 6px 8px;
@@ -1892,14 +1944,16 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
   white-space: nowrap;
   z-index: 10;
   pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
 }
 
 [data-rollover-tooltip] {
   position: relative;
 }
 
-[data-dp-tooltip]:hover::after,
-[data-dp-tooltip]:focus-visible::after {
+[data-dp-tooltip]::after {
   content: attr(data-dp-tooltip);
   position: absolute;
   padding: 6px 8px;
@@ -1913,17 +1967,35 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
   white-space: nowrap;
   z-index: 10;
   pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
 }
 
-.task-card__time-badge[data-tooltip]:hover::after,
-.task-card__time-badge[data-tooltip]:focus-visible::after,
-.task-card__time-badge[data-dp-tooltip]:hover::after,
-.task-card__time-badge[data-dp-tooltip]:focus-visible::after {
+[data-tooltip]:hover::after,
+[data-dp-tooltip]:hover::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 1s, 1s;
+}
+
+[data-tooltip]:focus-visible::after,
+[data-dp-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s, 0s;
+}
+
+.task-card__time-badge[data-tooltip]::after,
+.task-card__time-badge[data-dp-tooltip]::after {
   top: calc(100% + 8px);
   right: 0;
 }
 
 .app-tooltip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 8px;
   border-radius: 4px;
   background-color: #fff;
@@ -1933,13 +2005,43 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-  z-index: 1000;
+  z-index: 10001;
   pointer-events: none;
 }
 
 .app-tooltip--floating {
   position: fixed;
   transform: translateX(-50%);
+}
+
+.app-tooltip__label {
+  color: inherit;
+}
+
+.app-tooltip__separator {
+  color: #b4b4b4;
+  line-height: 1;
+}
+
+.app-tooltip__keys {
+  display: inline-flex;
+  align-items: center;
+}
+
+.app-tooltip .shortcuts-overlay__sequence {
+  gap: 3px;
+}
+
+.app-tooltip .shortcuts-overlay__joiner {
+  font-size: 11px;
+  padding: 0 1px;
+}
+
+.app-tooltip .shortcuts-overlay__key {
+  min-width: 18px;
+  min-height: 18px;
+  padding: 1px 4px;
+  font-size: 11px;
 }
 
 /* Card timer dropdown */

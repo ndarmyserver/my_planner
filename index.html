@@ -76,22 +76,22 @@
             </span>
           </button>
         </div>
-        <button class="sidebar__collapse-btn" type="button" aria-label="Collapse sidebar" data-sidebar-collapse>
+        <button class="sidebar__collapse-btn" type="button" aria-label="Collapse navigation panel" data-sidebar-collapse data-rich-tooltip-label="Collapse navigation panel" data-rich-tooltip-shortcut-id="toggle-left-panel" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
           <i data-lucide="chevrons-left"></i>
         </button>
       </div>
 
       <div class="sidebar__scroll">
         <nav class="sidebar__nav">
-          <a href="#" class="nav-item nav-item--active" data-sidebar-home>
+          <a href="#" class="nav-item nav-item--active" data-sidebar-home data-rich-tooltip-label="Home view" data-rich-tooltip-shortcut-id="go-home" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
             <i data-lucide="home" class="nav-icon"></i>
             <span class="nav-label">Home</span>
           </a>
-          <a href="#" class="nav-item" data-sidebar-today>
+          <a href="#" class="nav-item" data-sidebar-today data-rich-tooltip-label="Focus on today" data-rich-tooltip-shortcut-id="go-today-view" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
             <i data-lucide="list-checks" class="nav-icon"></i>
             <span class="nav-label">Today</span>
           </a>
-          <a href="#" class="nav-item" data-sidebar-focus>
+          <a href="#" class="nav-item" data-sidebar-focus data-rich-tooltip-label="Focus on task" data-rich-tooltip-shortcut-id="focus-mode" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
             <i data-lucide="coffee" class="nav-icon"></i>
             <span class="nav-label">Focus</span>
           </a>
@@ -99,11 +99,11 @@
 
         <div class="sidebar__section">
           <span class="section-label">DAILY RITUALS</span>
-          <a href="#" class="nav-item" data-sidebar-daily-planning>
+          <a href="#" class="nav-item" data-sidebar-daily-planning data-rich-tooltip-label="Plan day" data-rich-tooltip-shortcut-id="go-daily-planning" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
             <i data-lucide="clipboard-list" class="nav-icon"></i>
             <span class="nav-label">Daily planning</span>
           </a>
-          <a href="#" class="nav-item" data-sidebar-daily-shutdown>
+          <a href="#" class="nav-item" data-sidebar-daily-shutdown data-rich-tooltip-label="Wrap up your day" data-rich-tooltip-shortcut-id="go-daily-shutdown" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
             <i data-lucide="book" class="nav-icon"></i>
             <span class="nav-label">Daily shutdown</span>
           </a>
@@ -116,14 +116,14 @@
       <main class="board">
         <div class="board__topbar">
           <div class="board__topbar-left">
-            <button class="sidebar-expand-btn" type="button" aria-label="Expand sidebar" data-sidebar-expand>
+            <button class="sidebar-expand-btn" type="button" aria-label="Expand navigation panel" data-sidebar-expand data-rich-tooltip-label="Expand navigation panel" data-rich-tooltip-shortcut-id="toggle-left-panel" data-rich-tooltip-placement="right" data-rich-tooltip-offset="10">
               <i data-lucide="chevrons-right"></i>
             </button>
-            <button class="view-btn view-btn--active" data-view="today">
+            <button class="view-btn view-btn--active" data-view="today" data-rich-tooltip-label="Go to date" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
               <i data-lucide="calendar-days" class="view-icon"></i>
               Today
             </button>
-            <button class="view-btn view-btn--active view-btn--filter" type="button" aria-label="Filter tasks" data-view-filter>
+            <button class="view-btn view-btn--active view-btn--filter" type="button" aria-label="Filter tasks" data-view-filter data-rich-tooltip-label="Filter tasks" data-rich-tooltip-shortcut-groups='[["Shift","F"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
               <i data-lucide="list-filter" class="view-icon"></i>
               <span class="view-btn__label">Filter</span>
             </button>
@@ -153,9 +153,9 @@
 
             <div class="calendar-day-badge">
               <div class="calendar-zoom" aria-label="Timeline zoom controls">
-                <button class="calendar-zoom__btn" id="calendar-zoom-in" type="button" aria-label="Zoom in timeline">+</button>
+                <button class="calendar-zoom__btn" id="calendar-zoom-in" type="button" aria-label="Zoom in timeline" data-rich-tooltip-label="Zoom in" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">+</button>
                 <span class="calendar-zoom__value" id="calendar-zoom-value">1x</span>
-                <button class="calendar-zoom__btn" id="calendar-zoom-out" type="button" aria-label="Zoom out timeline">−</button>
+                <button class="calendar-zoom__btn" id="calendar-zoom-out" type="button" aria-label="Zoom out timeline" data-rich-tooltip-label="Zoom out" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">−</button>
               </div>
               <div class="calendar-day-info">
                 <span class="calendar-day-name">THU</span>
@@ -329,24 +329,24 @@
         </div>
 
         <div class="right-rail" data-right-rail>
-          <button class="right-rail__collapse" type="button" aria-label="Collapse sidebar" data-right-sidebar-collapse>
+          <button class="right-rail__collapse" type="button" aria-label="Collapse right panel" data-right-sidebar-collapse data-rich-tooltip-label="Collapse right panel" data-rich-tooltip-shortcut-groups='[[">"]]' data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="chevrons-right" class="right-rail__collapse-icon right-rail__collapse-icon--collapse"></i>
             <i data-lucide="chevrons-left" class="right-rail__collapse-icon right-rail__collapse-icon--expand"></i>
           </button>
-          <button class="right-rail__btn right-rail__btn--active" type="button" aria-label="Calendar" data-right-panel-btn="calendar">
+          <button class="right-rail__btn right-rail__btn--active" type="button" aria-label="Calendar" data-right-panel-btn="calendar" data-rich-tooltip-label="Calendar" data-rich-tooltip-shortcut-id="show-calendar-panel" data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="calendar-days"></i>
           </button>
-          <button class="right-rail__btn" type="button" aria-label="Backlog" data-right-panel-btn="backlog">
+          <button class="right-rail__btn" type="button" aria-label="Backlog" data-right-panel-btn="backlog" data-rich-tooltip-label="Backlog" data-rich-tooltip-shortcut-id="show-backlog-panel" data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="archive"></i>
           </button>
-          <button class="right-rail__btn" type="button" aria-label="Archive" data-right-panel-btn="archive">
+          <button class="right-rail__btn" type="button" aria-label="Archive" data-right-panel-btn="archive" data-rich-tooltip-label="Archive" data-rich-tooltip-shortcut-id="show-archive-panel" data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="moon-star"></i>
             <span class="right-rail__indicator" data-archive-indicator hidden></span>
           </button>
-          <button class="right-rail__btn" type="button" aria-label="Search" data-right-panel-btn="search">
+          <button class="right-rail__btn" type="button" aria-label="Search" data-right-panel-btn="search" data-rich-tooltip-label="Search" data-rich-tooltip-shortcut-id="show-search-panel" data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="search"></i>
           </button>
-          <button class="right-rail__btn" type="button" aria-label="Trash" data-right-panel-btn="trash">
+          <button class="right-rail__btn" type="button" aria-label="Trash" data-right-panel-btn="trash" data-rich-tooltip-label="Trash" data-rich-tooltip-shortcut-id="show-trash-panel" data-rich-tooltip-placement="left" data-rich-tooltip-offset="10">
             <i data-lucide="trash"></i>
           </button>
         </div>
