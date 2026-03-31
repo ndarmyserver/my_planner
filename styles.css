@@ -1872,25 +1872,74 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
   stroke: currentColor;
 }
 
-/* Daily planning time badge tooltip */
-.task-card__time-badge[data-dp-tooltip] {
+/* Default app tooltip */
+[data-tooltip],
+[data-dp-tooltip] {
   position: relative;
 }
-.task-card__time-badge[data-dp-tooltip]:hover::after {
-  content: attr(data-dp-tooltip);
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  content: attr(data-tooltip);
   position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  background: #fff;
-  color: #333;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 4px 8px;
-  border-radius: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background-color: #fff;
+  border: 1px solid #f0f0f0;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  color: #787878 !important;
+  font-size: 12px;
+  font-weight: 500;
   white-space: nowrap;
   z-index: 10;
   pointer-events: none;
+}
+
+[data-rollover-tooltip] {
+  position: relative;
+}
+
+[data-dp-tooltip]:hover::after,
+[data-dp-tooltip]:focus-visible::after {
+  content: attr(data-dp-tooltip);
+  position: absolute;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background-color: #fff;
+  border: 1px solid #f0f0f0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  color: #787878 !important;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.task-card__time-badge[data-tooltip]:hover::after,
+.task-card__time-badge[data-tooltip]:focus-visible::after,
+.task-card__time-badge[data-dp-tooltip]:hover::after,
+.task-card__time-badge[data-dp-tooltip]:focus-visible::after {
+  top: calc(100% + 8px);
+  right: 0;
+}
+
+.app-tooltip {
+  padding: 6px 8px;
+  border-radius: 4px;
+  background-color: #fff;
+  border: 1px solid #f0f0f0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  color: #787878;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.app-tooltip--floating {
+  position: fixed;
+  transform: translateX(-50%);
 }
 
 /* Card timer dropdown */
@@ -2113,6 +2162,17 @@ body.task-selection--keyboard-lock .task-card--ghost-today:hover:not(.task-card-
 
 .complete-circle--done svg {
   color: #ffffff;
+}
+
+.complete-circle--tiny {
+  width: 10px;
+  height: 10px;
+  border-width: 1px;
+}
+
+.complete-circle--tiny svg {
+  width: 6px;
+  height: 6px;
 }
 
 /* Rollover badge */
@@ -3530,6 +3590,29 @@ body.is-workday-marker-dragging {
   opacity: 0.6;
   pointer-events: none;
   z-index: 999;
+}
+
+.cal-completion-marker {
+  position: absolute;
+  left: calc(43px + var(--marker-shift, 0px));
+  top: calc(var(--offset, 0) * var(--hour-height));
+  transform: translateY(-50%);
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 1001;
+}
+
+.cal-completion-marker:focus-visible {
+  outline: 2px solid rgba(44, 167, 255, 0.35);
+  outline-offset: 3px;
+  border-radius: 999px;
 }
 
 /* Calendar events */

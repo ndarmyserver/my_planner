@@ -5,6 +5,8 @@ let taskModalQuill = null;
 let focusModalQuill = null;
 let dpShareQuill = null;
 let dsShareQuill = null;
+let rolloverTooltipEl = null;
+let activeRolloverTooltipTarget = null;
 
 const QUILL_EDITOR_CONFIG = {
   theme: 'snow',
@@ -269,7 +271,9 @@ const settings = {
   archiveLastViewedAt: null,
   // Display
   darkMode: 'light',                 // 'light' | 'dark'
+  hideCompletedTasksInCalendar: false,
   // Timeboxing
+  visualizeActualTimeOnCalendar: true,
   defaultTimeboxDurationMinutes: 30,  // 15 | 30 | 45 | 60
   // Schedule (Sun=0 through Sat=6)
   schedule: [
@@ -854,6 +858,7 @@ function createTaskFromRepeatSeries(series, isoDate) {
     scheduledTime: null,
     complete: false,
     completedOnDate: null,
+    completedAt: null,
     tag: template.tag || null,
     integrationColor: template.integrationColor || null,
     subtasks: (template.subtasks || []).map(subtask => ({
@@ -1729,9 +1734,7 @@ function restoreArchiveTask(taskId, options = {}) {
       task.startDate = targetIso;
       moveCompletedTasksToBottom(targetCol);
     } else if (sourceIso < todayISO && targetIso >= todayISO) {
-      ensureTaskRolloverState(task);
-      task.complete = false;
-      task.completedOnDate = null;
+      clearTaskCompletionMetadata(task);
       task.startDate = targetIso;
       task.scheduledTime = null;
     } else {
@@ -2474,10 +2477,13 @@ function toggleTaskCompletionForShortcut(taskId) {
   if (!loc) return false;
 
   if (loc.location === 'archive') {
-    loc.task.complete = !loc.task.complete;
-    ensureTaskRolloverState(loc.task);
-    loc.task.completedOnDate = loc.task.complete ? getTodayISO() : null;
+    if (loc.task.complete) {
+      clearTaskCompletionMetadata(loc.task);
+    } else {
+      completeTaskAsOf(loc.task, getTodayISO());
+    }
     renderArchivePanel();
+    renderCalendarEvents();
     persistTask(loc.task, 0);
     refreshTaskDetailModalIfOpen(taskId);
     return true;
@@ -2495,21 +2501,7 @@ function toggleTaskCompletionForShortcut(taskId) {
   if (!task.complete) {
     const incompleteTasks = column.tasks.filter(t => !t.complete);
     task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
-    task.complete = true;
-    ensureTaskRolloverState(task);
-    task.completedOnDate = todayISO;
-    if (task.subtasks) {
-      task.subtasks.forEach(s => {
-        if (!s.done) {
-          s.done = true;
-          if (!task.subtaskCompletionsByDate[todayISO]) task.subtaskCompletionsByDate[todayISO] = [];
-          if (!task.subtaskCompletionsByDate[todayISO].includes(s.id)) task.subtaskCompletionsByDate[todayISO].push(s.id);
-        }
-      });
-    }
-    if (!task.actualTimeSeconds && task.timeEstimateMinutes) {
-      task.actualTimeSeconds = task.timeEstimateMinutes * 60;
-    }
+    completeTaskAsOf(task, todayISO);
     if (column.isoDate > todayISO) {
       column.tasks.splice(index, 1);
       const todayCol = ensureColumnForDate(todayISO);
@@ -2518,6 +2510,7 @@ function toggleTaskCompletionForShortcut(taskId) {
       moveCompletedTasksToBottom(todayCol);
       renderColumn(column);
       renderColumn(todayCol);
+      renderCalendarEvents();
       persistTask(task, 0);
       reconcileVisibleRepeatTasks();
       renderAllColumns();
@@ -2527,9 +2520,37 @@ function toggleTaskCompletionForShortcut(taskId) {
     }
     moveCompletedTasksToBottom(column);
   } else {
-    task.complete = false;
-    ensureTaskRolloverState(task);
-    task.completedOnDate = null;
+    if (column.isoDate < todayISO) {
+      const taskIndex = column.tasks.findIndex(t => t.id === task.id);
+      if (taskIndex !== -1) {
+        column.tasks.splice(taskIndex, 1);
+      }
+      clearTaskCompletionMetadata(task);
+      task.startDate = todayISO;
+      task.scheduledTime = null;
+
+      const todayCol = ensureColumnForDate(todayISO);
+      const firstCompletedIndex = todayCol.tasks.findIndex(t => t.complete);
+      const incompleteCount = firstCompletedIndex === -1 ? todayCol.tasks.length : firstCompletedIndex;
+      const requestedIndex = Number.isInteger(task.previousIncompleteIndex)
+        ? task.previousIncompleteIndex
+        : (settings.taskRolloverPosition === 'top' ? 0 : incompleteCount);
+      const insertionIndex = Math.max(0, Math.min(requestedIndex, incompleteCount));
+      todayCol.tasks.splice(insertionIndex, 0, task);
+      delete task.previousIncompleteIndex;
+
+      renderColumn(column);
+      renderColumn(todayCol);
+      renderCalendarEvents();
+      persistTask(task, 0);
+      reconcileVisibleRepeatTasks();
+      renderAllColumns();
+      refreshTaskDetailModalIfOpen(task.id);
+      setActiveTaskSelection(task.id, 'keyboard', todayISO);
+      return true;
+    }
+
+    clearTaskCompletionMetadata(task);
     const taskIndex = column.tasks.findIndex(t => t.id === task.id);
     if (taskIndex !== -1) {
       const [uncompletedTask] = column.tasks.splice(taskIndex, 1);
@@ -2545,6 +2566,7 @@ function toggleTaskCompletionForShortcut(taskId) {
   }
 
   renderColumn(column);
+  renderCalendarEvents();
   persistTask(task, 0);
   reconcileVisibleRepeatTasks();
   renderAllColumns();
@@ -3331,9 +3353,7 @@ function restoreBacklogTask(taskId, options = {}) {
       task.startDate = targetIso;
       moveCompletedTasksToBottom(targetCol);
     } else if (sourceIso < todayISO && targetIso >= todayISO) {
-      ensureTaskRolloverState(task);
-      task.complete = false;
-      task.completedOnDate = null;
+      clearTaskCompletionMetadata(task);
       task.startDate = targetIso;
       task.scheduledTime = null;
     } else {
@@ -3380,9 +3400,7 @@ function restoreTrashTask(taskId, options = {}) {
       task.startDate = targetIso;
       moveCompletedTasksToBottom(targetCol);
     } else if (sourceIso < todayISO && targetIso >= todayISO) {
-      ensureTaskRolloverState(task);
-      task.complete = false;
-      task.completedOnDate = null;
+      clearTaskCompletionMetadata(task);
       task.startDate = targetIso;
       task.scheduledTime = null;
     } else {
@@ -3464,8 +3482,7 @@ function releaseIneligibleArchivedTasks() {
     }
     task.archivedAt = null;
     task.archiveSourceDate = null;
-    task.complete = false;
-    task.completedOnDate = null;
+    clearTaskCompletionMetadata(task);
     released.push(task);
   });
 
@@ -3500,8 +3517,7 @@ function returnArchivedTasksToTodayColumn() {
     ensureTaskRolloverState(task);
     task.archivedAt = null;
     task.archiveSourceDate = null;
-    task.complete = false;
-    task.completedOnDate = null;
+    clearTaskCompletionMetadata(task);
   });
 
   if (settings.taskRolloverPosition === 'top') {
@@ -3532,6 +3548,7 @@ function ensureTaskRolloverState(task) {
   if (!task.dailyActualTime || typeof task.dailyActualTime !== 'object') task.dailyActualTime = {};
   if (!task.subtaskCompletionsByDate || typeof task.subtaskCompletionsByDate !== 'object') task.subtaskCompletionsByDate = {};
   if (typeof task.completedOnDate !== 'string' && task.completedOnDate !== null) task.completedOnDate = null;
+  if (typeof task.completedAt !== 'string' && task.completedAt !== null) task.completedAt = null;
   if (typeof task.backlogHorizon !== 'string' && task.backlogHorizon !== null) task.backlogHorizon = null;
   if (!Number.isFinite(task.backlogOrder) && task.backlogOrder !== null) task.backlogOrder = null;
   if (typeof task.archivedAt !== 'string' && task.archivedAt !== null) task.archivedAt = null;
@@ -3630,13 +3647,115 @@ function getAggregatePlannedMinutes(task) {
   return (task.timeEstimateMinutes || 0) + totalTimeboxMinutes;
 }
 
+function setTaskPlannedMinutesTotal(task, totalMinutes) {
+  ensureTaskTimeState(task);
+  const safeTotalMinutes = Math.max(0, Math.round(totalMinutes || 0));
+  const subtaskPlanned = (task.subtasks || []).reduce((sum, subtask) => {
+    ensureSubtaskTimeState(subtask);
+    return sum + (subtask.plannedMinutes || 0);
+  }, 0);
+  task.ownPlannedMinutes = Math.max(0, safeTotalMinutes - subtaskPlanned);
+  syncTaskAggregateTimes(task);
+}
+
+function buildTaskCompletedAtTimestamp(isoDate) {
+  if (!isoDate) return new Date().toISOString();
+  const todayISO = getTodayISO();
+  if (isoDate === todayISO) return new Date().toISOString();
+
+  const [year, month, day] = isoDate.split('-').map(Number);
+  if (!year || !month || !day) return new Date().toISOString();
+  return new Date(year, month - 1, day, 23, 59, 0, 0).toISOString();
+}
+
+function applyTaskCompletionMetadata(task, isoDate) {
+  ensureTaskRolloverState(task);
+  task.complete = true;
+  task.completedOnDate = isoDate;
+  task.completedAt = buildTaskCompletedAtTimestamp(isoDate);
+}
+
+function clearTaskCompletionMetadata(task) {
+  ensureTaskRolloverState(task);
+  task.complete = false;
+  task.completedOnDate = null;
+  task.completedAt = null;
+}
+
+function trimFutureTimeboxesOnCompletion(task, isoDate) {
+  ensureTaskTimeState(task);
+  ensureTaskRolloverState(task);
+
+  const preTrimPlannedMinutes = Math.max(0, Math.round(task.timeEstimateMinutes || 0));
+  const completionOffset = timestampToOffset(task.completedAt || buildTaskCompletedAtTimestamp(isoDate));
+  const removedEventIds = [];
+  const retainedEventIds = new Set();
+  const updatedRetainedEvents = [];
+  const retainedSegments = [];
+
+  state.calendarEvents = state.calendarEvents.filter(evt => {
+    if (!evt || evt.taskId !== task.id || evt.systemType === 'actual') return true;
+    if (!evt.date || evt.date < isoDate) return true;
+
+    if (evt.date > isoDate) {
+      removedEventIds.push(evt.id);
+      return false;
+    }
+
+    const eventEnd = evt.offset + evt.duration;
+    const retainedDuration = Math.max(0, Math.min(eventEnd, completionOffset) - evt.offset);
+    if (retainedDuration <= 0) {
+      removedEventIds.push(evt.id);
+      return false;
+    }
+
+    retainedEventIds.add(evt.id);
+    retainedSegments.push({
+      eventId: evt.id,
+      date: evt.date,
+      offset: evt.offset,
+      duration: retainedDuration
+    });
+
+    if (retainedDuration < evt.duration) {
+      evt.duration = retainedDuration;
+      updatedRetainedEvents.push(evt);
+    }
+
+    return true;
+  });
+
+  removedEventIds.forEach(persistDeleteCalendarEvent);
+
+  const retainedMinutes = retainedSegments.reduce((sum, segment) => sum + Math.round(segment.duration * 60), 0);
+  if (retainedMinutes > 0) {
+    setTaskPlannedMinutesTotal(task, retainedMinutes);
+    task.scheduledTime = null;
+  } else if (removedEventIds.length > 0 || updatedRetainedEvents.length > 0) {
+    setTaskPlannedMinutesTotal(task, preTrimPlannedMinutes);
+    task.scheduledTime = null;
+  }
+
+  return {
+    preTrimPlannedMinutes,
+    retainedMinutes,
+    retainedSegments,
+    retainedEventIds: Array.from(retainedEventIds),
+    updatedRetainedEvents,
+    removedAny: removedEventIds.length > 0 || updatedRetainedEvents.length > 0,
+    hasRetainedSegments: retainedSegments.length > 0
+  };
+}
+
 function completeTaskAsOf(task, isoDate) {
   ensureTaskRolloverState(task);
   ensureTaskTimeState(task);
-  task.complete = true;
-  task.completedOnDate = isoDate;
+  applyTaskCompletionMetadata(task, isoDate);
+  const trimResult = trimFutureTimeboxesOnCompletion(task, isoDate);
+  const shouldAutoCopyPlannedAsActual = settings.countPlannedAsActual && !task.actualTimeSeconds && task.timeEstimateMinutes;
+
   // Auto-set actual time to planned time if no actual time exists
-  if (settings.countPlannedAsActual && !task.actualTimeSeconds && task.timeEstimateMinutes) {
+  if (shouldAutoCopyPlannedAsActual) {
     task.ownActualTimeSeconds = (task.ownPlannedMinutes || 0) * 60;
     task.subtasks.forEach(s => {
       if (s.plannedMinutes && !s.actualTimeSeconds) {
@@ -3652,6 +3771,41 @@ function completeTaskAsOf(task, isoDate) {
         task.dailyActualTime[isoDate].subtasks[s.id] = s.actualTimeSeconds;
       }
     });
+    if (trimResult.hasRetainedSegments) {
+      state.calendarEvents = state.calendarEvents.filter(evt => {
+        if (evt.systemType === 'actual') return true;
+        if (evt.taskId !== task.id) return true;
+        if (!trimResult.retainedEventIds.includes(evt.id)) return true;
+        persistDeleteCalendarEvent(evt.id);
+        return false;
+      });
+      trimResult.retainedSegments.forEach(segment => {
+        const evt = {
+          id: 'act-' + uid(),
+          title: task.title,
+          colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+          offset: segment.offset,
+          duration: Math.max(segment.duration, 1 / SNAP_STEPS_PER_HOUR),
+          taskId: task.id,
+          subtaskId: null,
+          date: segment.date,
+          systemType: 'actual',
+          source: 'completion',
+          zOrder: ++calZCounter
+        };
+        state.calendarEvents.push(evt);
+        persistCalendarEvent(evt);
+      });
+      renderCalendarEvents();
+    } else if (settings.visualizeActualTimeOnCalendar && isoDate === getTodayISO()) {
+      syncActualTimeEventsFromDailyLog(task, isoDate, 'completion');
+    } else {
+      renderCalendarEvents();
+    }
+    focusState.lastTimerEventId = null;
+    focusState.lastTimerStopTimestamp = null;
+  } else {
+    trimResult.updatedRetainedEvents.forEach(persistCalendarEvent);
   }
   // Mark subtasks complete
   if (task.subtasks) {
@@ -3785,6 +3939,7 @@ function createActualTimeEvent(task, subtaskId, isoDate, offset, duration, sourc
     zOrder: ++calZCounter
   };
   state.calendarEvents.push(evt);
+  persistCalendarEvent(evt);
   renderCalendarEvents();
   return evt;
 }
@@ -3800,16 +3955,102 @@ function getActualTimeEventsForTask(taskId, date, subtaskId) {
 
 function removeActualTimeEventsForTask(taskId, date, subtaskId) {
   let removedSeconds = 0;
+  const removedIds = [];
   state.calendarEvents = state.calendarEvents.filter(e => {
     if (e.systemType === 'actual' && e.taskId === taskId &&
         (!date || e.date === date) &&
         (subtaskId === undefined || e.subtaskId === subtaskId)) {
       removedSeconds += Math.round(e.duration * 3600);
+      removedIds.push(e.id);
       return false;
     }
     return true;
   });
+  removedIds.forEach(persistDeleteCalendarEvent);
   return removedSeconds;
+}
+
+function syncActualTimeEventsFromDailyLog(task, isoDate, source) {
+  if (!task || !isoDate) return;
+  ensureTaskRolloverState(task);
+
+  removeActualTimeEventsForTask(task.id, isoDate);
+
+  const dayEntry = task.dailyActualTime[isoDate];
+  if (!dayEntry) {
+    renderCalendarEvents();
+    return;
+  }
+
+  const segments = [];
+  const ownSeconds = dayEntry.ownSeconds || 0;
+  if (ownSeconds > 0) {
+    segments.push({ subtaskId: null, seconds: ownSeconds });
+  }
+
+  if (dayEntry.subtasks && typeof dayEntry.subtasks === 'object') {
+    const orderedSubtasks = Array.isArray(task.subtasks) ? task.subtasks : [];
+    const seenSubtaskIds = new Set();
+
+    orderedSubtasks.forEach(subtask => {
+      const seconds = dayEntry.subtasks[subtask.id] || 0;
+      if (seconds > 0) {
+        segments.push({ subtaskId: subtask.id, seconds });
+        seenSubtaskIds.add(subtask.id);
+      }
+    });
+
+    Object.entries(dayEntry.subtasks).forEach(([subtaskId, seconds]) => {
+      if (seenSubtaskIds.has(subtaskId) || !seconds) return;
+      segments.push({ subtaskId, seconds });
+    });
+  }
+
+  if (!segments.length) {
+    renderCalendarEvents();
+    return;
+  }
+
+  const nowOffset = timestampToOffset(Date.now());
+  let endOffset = nowOffset;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const segment = segments[i];
+    const durationHours = segment.seconds / 3600;
+    const startOffset = Math.max(0, endOffset - durationHours);
+    const clampedDuration = endOffset - startOffset;
+    if (clampedDuration > 0) {
+      createActualTimeEvent(task, segment.subtaskId, isoDate, startOffset, clampedDuration, source);
+    }
+    endOffset = startOffset;
+    if (endOffset <= 0) break;
+  }
+}
+
+function getAllKnownTasks() {
+  const tasksById = new Map();
+
+  function addTask(task) {
+    if (!task || !task.id || tasksById.has(task.id)) return;
+    tasksById.set(task.id, task);
+  }
+
+  state.columns.forEach(col => {
+    (col.tasks || []).forEach(addTask);
+  });
+  (state.backlog || []).forEach(addTask);
+  (state.archive || []).forEach(addTask);
+
+  return Array.from(tasksById.values());
+}
+
+function backfillTodayActualTimeEventsFromLogs() {
+  const todayISO = getTodayISO();
+  getAllKnownTasks().forEach(task => {
+    ensureTaskTimeState(task);
+    if (getTaskDailyActualSeconds(task, todayISO) <= 0) return;
+    if (getActualTimeEventsForTask(task.id, todayISO).length > 0) return;
+    syncActualTimeEventsFromDailyLog(task, todayISO, 'backfill');
+  });
 }
 
 function findSubtask(task, subtaskId) {
@@ -5047,6 +5288,59 @@ function attachDailyShutdownDonutEvents(panelEl) {
       tooltip.hidden = true;
     });
   });
+}
+
+function ensureRolloverTooltip() {
+  if (rolloverTooltipEl && rolloverTooltipEl.isConnected) return rolloverTooltipEl;
+  rolloverTooltipEl = document.createElement('div');
+  rolloverTooltipEl.className = 'app-tooltip app-tooltip--floating';
+  rolloverTooltipEl.hidden = true;
+  document.body.appendChild(rolloverTooltipEl);
+  return rolloverTooltipEl;
+}
+
+function hideRolloverTooltip() {
+  activeRolloverTooltipTarget = null;
+  if (!rolloverTooltipEl) return;
+  rolloverTooltipEl.hidden = true;
+  rolloverTooltipEl.textContent = '';
+}
+
+function positionRolloverTooltip(target) {
+  const tooltip = ensureRolloverTooltip();
+  if (!target || !target.isConnected || tooltip.hidden) {
+    hideRolloverTooltip();
+    return;
+  }
+
+  const anchor = target.querySelector('.rollover-icon') || target;
+  const rect = anchor.getBoundingClientRect();
+  const spacing = 10;
+  const viewportPadding = 8;
+  const tooltipWidth = tooltip.offsetWidth;
+  const tooltipHeight = tooltip.offsetHeight;
+  const desiredCenterX = rect.left + (rect.width / 2);
+  const minCenterX = viewportPadding + (tooltipWidth / 2);
+  const maxCenterX = window.innerWidth - viewportPadding - (tooltipWidth / 2);
+  const centerX = Math.min(Math.max(desiredCenterX, minCenterX), maxCenterX);
+  const top = Math.min(rect.bottom + spacing, window.innerHeight - viewportPadding - tooltipHeight);
+
+  tooltip.style.left = `${centerX}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function showRolloverTooltip(target) {
+  const label = target ? target.getAttribute('data-rollover-tooltip') : '';
+  if (!target || !label) {
+    hideRolloverTooltip();
+    return;
+  }
+
+  const tooltip = ensureRolloverTooltip();
+  activeRolloverTooltipTarget = target;
+  tooltip.textContent = label;
+  tooltip.hidden = false;
+  positionRolloverTooltip(target);
 }
 
 function renderDailyShutdownColumns() {
@@ -6756,6 +7050,19 @@ function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth, options = 
   `;
 }
 
+function getTaskPickerIsoDate(loc) {
+  if (!loc) return getTodayISO();
+  return loc.task?.repeatOccurrenceDate || loc.task?.startDate || loc.column?.isoDate || getTodayISO();
+}
+
+function getPickerViewStateFromIsoDate(isoDate) {
+  const viewDate = parseISO(isoDate || getTodayISO());
+  return {
+    viewYear: viewDate.getFullYear(),
+    viewMonth: viewDate.getMonth()
+  };
+}
+
 function getBacklogHorizonFromShortcutKey(key) {
   return BACKLOG_HORIZONS.find(horizon => horizon.shortcut === key) || null;
 }
@@ -7186,6 +7493,7 @@ function handleDuplicateTask(taskId) {
     dailyActualTime: {},
     subtaskCompletionsByDate: {},
     completedOnDate: null,
+    completedAt: null,
     notes: task.notes || ''
   };
 
@@ -7287,11 +7595,12 @@ function openStartDatePicker(taskId) {
   closeDueDatePicker();
   const loc = getTaskLocation(taskId);
   if (!loc) return;
-  const today = new Date();
+  const pickerIsoDate = getTaskPickerIsoDate(loc);
+  const { viewYear, viewMonth } = getPickerViewStateFromIsoDate(pickerIsoDate);
   startDatePickerState = {
     taskId,
-    viewYear: today.getFullYear(),
-    viewMonth: today.getMonth(),
+    viewYear,
+    viewMonth,
     mode: loc.location === 'backlog' ? 'backlog-with-calendar' : 'default'
   };
   renderStartDatePickerInModal();
@@ -7308,12 +7617,10 @@ function renderStartDatePickerInModal() {
   const loc = getTaskLocation(startDatePickerState.taskId);
   if (!loc) return;
 
-  const currentIsoDate = loc.column.isoDate || getTodayISO();
+  const currentIsoDate = getTaskPickerIsoDate(loc);
   const calendarSelectedIsoDate = loc.location === 'backlog'
     ? null
-    : (loc.location === 'archive'
-        ? (loc.task.startDate || currentIsoDate)
-        : currentIsoDate);
+    : currentIsoDate;
 
   const existing = document.querySelector('[data-sdp]');
   if (existing) existing.remove();
@@ -7349,7 +7656,7 @@ function handleStartDateAction(action, data) {
   const loc = getTaskLocation(taskId);
   if (!loc) return;
 
-  const currentIsoDate = loc.column.isoDate || getTodayISO();
+  const currentIsoDate = getTaskPickerIsoDate(loc);
   let targetDate = null;
 
   switch (action) {
@@ -7427,11 +7734,12 @@ function openCardDatePicker(taskId, anchorCard = null) {
   closeCardDatePicker();
   const loc = getTaskLocation(taskId);
   if (!loc) return;
-  const today = new Date();
+  const pickerIsoDate = getTaskPickerIsoDate(loc);
+  const { viewYear, viewMonth } = getPickerViewStateFromIsoDate(pickerIsoDate);
   cardDatePickerState = {
     taskId,
-    viewYear: today.getFullYear(),
-    viewMonth: today.getMonth(),
+    viewYear,
+    viewMonth,
     anchorCard,
     mode: loc.location === 'backlog' ? 'backlog-with-calendar' : 'default'
   };
@@ -7464,12 +7772,10 @@ function renderCardDatePicker() {
   const existing = document.querySelector('[data-card-sdp]');
   if (existing) existing.remove();
 
-  const currentIsoDate = loc.column.isoDate || getTodayISO();
+  const currentIsoDate = getTaskPickerIsoDate(loc);
   const calendarSelectedIsoDate = loc.location === 'backlog'
     ? null
-    : (loc.location === 'archive'
-        ? (loc.task.startDate || currentIsoDate)
-        : currentIsoDate);
+    : currentIsoDate;
 
   const card = (cardDatePickerState.anchorCard && cardDatePickerState.anchorCard.isConnected)
     ? cardDatePickerState.anchorCard
@@ -7570,7 +7876,7 @@ function handleCardDateAction(action, data) {
   const loc = getTaskLocation(taskId);
   if (!loc) return;
 
-  const currentIsoDate = loc.column.isoDate || getTodayISO();
+  const currentIsoDate = getTaskPickerIsoDate(loc);
   let targetDate = null;
 
   switch (action) {
@@ -9561,6 +9867,7 @@ function stopFocusTimer() {
         const prevEvt = state.calendarEvents.find(e => e.id === focusState.lastTimerEventId);
         if (prevEvt) {
           prevEvt.duration = endOffset - prevEvt.offset;
+          persistCalendarEvent(prevEvt);
           renderCalendarEvents();
         } else {
           const evt = createActualTimeEvent(timerTask, focusState.subtaskId, todayISO, startOffset, duration, 'timer');
@@ -10242,20 +10549,10 @@ function renderFocusModal(task, autoStart) {
       closeFocusPicker();
       const t = findTaskById(focusState.taskId);
       if (!t) return;
-      t.complete = !t.complete;
-      ensureTaskRolloverState(t);
-      t.completedOnDate = t.complete ? getTodayISO() : null;
-      if (t.complete && t.subtasks) {
-        const todayISO = getTodayISO();
-        t.subtasks.forEach(s => {
-          if (!s.done) {
-            s.done = true;
-            if (!t.subtaskCompletionsByDate[todayISO]) t.subtaskCompletionsByDate[todayISO] = [];
-            if (!t.subtaskCompletionsByDate[todayISO].includes(s.id)) {
-              t.subtaskCompletionsByDate[todayISO].push(s.id);
-            }
-          }
-        });
+      if (!t.complete) {
+        completeTaskAsOf(t, getTodayISO());
+      } else {
+        clearTaskCompletionMetadata(t);
       }
       const btn = el.querySelector('[data-focus-check]');
       if (btn) {
@@ -10268,6 +10565,7 @@ function renderFocusModal(task, autoStart) {
       }
       const col = state.columns.find(c => c.tasks.some(tk => tk.id === t.id));
       if (col) renderColumn(col);
+      renderCalendarEvents();
       persistTask(t, 0);
       if (t.complete) {
         if (focusState.running) stopFocusTimer();
@@ -10757,12 +11055,12 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
       dpBadgeClass = ' task-card__time-badge--dp-warning';
       dpBadgeIcon = '<i data-lucide="triangle-alert" class="task-card__time-badge-icon"></i>';
       dpBadgeTooltip = st === 'unplanned'
-        ? ' data-dp-tooltip="Missing planned time"'
-        : ` data-dp-tooltip="Only ${formatMinutes(dpBadgeStatus.availableMinutes)} available"`;
+        ? ' data-tooltip="Missing planned time"'
+        : ` data-tooltip="Only ${formatMinutes(dpBadgeStatus.availableMinutes)} available"`;
     } else if (st === 'over') {
       dpBadgeClass = ' task-card__time-badge--dp-over';
       dpBadgeIcon = '<i data-lucide="triangle-alert" class="task-card__time-badge-icon"></i>';
-      dpBadgeTooltip = ' data-dp-tooltip="No time available"';
+      dpBadgeTooltip = ' data-tooltip="No time available"';
     }
   }
 
@@ -10813,7 +11111,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
   // Rollover badge
   const rolloverCount = isBacklog ? 0 : (columnIsoDate ? getRolloverCount(task, columnIsoDate) : 0);
   const rolloverBadge = rolloverCount > 0
-    ? `<span class="task-card__rollover-badge" title="Rolled over ${rolloverCount} day${rolloverCount > 1 ? 's' : ''}">
+    ? `<span class="task-card__rollover-badge" data-rollover-tooltip="Rolled over ${rolloverCount} day${rolloverCount > 1 ? 's' : ''}">
          <span class="rollover-icon">
            <i data-lucide="rotate-cw" style="transform: rotate(105deg)"></i>
            <span class="rollover-count">${rolloverCount}</span>
@@ -11590,6 +11888,7 @@ function getCalendarEventsForDate(isoDate) {
   // 1. Get stored calendar events for this date
   const stored = state.calendarEvents.filter(evt => {
     if (evt.date !== isoDate) return false;
+    if (evt.systemType === 'actual' && !settings.visualizeActualTimeOnCalendar) return false;
     if (!evt.taskId) return true;
     const task = findTaskById(evt.taskId);
     return taskMatchesChannelFilterId(task, filterId);
@@ -11618,6 +11917,71 @@ function getCalendarEventsForDate(isoDate) {
   }
 
   return [...stored, ...dynamic];
+}
+
+function getTaskCompletionOffset(task) {
+  ensureTaskRolloverState(task);
+  if (!task.completedAt) return null;
+  const completedAt = new Date(task.completedAt);
+  if (Number.isNaN(completedAt.getTime())) return null;
+  return completedAt.getHours()
+    + (completedAt.getMinutes() / 60)
+    + (completedAt.getSeconds() / 3600)
+    + (completedAt.getMilliseconds() / 3600000);
+}
+
+function getCalendarCompletionMarkersForDate(isoDate) {
+  const filterId = getActiveTaskFilterId();
+  return getAllKnownTasks()
+    .filter(task => {
+      ensureTaskRolloverState(task);
+      return task.completedOnDate === isoDate
+        && !!task.completedAt
+        && taskMatchesChannelFilterId(task, filterId);
+    })
+    .map(task => ({
+      taskId: task.id,
+      title: task.title || 'Task',
+      offset: getTaskCompletionOffset(task)
+    }))
+    .filter(marker => Number.isFinite(marker.offset))
+    .sort((a, b) => a.offset - b.offset || a.taskId.localeCompare(b.taskId));
+}
+
+function renderCalendarCompletionMarkers(timeGrid, visibleDate, anchorEl) {
+  timeGrid.querySelectorAll('.cal-completion-marker').forEach(el => el.remove());
+  if (settings.hideCompletedTasksInCalendar) return;
+
+  const markers = getCalendarCompletionMarkersForDate(visibleDate);
+  if (!markers.length) return;
+
+  const hourHeight = getHourHeightPx(timeGrid);
+  const overlapThresholdPx = 8;
+  const horizontalStepPx = 4;
+  let previousTopPx = null;
+  let clusterIndex = 0;
+
+  markers.forEach(marker => {
+    const clampedOffset = clampCalendarOffset(marker.offset, 0, timeGrid);
+    const topPx = clampedOffset * hourHeight;
+    if (previousTopPx !== null && Math.abs(topPx - previousTopPx) <= overlapThresholdPx) {
+      clusterIndex += 1;
+    } else {
+      clusterIndex = 0;
+    }
+    previousTopPx = topPx;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cal-completion-marker';
+    button.dataset.taskId = marker.taskId;
+    button.setAttribute('aria-label', `Open completed task: ${marker.title}`);
+    button.setAttribute('data-rollover-tooltip', marker.title);
+    button.style.setProperty('--offset', String(clampedOffset));
+    button.style.setProperty('--marker-shift', `${clusterIndex * horizontalStepPx}px`);
+    button.innerHTML = `<span class="complete-circle complete-circle--done complete-circle--tiny">${CHECK_SVG}</span>`;
+    timeGrid.insertBefore(button, anchorEl);
+  });
 }
 
 // Find a calendar event by ID — checks stored events first, then dynamic (dyn-) events
@@ -11676,6 +12040,7 @@ function renderCalendarEvents() {
 
   // Remove all rendered events, keeping the ghost element
   timeGrid.querySelectorAll('.cal-event:not(#cal-event-ghost)').forEach(el => el.remove());
+  timeGrid.querySelectorAll('.cal-completion-marker').forEach(el => el.remove());
 
   eventsForDate.forEach(evt => {
     if (!Number.isFinite(evt.zOrder)) {
@@ -11714,6 +12079,8 @@ function renderCalendarEvents() {
     // Insert before ghost so ghost stays on top in DOM/z-order
     timeGrid.insertBefore(el, ghost);
   });
+
+  renderCalendarCompletionMarkers(timeGrid, visibleDate, ghost);
 }
 
 function normalizeWorkdayBounds(timeGridEl = null) {
@@ -12223,7 +12590,16 @@ function moveTaskToDate(taskId, targetIsoDate) {
   const sourceCol = ctx.column;
   const targetCol = findOrCreateColumn(targetIsoDate);
 
-  if (sourceCol.id === targetCol.id) return;
+  if (sourceCol.id === targetCol.id) {
+    ensureTaskRolloverState(ctx.task);
+    if (ctx.task.startDate === targetIsoDate) return;
+    ctx.task.startDate = targetIsoDate;
+    markTaskAsRepeatModified(ctx.task);
+    renderColumn(sourceCol);
+    renderCalendarEvents();
+    persistTask(ctx.task, 0);
+    return;
+  }
 
   sourceCol.tasks.splice(ctx.index, 1);
   targetCol.tasks.push(ctx.task);
@@ -12241,6 +12617,7 @@ function moveTaskToDate(taskId, targetIsoDate) {
 
   renderColumn(sourceCol);
   renderColumn(targetCol);
+  renderCalendarEvents();
   persistTask(ctx.task, 0);
 }
 
@@ -12291,6 +12668,7 @@ function commitBacklogAddTask(horizonId, title) {
     dailyActualTime: {},
     subtaskCompletionsByDate: {},
     completedOnDate: null,
+    completedAt: null,
     backlogHorizon: horizonId,
     backlogOrder: null
   };
@@ -12350,7 +12728,8 @@ function commitAddTask(colEl) {
     startDate: column.isoDate,
     dailyActualTime: {},
     subtaskCompletionsByDate: {},
-    completedOnDate: null
+    completedOnDate: null,
+    completedAt: null
   });
 
   const newTask = column.tasks[0];
@@ -12775,9 +13154,7 @@ function attachEvents() {
         task.startDate = targetCol.isoDate;
         moveCompletedTasksToBottom(targetCol);
       } else if (sourceIso < todayISO && targetCol.isoDate >= todayISO) {
-        ensureTaskRolloverState(task);
-        task.complete = false;
-        task.completedOnDate = null;
+        clearTaskCompletionMetadata(task);
         task.startDate = targetCol.isoDate;
         task.scheduledTime = null;
       } else {
@@ -12837,6 +13214,7 @@ function attachEvents() {
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderColumn(targetCol);
+      renderCalendarEvents();
       persistTask(task, 0);
       setTimeout(finalizeTaskDragState, 0);
       return true;
@@ -12846,14 +13224,13 @@ function attachEvents() {
     // to the new day so untimed/unused tasks behave like a move instead of a duplicate.
     if (sourceCol.isoDate < todayISO && targetCol.isoDate < todayISO) {
       targetCol.tasks.splice(insertIndex, 0, task);
-      ensureTaskRolloverState(task);
-      task.complete = true;
-      task.completedOnDate = targetCol.isoDate;
+      applyTaskCompletionMetadata(task, targetCol.isoDate);
       task.startDate = targetCol.isoDate;
       moveCompletedTasksToBottom(targetCol);
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderColumn(targetCol);
+      renderCalendarEvents();
       persistTask(task, 0);
       setTimeout(finalizeTaskDragState, 0);
       return true;
@@ -12862,9 +13239,7 @@ function attachEvents() {
     // Dropping from past to current/future → uncomplete, set new startDate
     if (sourceCol.isoDate < todayISO && targetCol.isoDate >= todayISO) {
       targetCol.tasks.splice(insertIndex, 0, task);
-      ensureTaskRolloverState(task);
-      task.complete = false;
-      task.completedOnDate = null;
+      clearTaskCompletionMetadata(task);
       task.startDate = targetCol.isoDate;
       // Clear scheduledTime so it doesn't create a phantom timebox on the new date
       task.scheduledTime = null;
@@ -13909,9 +14284,13 @@ function attachArchiveEvents() {
       const card = completeBtn.closest('.task-card');
       const task = card ? findArchiveTask(card.dataset.taskId) : null;
       if (!task) return;
-      task.complete = !task.complete;
-      task.completedOnDate = task.complete ? getTodayISO() : null;
+      if (task.complete) {
+        clearTaskCompletionMetadata(task);
+      } else {
+        completeTaskAsOf(task, getTodayISO());
+      }
       renderArchivePanel();
+      renderCalendarEvents();
       persistTask(task, 0);
       return;
     }
@@ -14605,6 +14984,7 @@ function detachModalSubtaskToBacklogTask(task, subtaskId) {
     dailyActualTime: {},
     subtaskCompletionsByDate: {},
     completedOnDate: null,
+    completedAt: null,
     backlogHorizon: task.backlogHorizon || 'week',
     backlogOrder: null
   };
@@ -15093,10 +15473,13 @@ function attachTaskModalEvents() {
       if (openModalIsArchive) {
         const task = findArchiveTask(openModalTaskId);
         if (!task) return;
-        task.complete = !task.complete;
-        ensureTaskRolloverState(task);
-        task.completedOnDate = task.complete ? getTodayISO() : null;
+        if (task.complete) {
+          clearTaskCompletionMetadata(task);
+        } else {
+          completeTaskAsOf(task, getTodayISO());
+        }
         renderArchivePanel();
+        renderCalendarEvents();
         persistTask(task, 0);
         openTaskDetailModal(openModalTaskId);
         return;
@@ -16410,6 +16793,40 @@ function attachShortcutEvents() {
   document.addEventListener('mouseover', handleOpenPickerPointerHover, true);
 
   document.addEventListener('mouseover', e => {
+    const badge = e.target instanceof Element ? e.target.closest('[data-rollover-tooltip]') : null;
+    if (!badge) {
+      hideRolloverTooltip();
+      return;
+    }
+    const previousBadge = e.relatedTarget instanceof Element ? e.relatedTarget.closest('[data-rollover-tooltip]') : null;
+    if (previousBadge === badge) return;
+    showRolloverTooltip(badge);
+  }, true);
+
+  document.addEventListener('mouseout', e => {
+    const badge = e.target instanceof Element ? e.target.closest('[data-rollover-tooltip]') : null;
+    if (!badge) return;
+    const nextBadge = e.relatedTarget instanceof Element ? e.relatedTarget.closest('[data-rollover-tooltip]') : null;
+    if (nextBadge === badge) return;
+    hideRolloverTooltip();
+  }, true);
+
+  document.addEventListener('mousemove', e => {
+    if (!activeRolloverTooltipTarget) return;
+    positionRolloverTooltip(activeRolloverTooltipTarget);
+  }, true);
+
+  document.addEventListener('scroll', () => {
+    if (!activeRolloverTooltipTarget) return;
+    positionRolloverTooltip(activeRolloverTooltipTarget);
+  }, true);
+
+  window.addEventListener('resize', () => {
+    if (!activeRolloverTooltipTarget) return;
+    positionRolloverTooltip(activeRolloverTooltipTarget);
+  });
+
+  document.addEventListener('mouseover', e => {
     if (shortcutState.suppressHoverUntilPointerMove) return;
     if (cardDatePickerState) return;
     const card = e.target instanceof Element ? e.target.closest('.task-card') : null;
@@ -16434,6 +16851,9 @@ function attachShortcutEvents() {
 
   document.addEventListener('click', e => {
     const card = e.target instanceof Element ? e.target.closest('.task-card') : null;
+    if (activeRolloverTooltipTarget && !(e.target instanceof Element && e.target.closest('[data-rollover-tooltip]'))) {
+      hideRolloverTooltip();
+    }
     if (!card || card.dataset.ghostDate) return;
     shortcutState.suppressHoverUntilPointerMove = false;
     setActiveTaskSelectionFromCard(card, 'click');
@@ -16693,6 +17113,15 @@ function attachCalendarEvents() {
   const timeGrid    = document.getElementById('time-grid');
   const ghost       = document.getElementById('cal-event-ghost');
   const calDragLine = document.getElementById('cal-drag-line');
+
+  timeGrid.addEventListener('click', e => {
+    const marker = e.target.closest('.cal-completion-marker');
+    if (!marker) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const taskId = marker.getAttribute('data-task-id');
+    if (taskId) openTaskDetailModal(taskId);
+  });
 
   function bringEventToFront(eventId, el) {
     const evt = findCalendarEventById(eventId);
@@ -17590,6 +18019,7 @@ function renderSettingsDisplay() {
   const darkModeLabels = { light: 'Light', dark: 'Dark' };
   return `<section class="settings-view__section" id="settings-section-display">
     <h2 class="settings-view__section-title">Display</h2>
+    ${settingsRowHTML('Hide completed tasks in calendar', "Don't show checkmarks in the calendar for completed tasks", settingsToggleHTML('hideCompletedTasksInCalendar', settings.hideCompletedTasksInCalendar))}
     ${settingsRowHTML('Dark mode', 'Show interface in dark mode', settingsSelectHTML('darkMode', darkModeLabels[settings.darkMode]))}
   </section>`;
 }
@@ -17598,6 +18028,7 @@ function renderSettingsTimeboxing() {
   const label = `${settings.defaultTimeboxDurationMinutes} min`;
   return `<section class="settings-view__section" id="settings-section-timeboxing">
     <h2 class="settings-view__section-title">Timeboxing</h2>
+    ${settingsRowHTML('Visualize actual time for tasks on calendar', "Show when you've tracked actually working on a task on your calendar.", settingsToggleHTML('visualizeActualTimeOnCalendar', settings.visualizeActualTimeOnCalendar))}
     ${settingsRowHTML('Default duration when scheduling tasks', 'When you drag a task onto your calendar, how much time to block off', settingsSelectHTML('defaultTimeboxDurationMinutes', label))}
   </section>`;
 }
@@ -18409,6 +18840,17 @@ function attachSettingsEvents() {
       }
       persistSettings();
 
+      if (key === 'visualizeActualTimeOnCalendar') {
+        if (!isOn) backfillTodayActualTimeEventsFromLogs();
+        renderCalendarEvents();
+        return;
+      }
+
+      if (key === 'hideCompletedTasksInCalendar') {
+        renderCalendarEvents();
+        return;
+      }
+
       if (key === 'autoArchiveEnabled') {
         const generalSection = document.getElementById('settings-section-general');
         if (generalSection) {
@@ -18594,6 +19036,7 @@ function taskToDoc(task, columnDate, orderIndex) {
     scheduledTime: task.scheduledTime || null,
     complete: !!task.complete,
     completedOnDate: task.completedOnDate || null,
+    completedAt: task.completedAt || null,
     tag: task.tag || null,
     integrationColor: task.integrationColor || null,
     subtasks: (task.subtasks || []).map(s => ({
@@ -18633,6 +19076,7 @@ function docToTask(doc) {
     scheduledTime: doc.scheduledTime || null,
     complete: !!doc.complete,
     completedOnDate: doc.completedOnDate || null,
+    completedAt: doc.completedAt || null,
     tag: doc.tag || null,
     integrationColor: doc.integrationColor || null,
     subtasks: (doc.subtasks || []).map(s => ({
