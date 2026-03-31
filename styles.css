@@ -418,6 +418,53 @@ button { cursor: pointer; }
   text-overflow: ellipsis;
 }
 
+.nav-item__status {
+  margin-left: auto;
+  min-width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.nav-item__indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #ff79a7;
+}
+
+.nav-item__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #b4b4b4;
+}
+
+.nav-item__check svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.25;
+}
+
+.nav-item--ritual-complete,
+.nav-item--ritual-complete .nav-icon,
+.nav-item--ritual-complete .nav-label,
+.nav-item--ritual-complete .nav-item__check {
+  color: #b4b4b4;
+}
+
+.nav-item--ritual-complete:hover,
+.nav-item--ritual-complete:hover .nav-icon,
+.nav-item--ritual-complete:hover .nav-label,
+.nav-item--ritual-complete:hover .nav-item__check,
+.nav-item--ritual-complete.nav-item--active,
+.nav-item--ritual-complete.nav-item--active .nav-icon,
+.nav-item--ritual-complete.nav-item--active .nav-label,
+.nav-item--ritual-complete.nav-item--active .nav-item__check {
+  color: #787878;
+}
+
 .sidebar__section {
   margin-top: 20px;
 }

@@ -496,6 +496,10 @@ const dailyPlanningState = {
   step: DAILY_PLANNING_STEPS.ADD_TASKS,
   runDraft: null,
   runHistoryByDate: {},
+  visitedByDate: {},
+  showPriorShutdownReview: false,
+  showingPriorShutdownReview: false,
+  priorShutdownReviewDateISO: null,
   deferPolicy: {
     nextWeekMode: DAILY_PLANNING_DEFER_MODES.NEXT_MONDAY
   },
@@ -523,7 +527,8 @@ const dailyShutdownState = {
   returnToTodayView: false,
   returnToTodayDate: null,
   step: DAILY_SHUTDOWN_STEPS.REVIEW,
-  runDraft: null
+  runDraft: null,
+  historyByDate: {}
 };
 
 const todayViewState = {
@@ -4604,16 +4609,44 @@ function ensureDailyShutdownRunDraft() {
   return dailyShutdownState.runDraft;
 }
 
-function getDailyShutdownWorkedOnTasks(isoDate) {
+function hasCompletedDailyShutdownForDate(isoDate) {
+  const entry = dailyShutdownState.historyByDate[isoDate];
+  return !!(entry && entry.completedAt);
+}
+
+function shouldShowDailyPlanningPriorShutdownReview(targetDate) {
+  const todayISO = getTodayISO();
+  if (!targetDate || targetDate !== todayISO) return false;
+  return !hasCompletedDailyShutdownForDate(addDays(targetDate, -1));
+}
+
+function configureDailyPlanningPriorShutdownReview(targetDate, options = {}) {
+  const { activate = true } = options;
+  const shouldShow = shouldShowDailyPlanningPriorShutdownReview(targetDate);
+  dailyPlanningState.showPriorShutdownReview = shouldShow;
+  dailyPlanningState.priorShutdownReviewDateISO = shouldShow ? addDays(targetDate, -1) : null;
+  dailyPlanningState.showingPriorShutdownReview = shouldShow && activate;
+}
+
+function isDailyPlanningPriorShutdownReviewActive() {
+  return !!(
+    dailyPlanningState.isActive
+    && dailyPlanningState.showPriorShutdownReview
+    && dailyPlanningState.showingPriorShutdownReview
+    && dailyPlanningState.priorShutdownReviewDateISO
+  );
+}
+
+function getDailyShutdownWorkedOnTasks(isoDate, filterId = null) {
   const tasks = [];
   const seen = new Set();
-  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
+  const effectiveFilterId = filterId || (dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all');
   for (const col of state.columns) {
     for (const task of col.tasks) {
       if (!task || seen.has(task.id)) continue;
       if (isRitualTask(task)) continue;
       if (!hasShutdownActivityOnDate(task, isoDate)) continue;
-      if (!taskMatchesChannelFilterId(task, filterId)) continue;
+      if (!taskMatchesChannelFilterId(task, effectiveFilterId)) continue;
       seen.add(task.id);
       tasks.push(task);
     }
@@ -4621,27 +4654,27 @@ function getDailyShutdownWorkedOnTasks(isoDate) {
   return tasks;
 }
 
-function getDailyShutdownMissedTasks(isoDate) {
+function getDailyShutdownMissedTasks(isoDate, filterId = null) {
   const col = ensureColumnForDate(isoDate);
-  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
+  const effectiveFilterId = filterId || (dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all');
   return (col.tasks || []).filter(task =>
     !isRitualTask(task)
     && !hasShutdownActivityOnDate(task, isoDate)
-    && taskMatchesChannelFilterId(task, filterId)
+    && taskMatchesChannelFilterId(task, effectiveFilterId)
   );
 }
 
-function getDailyShutdownTotals(isoDate) {
+function getDailyShutdownTotals(isoDate, filterId = null) {
   const col = ensureColumnForDate(isoDate);
   const seen = new Set();
-  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
+  const effectiveFilterId = filterId || (dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all');
   let plannedMinutes = 0;
   let actualSeconds = 0;
 
   function addTask(task) {
     if (!task || seen.has(task.id)) return;
     if (isRitualTask(task)) return;
-    if (!taskMatchesChannelFilterId(task, filterId)) return;
+    if (!taskMatchesChannelFilterId(task, effectiveFilterId)) return;
     seen.add(task.id);
     ensureTaskTimeState(task);
     plannedMinutes += getPlannedMinutesForDate(task, isoDate);
@@ -4660,16 +4693,16 @@ function getDailyShutdownTotals(isoDate) {
   return { plannedMinutes, actualMinutes, actualSeconds };
 }
 
-function getDailyShutdownChannelBreakdown(isoDate) {
+function getDailyShutdownChannelBreakdown(isoDate, filterId = null) {
   const totals = new Map();
   const seen = new Set();
-  const filterId = dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all';
+  const effectiveFilterId = filterId || (dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all');
 
   for (const col of state.columns) {
     for (const task of col.tasks) {
       if (!task || seen.has(task.id)) continue;
       if (isRitualTask(task)) continue;
-      if (!taskMatchesChannelFilterId(task, filterId)) continue;
+      if (!taskMatchesChannelFilterId(task, effectiveFilterId)) continue;
       seen.add(task.id);
       const seconds = getTaskDailyActualSeconds(task, isoDate);
       if (!seconds) continue;
@@ -4805,6 +4838,7 @@ function completeDailyShutdownRun() {
     draft.updatedAt = new Date().toISOString();
   }
   const snapshot = buildDailyShutdownSnapshot();
+  dailyShutdownState.historyByDate[snapshot.dateISO] = snapshot;
   appendDailyShutdownSnapshotToTask(snapshot);
   persistRituals();
   exitDailyShutdownMode({ restoreTodayFirstColumn: true });
@@ -4904,17 +4938,21 @@ function setSidebarActiveNav(mode) {
   });
   if (mode === 'today') {
     if (todayNav) todayNav.classList.add('nav-item--active');
+    updateDailyPlanningSidebarState();
     return;
   }
   if (mode === 'daily-planning') {
     if (dailyPlanningNav) dailyPlanningNav.classList.add('nav-item--active');
+    updateDailyPlanningSidebarState();
     return;
   }
   if (mode === 'daily-shutdown') {
     if (dailyShutdownNav) dailyShutdownNav.classList.add('nav-item--active');
+    updateDailyPlanningSidebarState();
     return;
   }
   if (homeNav) homeNav.classList.add('nav-item--active');
+  updateDailyPlanningSidebarState();
 }
 
 function isSidebarCollapsed() {
@@ -4955,6 +4993,9 @@ function resetDailyPlanningModeState() {
   dailyPlanningState.returnToTodayDate = null;
   dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = null;
+  dailyPlanningState.showPriorShutdownReview = false;
+  dailyPlanningState.showingPriorShutdownReview = false;
+  dailyPlanningState.priorShutdownReviewDateISO = null;
 }
 
 function resetDailyShutdownModeState() {
@@ -5056,6 +5097,9 @@ function renderDailyPlanningPanelHtml() {
   const workload = getDailyPlanningWorkloadSummary(selectedDate);
   const step = dailyPlanningState.step;
   const hasShutdownTask = !!getDailyShutdownTaskForDate(selectedDate);
+  const showBackToPriorShutdownReview = step === DAILY_PLANNING_STEPS.ADD_TASKS
+    && dailyPlanningState.showPriorShutdownReview
+    && !!dailyPlanningState.priorShutdownReviewDateISO;
 
   const workloadSummary = `${formatMinutes(workload.plannedWorkMinutes)} of ${formatMinutes(workload.capacityMinutes)} planned`;
   let workloadClass = '';
@@ -5096,15 +5140,26 @@ function renderDailyPlanningPanelHtml() {
       </div>
     `;
 
+    const actionHtml = showBackToPriorShutdownReview ? `
+        <div class="daily-planning-panel__actions daily-planning-panel__actions--spaced">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--ghost" type="button" data-dp-prev>
+            <i data-lucide="arrow-left"></i>
+          </button>
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+      ` : `
+        <div class="daily-planning-panel__actions">
+          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
+        </div>
+      `;
+
     return `
       <div class="daily-planning-panel__inner">
         <h2 class="daily-planning-panel__title">What do you want to get done ${escapeHtml(sentenceLabel)}?</h2>
         <p class="daily-planning-panel__subtitle">Add tasks you want to work on ${escapeHtml(sentenceLabel)}.</p>
         <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
         ${shutdownCard}
-        <div class="daily-planning-panel__actions">
-          <button class="daily-planning-panel__btn daily-planning-panel__btn--primary" type="button" data-dp-next>Next</button>
-        </div>
+        ${actionHtml}
         <div class="daily-planning-panel__prompt">
           <p class="daily-planning-panel__prompt-text">What are the most high-impact things you could do ${escapeHtml(sentenceLabel)}?</p>
         </div>
@@ -5201,7 +5256,7 @@ function renderDailyPlanningPanel() {
     dpShareQuill = null;
   }
 
-  if (!dailyPlanningState.isActive) {
+  if (!dailyPlanningState.isActive || isDailyPlanningPriorShutdownReviewActive()) {
     panel.hidden = true;
     panel.innerHTML = '';
     return;
@@ -5288,41 +5343,18 @@ function renderDailyShutdownDonut(segments) {
   `;
 }
 
-function renderDailyShutdownPanelHtml() {
-  if (!dailyShutdownState.isActive) return '';
-  const selectedDate = dailyShutdownState.selectedDate || getTodayISO();
-  const step = dailyShutdownState.step;
-
-  if (step === DAILY_SHUTDOWN_STEPS.SHARE) {
-    return `
-      <div class="daily-shutdown-panel__inner">
-        <h2 class="daily-shutdown-panel__title">Daily shutdown</h2>
-        <p class="daily-shutdown-panel__subtitle">Document and share your shutdown for ${escapeHtml(getDailyShutdownSentenceLabel(selectedDate))}.</p>
-        <div class="daily-shutdown-panel__share-editor" data-ds-share-editor></div>
-        <div class="daily-shutdown-panel__actions daily-shutdown-panel__actions--final">
-          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--ghost" type="button" data-ds-prev>
-            <i data-lucide="arrow-left"></i>
-          </button>
-          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--icon" type="button" data-ds-copy>
-            <i data-lucide="files"></i>
-            <span data-copy-label>Copy</span>
-          </button>
-          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--primary daily-shutdown-panel__btn--icon daily-shutdown-panel__btn--complete" type="button" data-ds-finish>
-            <i data-lucide="check"></i>
-            <span>Shutdown complete</span>
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  const totals = getDailyShutdownTotals(selectedDate);
+function renderDailyShutdownReviewHtml(selectedDate, options = {}) {
+  const {
+    filterId = null,
+    nextActionAttr = 'data-ds-next'
+  } = options;
+  const totals = getDailyShutdownTotals(selectedDate, filterId);
   const actualLabel = formatShortDurationFromMinutes(totals.actualMinutes);
   const plannedLabel = formatShortDurationFromMinutes(totals.plannedMinutes);
   const maxMinutes = 12 * 60;
   const actualPercent = Math.min(100, Math.max(0, (totals.actualMinutes / maxMinutes) * 100));
   const plannedPercent = Math.min(100, Math.max(0, (totals.plannedMinutes / maxMinutes) * 100));
-  const channels = getDailyShutdownChannelBreakdown(selectedDate);
+  const channels = getDailyShutdownChannelBreakdown(selectedDate, filterId);
   const hasActual = totals.actualMinutes > 0;
 
   const donutSection = hasActual ? `
@@ -5357,10 +5389,44 @@ function renderDailyShutdownPanelHtml() {
       </div>
       ${donutSection}
       <div class="daily-shutdown-panel__actions daily-shutdown-panel__actions--review">
-        <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--primary" type="button" data-ds-next>Next</button>
+        <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--primary" type="button" ${nextActionAttr}>Next</button>
       </div>
     </div>
   `;
+}
+
+function renderDailyShutdownPanelHtml() {
+  if (!dailyShutdownState.isActive) return '';
+  const selectedDate = dailyShutdownState.selectedDate || getTodayISO();
+  const step = dailyShutdownState.step;
+
+  if (step === DAILY_SHUTDOWN_STEPS.SHARE) {
+    return `
+      <div class="daily-shutdown-panel__inner">
+        <h2 class="daily-shutdown-panel__title">Daily shutdown</h2>
+        <p class="daily-shutdown-panel__subtitle">Document and share your shutdown for ${escapeHtml(getDailyShutdownSentenceLabel(selectedDate))}.</p>
+        <div class="daily-shutdown-panel__share-editor" data-ds-share-editor></div>
+        <div class="daily-shutdown-panel__actions daily-shutdown-panel__actions--final">
+          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--ghost" type="button" data-ds-prev>
+            <i data-lucide="arrow-left"></i>
+          </button>
+          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--icon" type="button" data-ds-copy>
+            <i data-lucide="files"></i>
+            <span data-copy-label>Copy</span>
+          </button>
+          <button class="daily-shutdown-panel__btn daily-shutdown-panel__btn--primary daily-shutdown-panel__btn--icon daily-shutdown-panel__btn--complete" type="button" data-ds-finish>
+            <i data-lucide="check"></i>
+            <span>Shutdown complete</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  return renderDailyShutdownReviewHtml(selectedDate, {
+    filterId: getTaskFilterIdForScope('dailyShutdown'),
+    nextActionAttr: 'data-ds-next'
+  });
 }
 
 function renderDailyShutdownPanel() {
@@ -5396,6 +5462,26 @@ function renderDailyShutdownPanel() {
     });
   }
 
+  attachDailyShutdownDonutEvents(panel);
+}
+
+function hideDailyShutdownPanel() {
+  const panel = document.getElementById('daily-shutdown-panel');
+  if (!panel) return;
+  panel.hidden = true;
+  panel.innerHTML = '';
+}
+
+function renderDailyPlanningPriorShutdownReviewPanel() {
+  const panel = document.getElementById('daily-shutdown-panel');
+  if (!panel) return;
+  const selectedDate = dailyPlanningState.priorShutdownReviewDateISO || addDays(getTodayISO(), -1);
+  panel.hidden = false;
+  panel.innerHTML = renderDailyShutdownReviewHtml(selectedDate, {
+    filterId: getTaskFilterIdForScope('dailyPlanning'),
+    nextActionAttr: 'data-dp-prior-shutdown-next'
+  });
+  if (typeof lucide !== 'undefined') lucide.createIcons();
   attachDailyShutdownDonutEvents(panel);
 }
 
@@ -5611,12 +5697,12 @@ function scheduleFloatingTooltip(target) {
   }, FLOATING_TOOLTIP_DELAY_MS);
 }
 
-function renderDailyShutdownColumns() {
+function renderDailyShutdownColumnsForDate(selectedDate, options = {}) {
   const container = document.getElementById('day-columns');
   if (!container) return;
-  const selectedDate = dailyShutdownState.selectedDate || getTodayISO();
-  const workedTasks = getDailyShutdownWorkedOnTasks(selectedDate);
-  const missedTasks = getDailyShutdownMissedTasks(selectedDate);
+  const { filterId = null } = options;
+  const workedTasks = getDailyShutdownWorkedOnTasks(selectedDate, filterId);
+  const missedTasks = getDailyShutdownMissedTasks(selectedDate, filterId);
   const homeCol = ensureColumnForDate(selectedDate);
 
   function buildColumn(title, subtitle, tasks, options = {}) {
@@ -5669,6 +5755,13 @@ function renderDailyShutdownColumns() {
   container.appendChild(buildColumn("Didn't get to:", '', missedTasks, { key: 'missed', showActualPlanned: false }));
   container.scrollLeft = 0;
   if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function renderDailyShutdownColumns() {
+  const selectedDate = dailyShutdownState.selectedDate || getTodayISO();
+  renderDailyShutdownColumnsForDate(selectedDate, {
+    filterId: getTaskFilterIdForScope('dailyShutdown')
+  });
 }
 
 function renderDailyShutdownMode() {
@@ -5771,27 +5864,60 @@ function renderDailyPlanningMode() {
   const container = document.getElementById('day-columns');
   if (!board || !container) return;
   applyTodayViewLayout(false);
+  const mainCard = document.querySelector('.main-card');
 
   if (!dailyPlanningState.isActive) {
     board.classList.remove('board--daily-planning');
+    board.classList.remove('board--daily-shutdown');
     container.classList.remove('board__columns--daily-planning');
+    container.classList.remove('board__columns--daily-shutdown');
     board.removeAttribute('data-dp-step');
-    document.querySelector('.main-card')?.classList.remove('main-card--hide-calendar');
+    board.removeAttribute('data-ds-step');
+    mainCard?.classList.remove('main-card--hide-calendar');
+    mainCard?.classList.remove('main-card--daily-shutdown');
     renderDailyPlanningPanel();
+    hideDailyShutdownPanel();
     return;
   }
 
-  const mainCard = document.querySelector('.main-card');
+  const showingPriorShutdownReview = isDailyPlanningPriorShutdownReviewActive();
+  board.classList.add('board--daily-planning');
+  board.setAttribute('data-dp-step', String(dailyPlanningState.step));
+  container.classList.add('board__columns--ready');
+
+  if (showingPriorShutdownReview) {
+    board.classList.add('board--daily-shutdown');
+    board.setAttribute('data-ds-step', String(DAILY_SHUTDOWN_STEPS.REVIEW));
+    container.classList.remove('board__columns--daily-planning');
+    container.classList.add('board__columns--daily-shutdown');
+    if (mainCard) {
+      mainCard.classList.add('main-card--hide-calendar');
+      mainCard.classList.add('main-card--daily-shutdown');
+    }
+    renderDailyPlanningPanel();
+    renderDailyPlanningPriorShutdownReviewPanel();
+    renderDailyShutdownColumnsForDate(dailyPlanningState.priorShutdownReviewDateISO, {
+      filterId: getTaskFilterIdForScope('dailyPlanning')
+    });
+    updateTodayButtonLabel(dailyPlanningState.priorShutdownReviewDateISO);
+    return;
+  }
+
+  board.classList.remove('board--daily-shutdown');
+  board.removeAttribute('data-ds-step');
+  container.classList.remove('board__columns--daily-shutdown');
+  if (mainCard) {
+    mainCard.classList.remove('main-card--daily-shutdown');
+  }
+  hideDailyShutdownPanel();
+
   const hideCalendar = dailyPlanningState.step === DAILY_PLANNING_STEPS.WORKLOAD
     || dailyPlanningState.step === DAILY_PLANNING_STEPS.SHARE;
   if (mainCard) {
     mainCard.classList.toggle('main-card--hide-calendar', hideCalendar);
   }
 
-  board.classList.add('board--daily-planning');
-  board.setAttribute('data-dp-step', String(dailyPlanningState.step));
   container.classList.add('board__columns--daily-planning');
-  container.classList.add('board__columns--ready');
   renderDailyPlanningPanel();
   renderDailyPlanningColumns();
   updateTodayButtonLabel(dailyPlanningState.selectedDate || getTodayISO());
@@ -5813,6 +5939,11 @@ function setDailyPlanningStep(nextStep) {
 
 function goToNextDailyPlanningStep() {
   if (!dailyPlanningState.isActive) return;
+  if (isDailyPlanningPriorShutdownReviewActive()) {
+    dailyPlanningState.showingPriorShutdownReview = false;
+    renderDailyPlanningMode();
+    return;
+  }
   const idx = DAILY_PLANNING_STEP_ORDER.indexOf(dailyPlanningState.step);
   if (idx === -1) return;
   const next = DAILY_PLANNING_STEP_ORDER[idx + 1];
@@ -5823,6 +5954,15 @@ function goToNextDailyPlanningStep() {
 
 function goToPrevDailyPlanningStep() {
   if (!dailyPlanningState.isActive) return;
+  if (isDailyPlanningPriorShutdownReviewActive()) {
+    exitDailyPlanningMode();
+    return;
+  }
+  if (dailyPlanningState.step === DAILY_PLANNING_STEPS.ADD_TASKS && dailyPlanningState.showPriorShutdownReview) {
+    dailyPlanningState.showingPriorShutdownReview = true;
+    renderDailyPlanningMode();
+    return;
+  }
   const idx = DAILY_PLANNING_STEP_ORDER.indexOf(dailyPlanningState.step);
   if (idx <= 0) {
     exitDailyPlanningMode();
@@ -5887,14 +6027,20 @@ function setDailyPlanningSelectedDate(nextIsoDate, options = {}) {
   const { resetStep = true } = options;
   const clampedDate = nextIsoDate < todayISO ? todayISO : nextIsoDate;
   if (dailyPlanningState.selectedDate === clampedDate) {
-    updateTodayButtonLabel(clampedDate);
+    updateTodayButtonLabel(
+      isDailyPlanningPriorShutdownReviewActive()
+        ? dailyPlanningState.priorShutdownReviewDateISO
+        : clampedDate
+    );
     return;
   }
   dailyPlanningState.selectedDate = clampedDate;
   if (resetStep) dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(clampedDate);
   dailyPlanningState.runDraft.shareText = '';
+  configureDailyPlanningPriorShutdownReview(clampedDate, { activate: resetStep });
   applyWorkdayBoundsForDate(clampedDate);
+  markDailyPlanningVisited(clampedDate);
   renderDailyPlanningMode();
 }
 
@@ -5957,8 +6103,10 @@ function enterDailyPlanningMode(targetDate) {
   dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(selectedDate);
   dailyPlanningState.runDraft.shareText = '';
+  configureDailyPlanningPriorShutdownReview(selectedDate, { activate: true });
   topbarTaskFilterState.dailyPlanning = 'all';
   applyWorkdayBoundsForDate(selectedDate);
+  markDailyPlanningVisited(selectedDate);
   setSidebarCollapsed(false);
   setSidebarActiveNav('daily-planning');
   closeTopbarTodayPicker();
@@ -6243,7 +6391,48 @@ function completeDailyPlanningRun() {
   dailyPlanningState.runHistoryByDate[snapshot.dateISO] = history;
   appendDailyPlanningSnapshotToTask(snapshot);
   persistRituals();
+  updateDailyPlanningSidebarState();
   exitDailyPlanningMode({ restoreTodayFirstColumn: true });
+}
+
+function hasCompletedDailyPlanningForDate(isoDate) {
+  const history = dailyPlanningState.runHistoryByDate[isoDate];
+  return Array.isArray(history) && history.length > 0;
+}
+
+function hasVisitedDailyPlanningForDate(isoDate) {
+  return hasCompletedDailyPlanningForDate(isoDate) || !!dailyPlanningState.visitedByDate[isoDate];
+}
+
+function getDailyPlanningSidebarStatus() {
+  const todayISO = getTodayISO();
+  if (hasCompletedDailyPlanningForDate(todayISO)) return 'completed';
+  if (hasVisitedDailyPlanningForDate(todayISO)) return 'visited';
+  return 'unvisited';
+}
+
+function updateDailyPlanningSidebarState() {
+  const nav = document.querySelector('[data-sidebar-daily-planning]');
+  const indicator = document.querySelector('[data-daily-planning-indicator]');
+  const check = document.querySelector('[data-daily-planning-check]');
+  if (!nav || !indicator || !check) return;
+
+  const status = getDailyPlanningSidebarStatus();
+  nav.classList.toggle('nav-item--ritual-complete', status === 'completed');
+  indicator.hidden = status !== 'unvisited';
+  check.hidden = status !== 'completed';
+}
+
+function markDailyPlanningVisited(isoDate) {
+  const todayISO = getTodayISO();
+  if (!isoDate || isoDate !== todayISO) return;
+  if (dailyPlanningState.visitedByDate[todayISO]) {
+    updateDailyPlanningSidebarState();
+    return;
+  }
+  dailyPlanningState.visitedByDate[todayISO] = getNowIsoString();
+  persistRituals();
+  updateDailyPlanningSidebarState();
 }
 
 function getHourHeightPx(timeGridEl = null) {
@@ -11444,6 +11633,10 @@ function renderColumn(column) {
     renderDailyShutdownMode();
     return;
   }
+  if (isDailyPlanningPriorShutdownReviewActive()) {
+    renderDailyPlanningMode();
+    return;
+  }
   const colEl = document.querySelector(`.day-column[data-col-id="${column.id}"]`);
   if (!colEl) return;
 
@@ -16622,6 +16815,9 @@ function getFirstVisibleDate() {
   if (dailyShutdownState.isActive && dailyShutdownState.selectedDate) {
     return dailyShutdownState.selectedDate;
   }
+  if (isDailyPlanningPriorShutdownReviewActive() && dailyPlanningState.priorShutdownReviewDateISO) {
+    return dailyPlanningState.priorShutdownReviewDateISO;
+  }
   if (dailyPlanningState.isActive && dailyPlanningState.selectedDate) {
     return dailyPlanningState.selectedDate;
   }
@@ -16654,7 +16850,9 @@ function updateTodayButtonLabel(overrideDate) {
   if (dailyShutdownState.isActive) {
     label = getDailyShutdownDateLabel(firstDate);
   } else if (dailyPlanningState.isActive) {
-    label = getDailyPlanningDateLabel(firstDate);
+    label = isDailyPlanningPriorShutdownReviewActive()
+      ? getDailyShutdownDateLabel(firstDate)
+      : getDailyPlanningDateLabel(firstDate);
   } else if (isToday) {
     label = 'Today';
   } else if (firstDate === addDays(todayISO, 1)) {
@@ -17299,6 +17497,12 @@ function attachDailyShutdownEvents() {
 
   panel.addEventListener('click', async e => {
     if (!(e.target instanceof Element)) return;
+
+    if (e.target.closest('[data-dp-prior-shutdown-next]')) {
+      e.preventDefault();
+      if (dailyPlanningState.isActive) goToNextDailyPlanningStep();
+      return;
+    }
 
     if (e.target.closest('[data-ds-prev]')) {
       e.preventDefault();
@@ -19488,7 +19692,8 @@ function persistRituals() {
   if (!_currentUserId) return;
   DB.saveRituals(_currentUserId, {
     dailyPlanningHistory: dailyPlanningState.runHistoryByDate || {},
-    dailyShutdownHistory: {},
+    dailyPlanningVisitedByDate: dailyPlanningState.visitedByDate || {},
+    dailyShutdownHistory: dailyShutdownState.historyByDate || {},
     deferPolicy: dailyPlanningState.deferPolicy || {},
     capacityConfig: dailyPlanningState.capacityConfig || {}
   }).catch(err => console.error('Failed to save rituals:', err));
@@ -19684,6 +19889,8 @@ async function onAuthReady(userId) {
     const rituals = await DB.loadRituals(userId);
     if (rituals) {
       if (rituals.dailyPlanningHistory) dailyPlanningState.runHistoryByDate = rituals.dailyPlanningHistory;
+      if (rituals.dailyPlanningVisitedByDate) dailyPlanningState.visitedByDate = rituals.dailyPlanningVisitedByDate;
+      if (rituals.dailyShutdownHistory) dailyShutdownState.historyByDate = rituals.dailyShutdownHistory;
       if (rituals.deferPolicy) dailyPlanningState.deferPolicy = rituals.deferPolicy;
       if (rituals.capacityConfig) dailyPlanningState.capacityConfig = rituals.capacityConfig;
     }
@@ -19702,6 +19909,7 @@ async function onAuthReady(userId) {
   renderBacklogPanel();
   renderSearchPanel();
   applySettingsToApp();
+  updateDailyPlanningSidebarState();
 
   if (typeof lucide !== 'undefined') {
     lucide.createIcons();
@@ -19727,6 +19935,11 @@ function onAuthClear() {
   repeatRuntimeState.pinnedOccurrenceKeys.clear();
   searchPanelState.query = '';
   closeSearchDropdown();
+  resetDailyPlanningModeState();
+  resetDailyShutdownModeState();
+  dailyPlanningState.runHistoryByDate = {};
+  dailyPlanningState.visitedByDate = {};
+  dailyShutdownState.historyByDate = {};
   todayViewState.isActive = false;
   todayViewState.selectedDate = null;
   todayViewState.returnToHomeDate = null;
