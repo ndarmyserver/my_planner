@@ -253,6 +253,9 @@ const SNAP_STEPS_PER_HOUR = 12; // 5-minute snapping
 const CALENDAR_START_HOUR = 0;
 const DEFAULT_CALENDAR_TOTAL_HOURS = 24;
 const DEFAULT_HOUR_HEIGHT_PX = 60;
+const DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES = 30;
+const DEFAULT_SCHEDULED_EVENT_COLOR = '#ffb74d';
+const CALENDAR_EVENT_DRAG_THRESHOLD_PX = 4;
 const DEFAULT_WORKDAY_START_HOUR = 8;
 const DEFAULT_WORKDAY_END_HOUR = 17;
 const DEFAULT_WORKING_DAYS = [1, 2, 3, 4, 5]; // Mon-Fri
@@ -335,6 +338,7 @@ let calDragSrc         = null;  // direct reference to drag-source element (surv
 let droppedOnGrid      = false;
 let calGrabOffsetHours = 0;
 let calPointerDrag     = null;  // { eventId, grabOffsetHours, sourceEl }
+let scheduledEventCreationState = null; // { startX, startY, startOffset, currentOffset, currentDuration, started }
 let activeDragType     = null;  // 'task' | 'calendar'
 let activeDragId       = null;
 let pendingDragType    = null;  // Safari fallback when dragstart is skipped
@@ -1629,6 +1633,19 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+function getContrastTextColor(hex) {
+  const raw = String(hex || '').trim().replace('#', '');
+  const full = raw.length === 3
+    ? raw.split('').map(ch => ch + ch).join('')
+    : raw;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return '#ffffff';
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  const luminance = ((0.299 * r) + (0.587 * g) + (0.114 * b)) / 255;
+  return luminance > 0.72 ? '#5c4300' : '#ffffff';
+}
+
 // Find a task across all columns
 function findTaskById(taskId) {
   for (const col of state.columns) {
@@ -1721,6 +1738,69 @@ function normalizeBacklogOrders(horizonId) {
 
 function getChannelById(channelId) {
   return CHANNELS.find(ch => ch.id === channelId) || null;
+}
+
+function getCalendarEventClassForColor(color) {
+  const eventClassMap = {
+    '#ff79a7': 'cal-event--orange', '#d45d8c': 'cal-event--purple', '#e979fc': 'cal-event--purple',
+    '#ff62be': 'cal-event--purple', '#856cc2': 'cal-event--purple', '#a382ff': 'cal-event--purple',
+    '#7cadff': 'cal-event--blue', '#5e9fe0': 'cal-event--blue', '#90a4ae': 'cal-event--blue',
+    '#4fc3f7': 'cal-event--blue', '#4dd0e1': 'cal-event--blue', '#4db6c1': 'cal-event--blue',
+    '#4db6ac': 'cal-event--green', '#4da197': 'cal-event--green', '#74b077': 'cal-event--green',
+    '#82c785': 'cal-event--green', '#95bc74': 'cal-event--green', '#aed580': 'cal-event--green',
+    '#ffd451': 'cal-event--orange', '#ffbd4d': 'cal-event--orange', '#ffb74d': 'cal-event--orange',
+    '#f8a34d': 'cal-event--orange', '#ff8964': 'cal-event--orange', '#ee805e': 'cal-event--orange',
+    '#ff8686': 'cal-event--orange', '#e06d6d': 'cal-event--orange', '#a1887f': 'cal-event--blue',
+    '#8e7973': 'cal-event--blue',
+  };
+  return eventClassMap[String(color || '').toLowerCase()] || 'cal-event--blue';
+}
+
+function getManualScheduledEventStyle(channelId = null) {
+  const channel = channelId ? getChannelById(channelId) : null;
+  if (channel) {
+    return {
+      hashColor: channel.hashColor || DEFAULT_SCHEDULED_EVENT_COLOR,
+      eventClass: channel.eventClass || getCalendarEventClassForColor(channel.hashColor || DEFAULT_SCHEDULED_EVENT_COLOR)
+    };
+  }
+  return {
+    hashColor: DEFAULT_SCHEDULED_EVENT_COLOR,
+    eventClass: getCalendarEventClassForColor(DEFAULT_SCHEDULED_EVENT_COLOR)
+  };
+}
+
+function isManualScheduledEvent(event) {
+  return !!(event && event.kind === 'scheduled_event' && !event.taskId);
+}
+
+function doesCalendarEventOccurOnDate(event, isoDate) {
+  if (!event || !isoDate) return false;
+  if (isManualScheduledEvent(event) && event.allDay && event.endDate) {
+    return event.date <= isoDate && event.endDate >= isoDate;
+  }
+  return event.date === isoDate;
+}
+
+function normalizeCalendarEventRecord(event) {
+  if (!event || !event.id) return event;
+  const normalized = { ...event };
+  normalized.date = normalized.date || getTodayISO();
+  normalized.endDate = normalized.endDate || normalized.date;
+  normalized.zOrder = Number.isFinite(normalized.zOrder) ? normalized.zOrder : ++calZCounter;
+  normalized.allDay = !!normalized.allDay;
+  normalized.channelId = normalized.channelId || null;
+  normalized.location = normalized.location || '';
+  normalized.description = normalized.description || '';
+  normalized.kind = normalized.kind || null;
+  normalized.transparency = normalized.transparency === 'non_blocking' ? 'non_blocking' : 'blocking';
+  if (isManualScheduledEvent(normalized)) {
+    const style = getManualScheduledEventStyle(normalized.channelId);
+    normalized.colorClass = style.eventClass;
+  } else if (!normalized.colorClass) {
+    normalized.colorClass = 'cal-event--blue';
+  }
+  return normalized;
 }
 
 function getContextChildChannelIds(contextLabel) {
@@ -2284,7 +2364,10 @@ function getOpenArrowNavigablePicker() {
     || document.querySelector('[data-sdp]')
     || document.querySelector('[data-ddp]')
     || document.querySelector('[data-ellipsis-menu]')
-    || document.querySelector('[data-card-picker]');
+    || document.querySelector('[data-card-picker]')
+    || document.querySelector('[data-scheduled-event-time-picker]')
+    || document.querySelector('[data-scheduled-event-channel-picker]')
+    || document.querySelector('[data-scheduled-event-transparency-picker]');
 }
 
 function getArrowNavigableItems(root) {
@@ -2292,11 +2375,23 @@ function getArrowNavigableItems(root) {
   if (root.matches('[data-card-picker]')) {
     return [...root.querySelectorAll('button:not([disabled])')];
   }
+  if (root.matches('[data-scheduled-event-time-picker]')) {
+    return [...root.querySelectorAll('.planned-picker__option:not(:disabled)')];
+  }
+  if (root.matches('[data-scheduled-event-channel-picker]')) {
+    return [...root.querySelectorAll('.channel-picker__item')];
+  }
   return [...root.querySelectorAll('.sdp__menu-item:not(:disabled)')];
 }
 
 function getHighlightedPickerItem(root) {
   if (!root) return null;
+  if (root.matches('[data-scheduled-event-time-picker]')) {
+    return root.querySelector('.picker-nav-highlighted') || root.querySelector('.planned-picker__option--selected');
+  }
+  if (root.matches('[data-scheduled-event-channel-picker]')) {
+    return root.querySelector('.channel-picker__item--highlighted');
+  }
   return root.querySelector('.picker-nav-highlighted');
 }
 
@@ -2913,9 +3008,20 @@ function getScheduleBoundsForDay(isoDate) {
 }
 
 function getDaySchedulingEvents(isoDate, ignoreTaskId = null) {
-  return getCalendarEventsForDate(isoDate)
+  return state.calendarEvents
+    .filter(evt => doesCalendarEventOccurOnDate(evt, isoDate))
     .filter(evt => !ignoreTaskId || evt.taskId !== ignoreTaskId)
-    .filter(evt => evt.systemType !== 'actual')
+    .filter(isCalendarEventBlockingForAvailability)
+    .map(evt => {
+      if (isManualScheduledEvent(evt) && evt.allDay) {
+        return {
+          ...evt,
+          offset: 0,
+          duration: DEFAULT_CALENDAR_TOTAL_HOURS
+        };
+      }
+      return evt;
+    })
     .sort((a, b) => a.offset - b.offset);
 }
 
@@ -3389,6 +3495,10 @@ function handleGlobalShortcutKeydown(e) {
     hideFloatingTooltip();
     e.preventDefault();
     e.stopImmediatePropagation();
+    return;
+  }
+
+  if (scheduledEventModalState) {
     return;
   }
 
@@ -4524,10 +4634,7 @@ function getDailyPlanningBadgeStatuses(tasks, isoDate) {
 }
 
 function createDailyPlanningRunDraft(dateISO) {
-  const shutdownTask = getDailyShutdownTaskForDate(dateISO);
-  const shutdownTime = shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))
-    ? shutdownTask.scheduledTime
-    : DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+  const shutdownTime = getDailyPlanningShutdownTimeForDate(dateISO);
 
   return {
     runId: 'daily-plan-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
@@ -4535,6 +4642,7 @@ function createDailyPlanningRunDraft(dateISO) {
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     shutdownTime,
+    shutdownTimeManuallySelected: false,
     reflectionText: '',
     obstaclesText: '',
     shareText: ''
@@ -4556,14 +4664,45 @@ function getDailyShutdownTaskForDate(isoDate) {
   ) || null;
 }
 
+function getDefaultDailyPlanningShutdownTime(isoDate) {
+  const bounds = getWorkdayBoundsForDate(isoDate);
+  const defaultOffset = Math.max(0, bounds.endOffset - (5 / 60));
+  return offsetToScheduledTime(defaultOffset);
+}
+
 function getDailyPlanningShutdownTimeForDate(isoDate, fallback = DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME) {
   const shutdownTask = getDailyShutdownTaskForDate(isoDate);
   const fromTask = shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))
     ? shutdownTask.scheduledTime
     : null;
   if (fromTask) return fromTask;
+  const fromBounds = getDefaultDailyPlanningShutdownTime(isoDate);
+  if (/^\d{2}:\d{2}$/.test(String(fromBounds || ''))) return fromBounds;
   if (/^\d{2}:\d{2}$/.test(String(fallback || ''))) return fallback;
   return DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+}
+
+function syncDailyPlanningDraftShutdownTime(options = {}) {
+  if (!dailyPlanningState.isActive) return;
+  if (isDailyPlanningPriorShutdownReviewActive()) return;
+  const { force = false } = options;
+  const draft = ensureDailyPlanningRunDraft();
+  const isoDate = dailyPlanningState.selectedDate || getTodayISO();
+  const shutdownTask = getDailyShutdownTaskForDate(isoDate);
+  if (shutdownTask && /^\d{2}:\d{2}$/.test(String(shutdownTask.scheduledTime || ''))) {
+    if (draft.shutdownTime !== shutdownTask.scheduledTime || force) {
+      draft.shutdownTime = shutdownTask.scheduledTime;
+      draft.updatedAt = new Date().toISOString();
+    }
+    draft.shutdownTimeManuallySelected = true;
+    return;
+  }
+  if (draft.shutdownTimeManuallySelected && !force) return;
+  const derived = getDefaultDailyPlanningShutdownTime(isoDate);
+  if (draft.shutdownTime !== derived || force) {
+    draft.shutdownTime = derived;
+    draft.updatedAt = new Date().toISOString();
+  }
 }
 
 function getShutdownTimeOptions() {
@@ -4655,13 +4794,32 @@ function getDailyShutdownWorkedOnTasks(isoDate, filterId = null) {
 }
 
 function getDailyShutdownMissedTasks(isoDate, filterId = null) {
-  const col = ensureColumnForDate(isoDate);
   const effectiveFilterId = filterId || (dailyShutdownState.isActive ? getTaskFilterIdForScope('dailyShutdown') : 'all');
-  return (col.tasks || []).filter(task =>
-    !isRitualTask(task)
-    && !hasShutdownActivityOnDate(task, isoDate)
-    && taskMatchesChannelFilterId(task, effectiveFilterId)
-  );
+  const seen = new Set();
+  const tasks = [];
+
+  function considerTask(task) {
+    if (!task || seen.has(task.id)) return;
+    if (isRitualTask(task)) return;
+    if (!taskMatchesChannelFilterId(task, effectiveFilterId)) return;
+    if (hasShutdownActivityOnDate(task, isoDate)) return;
+    ensureTaskRolloverState(task);
+    const startDate = task.repeatOccurrenceDate || task.startDate;
+    if (!startDate || startDate > isoDate) return;
+
+    const ctx = getTaskContext(task);
+    if (!ctx) return;
+
+    if (ctx.columnDate !== '__backlog__' && ctx.columnDate !== '__archive__' && ctx.columnDate >= isoDate) {
+      seen.add(task.id);
+      tasks.push(task);
+    }
+  }
+
+  ensureColumnForDate(isoDate).tasks.forEach(considerTask);
+  state.columns.forEach(col => col.tasks.forEach(considerTask));
+
+  return tasks;
 }
 
 function getDailyShutdownTotals(isoDate, filterId = null) {
@@ -5092,6 +5250,7 @@ function renderDailyPlanningTaskPreviewHtml(isoDate) {
 
 function renderDailyPlanningPanelHtml() {
   if (!dailyPlanningState.isActive) return '';
+  syncDailyPlanningDraftShutdownTime();
   const draft = ensureDailyPlanningRunDraft();
   const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
   const workload = getDailyPlanningWorkloadSummary(selectedDate);
@@ -11442,6 +11601,932 @@ function closeTaskDetailModal() {
   document.body.classList.remove('modal-open');
 }
 
+let scheduledEventModalState = null; // { eventId, isNew, view, mode, deleteConfirmArmed, draft, savedDraft, error, datePickerField, timePickerField, channelPickerOpen, channelPickerQuery, channelPickerHighlight, datePickerViewYear, datePickerViewMonth }
+
+function getScheduledEventOverlay() {
+  return document.getElementById('scheduled-event-overlay');
+}
+
+function createScheduledEventDraft(isoDate, startOffset, durationHours) {
+  const minDuration = 1 / SNAP_STEPS_PER_HOUR;
+  const requestedDuration = Math.max(minDuration, durationHours);
+  const safeStart = clampCalendarOffset(startOffset, requestedDuration);
+  const safeDuration = Math.max(minDuration, Math.min(requestedDuration, DEFAULT_CALENDAR_TOTAL_HOURS - safeStart));
+  return {
+    id: null,
+    title: '',
+    date: isoDate || getFirstVisibleDate(),
+    endDate: isoDate || getFirstVisibleDate(),
+    allDay: false,
+    startOffset: safeStart,
+    endOffset: safeStart + safeDuration,
+    channelId: null,
+    transparency: 'blocking',
+    location: '',
+    description: ''
+  };
+}
+
+function buildScheduledEventDraftFromEvent(event) {
+  const normalized = normalizeCalendarEventRecord(event);
+  const minDuration = 1 / SNAP_STEPS_PER_HOUR;
+  const duration = Math.max(minDuration, normalized.duration || (DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60));
+  return {
+    id: normalized.id,
+    title: normalized.title || '',
+    date: normalized.date || getFirstVisibleDate(),
+    endDate: normalized.endDate || normalized.date || getFirstVisibleDate(),
+    allDay: !!normalized.allDay,
+    startOffset: Number.isFinite(normalized.offset) ? normalized.offset : 9,
+    endOffset: Number.isFinite(normalized.offset) ? normalized.offset + duration : 9 + duration,
+    channelId: normalized.channelId || null,
+    transparency: normalized.transparency === 'non_blocking' ? 'non_blocking' : 'blocking',
+    location: normalized.location || '',
+    description: normalized.description || ''
+  };
+}
+
+function getScheduledEventTransparencyValue(value) {
+  return value === 'non_blocking' ? 'non_blocking' : 'blocking';
+}
+
+function getScheduledEventTransparencyLabel(value) {
+  return getScheduledEventTransparencyValue(value) === 'non_blocking' ? 'Non-blocking' : 'Blocking';
+}
+
+function getScheduledEventTransparencyDescription(value) {
+  return getScheduledEventTransparencyValue(value) === 'non_blocking'
+    ? 'This event will show you as available on your calendar'
+    : 'This event will show you as busy on your calendar';
+}
+
+function isCalendarEventBlockingForAvailability(event) {
+  if (!event || event.systemType === 'actual') return false;
+  if (!isManualScheduledEvent(event)) return true;
+  return getScheduledEventTransparencyValue(event.transparency) !== 'non_blocking';
+}
+
+function getScheduledEventAllDayTimeLabel(field) {
+  const fmt = getEffectiveTimeFormat();
+  if (field === 'start') {
+    return fmt === '24' ? '00:00' : '12:00am';
+  }
+  return fmt === '24' ? '23:59' : '11:59pm';
+}
+
+function getScheduledEventDurationHours(draft) {
+  return Math.max(1 / SNAP_STEPS_PER_HOUR, (draft.endOffset || 0) - (draft.startOffset || 0));
+}
+
+function shouldPreviewExistingScheduledEventDraft() {
+  return !!(
+    scheduledEventModalState
+    && !scheduledEventModalState.isNew
+    && scheduledEventModalState.view === 'full'
+    && scheduledEventModalState.mode === 'edit'
+    && scheduledEventModalState.eventId
+  );
+}
+
+function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
+  if (!draft || !eventId) return null;
+  const previewDraft = { ...draft };
+  normalizeScheduledEventDraftTimes(previewDraft);
+  const style = getManualScheduledEventStyle(previewDraft.channelId);
+  return {
+    id: eventId,
+    title: String(previewDraft.title || '').trim() || 'Untitled event',
+    date: previewDraft.date,
+    endDate: previewDraft.allDay ? previewDraft.endDate : previewDraft.date,
+    offset: previewDraft.startOffset,
+    duration: getScheduledEventDurationHours(previewDraft),
+    kind: 'scheduled_event',
+    allDay: !!previewDraft.allDay,
+    channelId: previewDraft.channelId || null,
+    transparency: getScheduledEventTransparencyValue(previewDraft.transparency),
+    location: previewDraft.location || '',
+    description: previewDraft.description || '',
+    colorClass: style.eventClass,
+    zOrder: state.calendarEvents.find(event => event.id === eventId)?.zOrder || ++calZCounter
+  };
+}
+
+function normalizeScheduledEventDraftTimes(draft, options = {}) {
+  if (!draft) return;
+  const minDuration = 1 / SNAP_STEPS_PER_HOUR;
+  draft.startOffset = clampCalendarOffset(Number.isFinite(draft.startOffset) ? draft.startOffset : 9, 0);
+  draft.endOffset = Number.isFinite(draft.endOffset) ? draft.endOffset : (draft.startOffset + (DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60));
+  draft.endOffset = Math.max(draft.startOffset + minDuration, draft.endOffset);
+  if (draft.endOffset > DEFAULT_CALENDAR_TOTAL_HOURS) {
+    draft.endOffset = DEFAULT_CALENDAR_TOTAL_HOURS;
+    if (!options.keepEndFixed) {
+      draft.startOffset = Math.max(0, draft.endOffset - minDuration);
+    }
+  }
+  if (!draft.allDay) {
+    draft.endDate = draft.date;
+  } else if (draft.endDate < draft.date) {
+    draft.endDate = draft.date;
+  }
+}
+
+function formatScheduledEventDateLabel(isoDate, options = {}) {
+  if (!isoDate) return '';
+  const date = parseISO(isoDate);
+  const formatOptions = options.includeWeekday
+    ? { weekday: 'long', month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric' };
+  return date.toLocaleDateString([], formatOptions);
+}
+
+function getCalendarGhostElement() {
+  return document.getElementById('cal-event-ghost');
+}
+
+function clearCalendarGhost() {
+  const ghost = getCalendarGhostElement();
+  if (!ghost) return;
+  ghost.hidden = true;
+  ghost.style.backgroundColor = '';
+  ghost.style.borderColor = '';
+  ghost.style.borderStyle = '';
+  ghost.style.borderWidth = '';
+  ghost.style.zIndex = '';
+  const titleEl = ghost.querySelector('.cal-event__title');
+  const timeEl = ghost.querySelector('.cal-event__time');
+  if (titleEl) titleEl.textContent = '';
+  if (timeEl) timeEl.textContent = '';
+}
+
+function renderScheduledEventDraftGhost(offset, duration, channelId = null) {
+  const ghost = getCalendarGhostElement();
+  if (!ghost) return;
+  const style = getManualScheduledEventStyle(channelId);
+  ghost.hidden = false;
+  ghost.style.backgroundColor = hexToRgba(style.hashColor, 0.28);
+  ghost.style.borderColor = hexToRgba(style.hashColor, 0.95);
+  ghost.style.borderStyle = 'dashed';
+  ghost.style.borderWidth = '2px';
+  ghost.style.zIndex = '1002';
+  ghost.style.setProperty('--offset', offset);
+  ghost.style.setProperty('--duration', duration);
+  const titleEl = ghost.querySelector('.cal-event__title');
+  const timeEl = ghost.querySelector('.cal-event__time');
+  if (titleEl) titleEl.textContent = '';
+  if (timeEl) timeEl.textContent = formatTimeRange(offset, duration);
+}
+
+function ensureScheduledEventOverlayVisibility(element) {
+  const overlay = getScheduledEventOverlay();
+  if (!overlay || !element) return;
+  const overlayRect = overlay.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  const margin = 16;
+
+  if (elementRect.bottom > overlayRect.bottom - margin) {
+    overlay.scrollTop += elementRect.bottom - (overlayRect.bottom - margin);
+  } else if (elementRect.top < overlayRect.top + margin) {
+    overlay.scrollTop -= (overlayRect.top + margin) - elementRect.top;
+  }
+}
+
+function syncScheduledEventModalGhost() {
+  if (!scheduledEventModalState) {
+    clearCalendarGhost();
+    return;
+  }
+  const draft = scheduledEventModalState.draft;
+  const visibleDate = scheduledEventModalState.visibleDateOverride || getFirstVisibleDate();
+  const shouldShowGhost = scheduledEventModalState.isNew
+    && !draft.allDay
+    && draft.date === visibleDate;
+  if (!shouldShowGhost) {
+    clearCalendarGhost();
+    return;
+  }
+  renderScheduledEventDraftGhost(draft.startOffset, getScheduledEventDurationHours(draft), draft.channelId || null);
+}
+
+function formatScheduledEventTimeLabel(offset) {
+  const totalH = CALENDAR_START_HOUR + offset;
+  const h = Math.floor(totalH);
+  const m = Math.round((offset % 1) * 60);
+  const adjH = m === 60 ? h + 1 : h;
+  const adjM = m === 60 ? 0 : m;
+  const normalizedHour = ((adjH % 24) + 24) % 24;
+  const fmt = getEffectiveTimeFormat();
+  if (fmt === '24') {
+    return `${String(normalizedHour).padStart(2, '0')}:${String(adjM).padStart(2, '0')}`;
+  }
+  const period = normalizedHour < 12 ? 'am' : 'pm';
+  const h12 = normalizedHour % 12 || 12;
+  return `${h12}:${String(adjM).padStart(2, '0')}${period}`;
+}
+
+function getScheduledEventTimezoneShortLabel() {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: settings.timezone,
+      timeZoneName: 'longOffset'
+    });
+    const parts = formatter.formatToParts(new Date());
+    const tzPart = parts.find(part => part.type === 'timeZoneName');
+    if (!tzPart || !tzPart.value) return settings.timezone;
+    return tzPart.value.replace(/^GMT([+-]\d{2}:\d{2})$/, 'GMT $1');
+  } catch (err) {
+    return settings.timezone;
+  }
+}
+
+function getScheduledEventChannelLabel(channelId) {
+  const channel = channelId ? getChannelById(channelId) : null;
+  return channel ? channel.label : 'channel';
+}
+
+function getScheduledEventChannelColor(channelId) {
+  if (!channelId) return '#b4b4b4';
+  return getManualScheduledEventStyle(channelId).hashColor;
+}
+
+function cloneScheduledEventDraft(draft) {
+  return draft ? { ...draft } : null;
+}
+
+function isScheduledEventModalEditable() {
+  if (!scheduledEventModalState) return false;
+  if (scheduledEventModalState.view === 'quick') return true;
+  if (scheduledEventModalState.isNew) return true;
+  return scheduledEventModalState.mode === 'edit';
+}
+
+function getScheduledEventReadOnlyChannelLabel(channelId) {
+  const channel = channelId ? getChannelById(channelId) : null;
+  return channel ? channel.label : 'channel';
+}
+
+function getScheduledEventTimezoneAbbreviation() {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: settings.timezone,
+      timeZoneName: 'short'
+    });
+    const parts = formatter.formatToParts(new Date());
+    const tzPart = parts.find(part => part.type === 'timeZoneName');
+    return tzPart && tzPart.value ? tzPart.value : settings.timezone;
+  } catch (err) {
+    return settings.timezone;
+  }
+}
+
+function formatScheduledEventDateRangeLabel(startIsoDate, endIsoDate) {
+  if (!startIsoDate) return '';
+  const safeEnd = endIsoDate || startIsoDate;
+  if (safeEnd === startIsoDate) {
+    return formatScheduledEventDateLabel(startIsoDate, { includeWeekday: true });
+  }
+  return `${formatScheduledEventDateLabel(startIsoDate, { includeWeekday: true })} - ${formatScheduledEventDateLabel(safeEnd, { includeWeekday: true })}`;
+}
+
+function formatScheduledEventReadOnlyTimeLabel(draft) {
+  const tzAbbreviation = getScheduledEventTimezoneAbbreviation();
+  if (draft.allDay) {
+    return `All day ${tzAbbreviation}`;
+  }
+  return `${formatScheduledEventTimeLabel(draft.startOffset)} - ${formatScheduledEventTimeLabel(draft.endOffset)} ${tzAbbreviation}`;
+}
+
+function buildScheduledEventModalState(draft, options = {}) {
+  const baseDate = draft.date || getFirstVisibleDate();
+  const viewDate = parseISO(baseDate);
+  const isNew = options.isNew !== false;
+  const view = options.view || 'quick';
+  return {
+    eventId: draft.id || null,
+    isNew,
+    view,
+    mode: options.mode || (view === 'quick' ? 'edit' : (isNew ? 'edit' : 'view')),
+    deleteConfirmArmed: false,
+    draft,
+    savedDraft: cloneScheduledEventDraft(draft),
+    error: options.error || '',
+    datePickerField: null,
+    timePickerField: null,
+    channelPickerOpen: false,
+    transparencyPickerOpen: false,
+    channelPickerQuery: '',
+    channelPickerHighlight: 0,
+    autoFocusTitle: isNew || view === 'quick' || options.mode === 'edit',
+    visibleDateOverride: options.visibleDateOverride || baseDate,
+    datePickerViewYear: viewDate.getFullYear(),
+    datePickerViewMonth: viewDate.getMonth()
+  };
+}
+
+function closeScheduledEventModal() {
+  const shouldRefreshCalendar = !!scheduledEventModalState;
+  scheduledEventModalState = null;
+  clearCalendarGhost();
+  const overlay = getScheduledEventOverlay();
+  if (!overlay) return;
+  overlay.hidden = true;
+  overlay.classList.remove('scheduled-event-overlay--full');
+  overlay.style.paddingBottom = '';
+  overlay.innerHTML = '';
+  document.body.classList.remove('modal-open');
+  if (shouldRefreshCalendar) {
+    renderCalendarEvents();
+  }
+}
+
+function positionScheduledEventQuickModal(modal) {
+  if (!modal) return;
+  const timeGrid = document.getElementById('time-grid');
+  const panel = document.querySelector('.calendar-panel');
+  const overlay = getScheduledEventOverlay();
+  if (!timeGrid || !panel || !overlay || !scheduledEventModalState) return;
+
+  const gridRect = timeGrid.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  const labelEl = timeGrid.querySelector('.time-grid__label');
+  const labelWidth = labelEl ? Math.round(labelEl.getBoundingClientRect().width) : 48;
+  const hourHeight = getHourHeightPx(timeGrid);
+  const draft = scheduledEventModalState.draft;
+  const eventBottom = gridRect.top + ((draft.endOffset || draft.startOffset || 0) * hourHeight);
+  const scrollTop = overlay.scrollTop || 0;
+  const scrollLeft = overlay.scrollLeft || 0;
+  const minTop = Math.max(12 + scrollTop, panelRect.top + scrollTop + 8);
+  const maxTop = Math.max(minTop, scrollTop + window.innerHeight - modal.offsetHeight - 16);
+  const left = Math.max(12 + scrollLeft, gridRect.left + scrollLeft - modal.offsetWidth + labelWidth);
+  const top = Math.max(minTop, Math.min(maxTop, eventBottom + scrollTop - modal.offsetHeight));
+  modal.style.left = `${left}px`;
+  modal.style.top = `${top}px`;
+}
+
+function getScheduledEventTimeOptions() {
+  const options = [];
+  for (let minutes = 0; minutes < 24 * 60; minutes += 5) {
+    options.push({
+      minutes,
+      offset: minutes / 60,
+      label: formatScheduledEventTimeLabel(minutes / 60)
+    });
+  }
+  return options;
+}
+
+function renderScheduledEventDatePickerHtml(field) {
+  const selectedIsoDate = field === 'endDate'
+    ? scheduledEventModalState.draft.endDate
+    : scheduledEventModalState.draft.date;
+  return `
+    <div class="start-date-picker" data-scheduled-event-date-picker="${escapeHtml(field)}">
+      <div class="sdp__arrow"></div>
+      <div class="sdp__section">
+        <span class="sdp__section-label">${field === 'endDate' ? 'End date:' : 'Date:'}</span>
+        ${renderCalendarGrid(selectedIsoDate, scheduledEventModalState.datePickerViewYear, scheduledEventModalState.datePickerViewMonth)}
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventTimePickerHtml(field) {
+  const selectedOffset = field === 'end'
+    ? scheduledEventModalState.draft.endOffset
+    : scheduledEventModalState.draft.startOffset;
+  const optionsHtml = getScheduledEventTimeOptions().map(option => {
+    const isSelected = Math.abs(option.offset - selectedOffset) < 0.0001;
+    return `<button class="planned-picker__option${isSelected ? ' planned-picker__option--selected' : ''}" type="button" data-scheduled-event-time-option="${option.minutes}" data-scheduled-event-time-field="${escapeHtml(field)}">
+      <span>${escapeHtml(option.label)}</span>
+      ${isSelected ? '<span class="planned-picker__check">✓</span>' : ''}
+    </button>`;
+  }).join('');
+  return `
+    <div class="planned-picker scheduled-event-time-picker" data-scheduled-event-time-picker="${escapeHtml(field)}">
+      <div class="planned-picker__arrow"></div>
+      <div class="planned-picker__header">${field === 'end' ? 'End time:' : 'Start time:'}</div>
+      <div class="scheduled-event-time-picker__list">
+        ${optionsHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventChannelPickerHtml() {
+  const filtered = getFilteredChannels(scheduledEventModalState.channelPickerQuery || '');
+  const listHtml = renderChannelOptionListHTML(filtered, {
+    selectedId: scheduledEventModalState.draft.channelId || 'unassigned',
+    highlightIndex: scheduledEventModalState.channelPickerHighlight,
+    itemIdAttr: 'data-scheduled-event-channel-id',
+    itemIndexAttr: 'data-scheduled-event-channel-idx'
+  });
+  return `
+    <div class="channel-picker" data-scheduled-event-channel-picker>
+      <div class="channel-picker__arrow"></div>
+      <div class="channel-picker__header">Assign to channel:</div>
+      <input class="channel-picker__search" placeholder="Search..." type="text" value="${escapeHtml(scheduledEventModalState.channelPickerQuery || '')}" data-scheduled-event-channel-search>
+      <div class="channel-picker__list">${listHtml}</div>
+      <div class="channel-picker__divider"></div>
+      <a class="channel-picker__manage" href="#" data-scheduled-event-manage-channels>Manage channels</a>
+    </div>
+  `;
+}
+
+function renderScheduledEventTransparencyPickerHtml() {
+  const selectedValue = getScheduledEventTransparencyValue(scheduledEventModalState.draft.transparency);
+  const options = [
+    { value: 'blocking', title: 'Blocking', description: 'This event will show you as busy on your calendar' },
+    { value: 'non_blocking', title: 'Non-blocking', description: 'This event will show you as available on your calendar' }
+  ];
+  const itemsHtml = options.map(option => `
+    <button class="sdp__menu-item scheduled-event-modal__transparency-option" type="button" data-scheduled-event-transparency-option="${escapeHtml(option.value)}">
+      <span class="scheduled-event-modal__transparency-option-main">
+        <span class="repeat-menu__cadence-icon-wrap${selectedValue === option.value ? ' repeat-menu__cadence-icon-wrap--selected' : ''}" aria-hidden="true">
+          <span class="repeat-menu__cadence-icon"></span>
+        </span>
+        <span class="scheduled-event-modal__transparency-copy">
+          <span class="scheduled-event-modal__transparency-title">${escapeHtml(option.title)}</span>
+          <span class="scheduled-event-modal__transparency-description">${escapeHtml(option.description)}</span>
+        </span>
+      </span>
+    </button>
+  `).join('');
+  return `
+    <div class="scheduled-event-modal__transparency-menu" data-scheduled-event-transparency-picker>
+      <div class="sdp__arrow"></div>
+      <div class="scheduled-event-modal__transparency-header">Transparency:</div>
+      <div class="scheduled-event-modal__transparency-options">${itemsHtml}</div>
+    </div>
+  `;
+}
+
+function autoResizeScheduledEventDescription(textarea) {
+  if (!(textarea instanceof HTMLTextAreaElement)) return;
+  textarea.style.height = '';
+  if (textarea.value.trim()) {
+    textarea.style.height = `${Math.max(24, textarea.scrollHeight)}px`;
+  }
+}
+
+function renderScheduledEventQuickModal() {
+  const { draft, error, datePickerField, timePickerField, channelPickerOpen } = scheduledEventModalState;
+  return `
+    <div class="scheduled-event-modal scheduled-event-modal--quick" role="dialog" aria-modal="true" aria-labelledby="scheduled-event-title">
+      <input class="scheduled-event-modal__title-input" id="scheduled-event-title" type="text" placeholder="Event title..." value="${escapeHtml(draft.title)}" data-scheduled-event-title>
+      <div class="scheduled-event-modal__error">${error ? escapeHtml(error) : ''}</div>
+      <div class="scheduled-event-modal__quick-meta">
+        <div class="scheduled-event-modal__quick-row scheduled-event-modal__quick-row--datetime">
+          <i data-lucide="calendar-days" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__quick-inline">
+            <div class="scheduled-event-modal__picker-anchor">
+              <button class="scheduled-event-modal__value-btn" type="button" data-scheduled-event-date-btn="date">${escapeHtml(formatScheduledEventDateLabel(draft.date, { includeWeekday: true }))}</button>
+              ${datePickerField === 'date' ? renderScheduledEventDatePickerHtml('date') : ''}
+            </div>
+            <div class="scheduled-event-modal__quick-range">
+              <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--time">
+                <button class="scheduled-event-modal__value-btn" type="button" data-scheduled-event-time-btn="start">${escapeHtml(formatScheduledEventTimeLabel(draft.startOffset))}</button>
+                ${timePickerField === 'start' ? renderScheduledEventTimePickerHtml('start') : ''}
+              </div>
+              <span class="scheduled-event-modal__quick-separator"> - </span>
+              <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--time">
+                <button class="scheduled-event-modal__value-btn" type="button" data-scheduled-event-time-btn="end">${escapeHtml(formatScheduledEventTimeLabel(draft.endOffset))}</button>
+                ${timePickerField === 'end' ? renderScheduledEventTimePickerHtml('end') : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="scheduled-event-modal__quick-row scheduled-event-modal__quick-row--channel">
+          <div class="scheduled-event-modal__picker-anchor">
+            <button class="scheduled-event-modal__text-btn scheduled-event-modal__text-btn--channel${draft.channelId ? '' : ' scheduled-event-modal__text-btn--placeholder'}" type="button" data-scheduled-event-channel-btn>
+              <span class="scheduled-event-modal__channel-hash" style="color:${escapeHtml(getScheduledEventChannelColor(draft.channelId))};">#</span>
+              <span class="scheduled-event-modal__channel-label">${escapeHtml(getScheduledEventChannelLabel(draft.channelId))}</span>
+            </button>
+            ${channelPickerOpen ? renderScheduledEventChannelPickerHtml() : ''}
+          </div>
+        </div>
+      </div>
+      <div class="scheduled-event-modal__quick-actions">
+        <button class="scheduled-event-modal__btn" type="button" data-scheduled-event-more-options>More options</button>
+        <button class="scheduled-event-modal__btn scheduled-event-modal__btn--primary" type="button" data-scheduled-event-save>Save</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventFullModalHeader() {
+  const isEditableExisting = !scheduledEventModalState.isNew && scheduledEventModalState.mode === 'edit';
+  const isViewExisting = !scheduledEventModalState.isNew && scheduledEventModalState.mode === 'view';
+  if (isViewExisting) {
+    return `
+      <div class="scheduled-event-modal__header">
+        <div class="scheduled-event-modal__header-actions">
+          <button class="scheduled-event-modal__btn" type="button" data-scheduled-event-edit>Edit</button>
+        </div>
+      </div>
+    `;
+  }
+  const deleteButton = isEditableExisting
+    ? `<button class="scheduled-event-modal__btn scheduled-event-modal__btn--delete-gap${scheduledEventModalState.deleteConfirmArmed ? ' scheduled-event-modal__btn--confirm-delete' : ''}" type="button" data-scheduled-event-delete>${scheduledEventModalState.deleteConfirmArmed ? 'Delete event' : 'Delete'}</button>`
+    : '';
+  return `
+    <div class="scheduled-event-modal__header">
+      <div class="scheduled-event-modal__header-actions">
+        <button class="scheduled-event-modal__btn" type="button" data-scheduled-event-${scheduledEventModalState.isNew ? 'close' : 'back'}>${scheduledEventModalState.isNew ? 'Discard' : 'Back'}</button>
+        <button class="scheduled-event-modal__btn scheduled-event-modal__btn--primary" type="button" data-scheduled-event-save>Save</button>
+        ${deleteButton}
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventFullModalReadOnly() {
+  const { draft } = scheduledEventModalState;
+  const channelLabel = getScheduledEventReadOnlyChannelLabel(draft.channelId);
+  const channelColor = getScheduledEventChannelColor(draft.channelId);
+  const transparencyValue = getScheduledEventTransparencyValue(draft.transparency);
+  const locationRow = draft.location
+    ? `<div class="scheduled-event-modal__full-row">
+        <i data-lucide="map-pin" class="scheduled-event-modal__icon"></i>
+        <div class="scheduled-event-modal__full-row-main">
+          <div class="scheduled-event-modal__static-value">${escapeHtml(draft.location)}</div>
+        </div>
+      </div>`
+    : '';
+  const descriptionRow = draft.description
+    ? `<div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--description">
+        <i data-lucide="sticky-note" class="scheduled-event-modal__icon"></i>
+        <div class="scheduled-event-modal__full-row-main">
+          <div class="scheduled-event-modal__static-value scheduled-event-modal__static-value--multiline">${escapeHtml(draft.description).replace(/\n/g, '<br>')}</div>
+        </div>
+      </div>`
+    : '';
+  return `
+    <div class="scheduled-event-modal__body scheduled-event-modal__body--full">
+      <div class="scheduled-event-modal__title-wrap">
+        <div class="scheduled-event-modal__title-display" id="scheduled-event-title">${escapeHtml(draft.title)}</div>
+      </div>
+      <div class="scheduled-event-modal__divider"></div>
+
+      <div class="scheduled-event-modal__full-section">
+        <div class="scheduled-event-modal__full-row">
+          <i data-lucide="calendar-days" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__full-row-main">
+            <div class="scheduled-event-modal__static-value">${escapeHtml(formatScheduledEventDateRangeLabel(draft.date, draft.endDate))}</div>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row">
+          <i data-lucide="clock-3" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__full-row-main">
+            <div class="scheduled-event-modal__static-value">${escapeHtml(formatScheduledEventReadOnlyTimeLabel(draft))}</div>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--channel">
+          <div class="scheduled-event-modal__full-row-main scheduled-event-modal__full-row-main--full-span">
+            <div class="scheduled-event-modal__channel-display${draft.channelId ? '' : ' scheduled-event-modal__channel-display--unassigned'}">
+              <span class="scheduled-event-modal__channel-hash" style="color:${escapeHtml(channelColor)};">#</span>
+              <span class="scheduled-event-modal__channel-label">${escapeHtml(channelLabel)}</span>
+            </div>
+          </div>
+        </div>
+
+        ${locationRow}
+        ${descriptionRow}
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--blocking">
+          <div class="scheduled-event-modal__full-row-main scheduled-event-modal__full-row-main--full-span">
+            <div class="scheduled-event-modal__blocking-display">
+              <span class="scheduled-event-modal__blocking-indicator${transparencyValue === 'blocking' ? ' scheduled-event-modal__blocking-indicator--selected' : ''}" aria-hidden="true"></span>
+              <span class="scheduled-event-modal__blocking-label">${escapeHtml(getScheduledEventTransparencyLabel(transparencyValue))}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventFullModalEdit() {
+  const { draft, error, datePickerField, timePickerField, channelPickerOpen, transparencyPickerOpen } = scheduledEventModalState;
+  const channelLabel = getScheduledEventChannelLabel(draft.channelId);
+  const startTimeLabel = draft.allDay ? getScheduledEventAllDayTimeLabel('start') : formatScheduledEventTimeLabel(draft.startOffset);
+  const endTimeLabel = draft.allDay ? getScheduledEventAllDayTimeLabel('end') : formatScheduledEventTimeLabel(draft.endOffset);
+  const allDayIcon = draft.allDay ? 'square-check' : 'square';
+  const transparencyValue = getScheduledEventTransparencyValue(draft.transparency);
+  return `
+    <div class="scheduled-event-modal__body scheduled-event-modal__body--full">
+      <div class="scheduled-event-modal__title-wrap">
+        <input class="scheduled-event-modal__title-input" id="scheduled-event-title" type="text" placeholder="Event title..." value="${escapeHtml(draft.title)}" data-scheduled-event-title>
+        <div class="scheduled-event-modal__error">${error ? escapeHtml(error) : ''}</div>
+      </div>
+      <div class="scheduled-event-modal__divider"></div>
+
+      <div class="scheduled-event-modal__full-section">
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--date">
+          <i data-lucide="calendar-days" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__full-row-main">
+            <div class="scheduled-event-modal__full-date-time">
+              <div class="scheduled-event-modal__picker-anchor">
+                <button class="scheduled-event-modal__value-btn" type="button" data-scheduled-event-date-btn="date">${escapeHtml(formatScheduledEventDateLabel(draft.date, { includeWeekday: true }))}</button>
+                ${datePickerField === 'date' ? renderScheduledEventDatePickerHtml('date') : ''}
+              </div>
+              <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--time">
+                <button class="scheduled-event-modal__value-btn scheduled-event-modal__value-btn--time" type="button" data-scheduled-event-time-btn="start"${draft.allDay ? ' disabled' : ''}>${escapeHtml(startTimeLabel)}</button>
+                ${!draft.allDay && timePickerField === 'start' ? renderScheduledEventTimePickerHtml('start') : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--indent scheduled-event-modal__full-row--date">
+          <div class="scheduled-event-modal__full-row-spacer" aria-hidden="true"></div>
+          <div class="scheduled-event-modal__full-row-main">
+            <div class="scheduled-event-modal__full-date-time">
+              <div class="scheduled-event-modal__picker-anchor">
+                <button class="scheduled-event-modal__value-btn" type="button" data-scheduled-event-date-btn="endDate">${escapeHtml(formatScheduledEventDateLabel(draft.endDate, { includeWeekday: true }))}</button>
+                ${datePickerField === 'endDate' ? renderScheduledEventDatePickerHtml('endDate') : ''}
+              </div>
+              <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--time">
+                <button class="scheduled-event-modal__value-btn scheduled-event-modal__value-btn--time" type="button" data-scheduled-event-time-btn="end"${draft.allDay ? ' disabled' : ''}>${escapeHtml(endTimeLabel)}</button>
+                ${!draft.allDay && timePickerField === 'end' ? renderScheduledEventTimePickerHtml('end') : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--all-day">
+          <div class="scheduled-event-modal__full-row-spacer" aria-hidden="true"></div>
+          <div class="scheduled-event-modal__full-row-main scheduled-event-modal__full-row-main--all-day">
+            <button class="scheduled-event-modal__all-day-btn" type="button" aria-pressed="${draft.allDay ? 'true' : 'false'}" data-scheduled-event-all-day-btn>
+              <i data-lucide="${allDayIcon}" class="scheduled-event-modal__all-day-icon"></i>
+              <span>All day</span>
+            </button>
+            <div class="scheduled-event-modal__timezone">${escapeHtml(getScheduledEventTimezoneShortLabel())}</div>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--channel">
+          <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--full-row">
+            <button class="scheduled-event-modal__text-btn scheduled-event-modal__text-btn--channel${draft.channelId ? '' : ' scheduled-event-modal__text-btn--placeholder'}" type="button" data-scheduled-event-channel-btn>
+              <span class="scheduled-event-modal__channel-hash" style="color:${escapeHtml(getScheduledEventChannelColor(draft.channelId))};">#</span>
+              <span class="scheduled-event-modal__channel-label">${escapeHtml(channelLabel)}</span>
+            </button>
+            ${channelPickerOpen ? renderScheduledEventChannelPickerHtml() : ''}
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row">
+          <i data-lucide="map-pin" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__full-row-main">
+            <input class="scheduled-event-modal__field" type="text" placeholder="Location…" value="${escapeHtml(draft.location)}" data-scheduled-event-location>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--description">
+          <i data-lucide="sticky-note" class="scheduled-event-modal__icon"></i>
+          <div class="scheduled-event-modal__full-row-main">
+            <textarea class="scheduled-event-modal__textarea" placeholder="Description…" rows="1" data-scheduled-event-description>${escapeHtml(draft.description)}</textarea>
+          </div>
+        </div>
+
+        <div class="scheduled-event-modal__full-row scheduled-event-modal__full-row--blocking">
+          <div class="scheduled-event-modal__picker-anchor scheduled-event-modal__picker-anchor--full-row">
+            <button class="scheduled-event-modal__blocking-btn" type="button" data-scheduled-event-transparency-btn>
+              <span class="scheduled-event-modal__blocking-indicator${transparencyValue === 'blocking' ? ' scheduled-event-modal__blocking-indicator--selected' : ''}" aria-hidden="true"></span>
+              <span class="scheduled-event-modal__blocking-label">${escapeHtml(getScheduledEventTransparencyLabel(transparencyValue))}</span>
+            </button>
+            ${transparencyPickerOpen ? renderScheduledEventTransparencyPickerHtml() : ''}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderScheduledEventFullModal() {
+  return `
+    <div class="scheduled-event-modal scheduled-event-modal--full" role="dialog" aria-modal="true" aria-labelledby="scheduled-event-title">
+      ${renderScheduledEventFullModalHeader()}
+      ${isScheduledEventModalEditable() ? renderScheduledEventFullModalEdit() : renderScheduledEventFullModalReadOnly()}
+    </div>
+  `;
+}
+
+function renderScheduledEventModal() {
+  if (!scheduledEventModalState) return;
+  normalizeScheduledEventDraftTimes(scheduledEventModalState.draft);
+  const overlay = getScheduledEventOverlay();
+  if (!overlay) return;
+  overlay.hidden = false;
+  overlay.classList.toggle('scheduled-event-overlay--full', scheduledEventModalState.view === 'full');
+  overlay.innerHTML = scheduledEventModalState.view === 'full'
+    ? renderScheduledEventFullModal()
+    : renderScheduledEventQuickModal();
+  document.body.classList.add('modal-open');
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  const modal = overlay.querySelector('.scheduled-event-modal');
+  if (scheduledEventModalState.view === 'quick') {
+    positionScheduledEventQuickModal(modal);
+  } else if (!scheduledEventModalState.isNew) {
+    renderCalendarEvents._overrideDate = scheduledEventModalState.visibleDateOverride || getFirstVisibleDate();
+    renderCalendarEvents();
+  }
+  syncScheduledEventModalGhost();
+  autoResizeScheduledEventDescription(overlay.querySelector('[data-scheduled-event-description]'));
+
+  const titleInput = overlay.querySelector('[data-scheduled-event-title]');
+  if (titleInput && scheduledEventModalState.autoFocusTitle) {
+    scheduledEventModalState.autoFocusTitle = false;
+    requestAnimationFrame(() => {
+      titleInput.focus();
+      if (
+        titleInput instanceof HTMLInputElement
+        && scheduledEventModalState
+        && scheduledEventModalState.view === 'full'
+        && !scheduledEventModalState.isNew
+        && scheduledEventModalState.mode === 'edit'
+      ) {
+        const end = titleInput.value.length;
+        titleInput.setSelectionRange(end, end);
+      }
+    });
+  }
+
+  const channelSearch = overlay.querySelector('[data-scheduled-event-channel-search]');
+  const selectedTime = overlay.querySelector('.scheduled-event-time-picker .planned-picker__option--selected');
+  const openPicker = overlay.querySelector(
+    '[data-scheduled-event-date-picker], [data-scheduled-event-time-picker], [data-scheduled-event-channel-picker], [data-scheduled-event-transparency-picker]'
+  );
+  overlay.style.paddingBottom = openPicker
+    ? (scheduledEventModalState.view === 'full' ? '280px' : '240px')
+    : '';
+  requestAnimationFrame(() => {
+    if (channelSearch && document.activeElement !== channelSearch) {
+      channelSearch.focus();
+    }
+    if (selectedTime) {
+      selectedTime.scrollIntoView({ block: 'center' });
+    }
+    if (openPicker) {
+      ensureScheduledEventOverlayVisibility(openPicker);
+    } else if (modal && scheduledEventModalState.view === 'full') {
+      ensureScheduledEventOverlayVisibility(modal);
+    }
+  });
+}
+
+function openScheduledEventModal(draft, options = {}) {
+  closeTaskDetailModal();
+  const nextDraft = {
+    ...draft,
+    date: draft.date || getFirstVisibleDate(),
+    endDate: draft.endDate || draft.date || getFirstVisibleDate(),
+    title: draft.title || '',
+    channelId: draft.channelId || null,
+    transparency: getScheduledEventTransparencyValue(draft.transparency),
+    location: draft.location || '',
+    description: draft.description || ''
+  };
+  normalizeScheduledEventDraftTimes(nextDraft);
+  scheduledEventModalState = buildScheduledEventModalState(nextDraft, {
+    isNew: options.isNew !== false,
+    view: options.view || 'quick',
+    mode: options.mode,
+    error: options.error || '',
+    visibleDateOverride: options.visibleDateOverride || nextDraft.date
+  });
+  renderScheduledEventModal();
+}
+
+function openScheduledEventQuickCreate(draft) {
+  openScheduledEventModal(draft, { isNew: true, view: 'quick' });
+}
+
+function openScheduledEventFullModalForEvent(eventId) {
+  const event = findCalendarEventById(eventId);
+  if (!event || !isManualScheduledEvent(event)) return;
+  openScheduledEventModal(buildScheduledEventDraftFromEvent(event), { isNew: false, view: 'full', mode: 'view' });
+}
+
+function updateScheduledEventVisibleDate(nextIsoDate) {
+  if (!nextIsoDate) return;
+  if (scheduledEventModalState) {
+    scheduledEventModalState.visibleDateOverride = nextIsoDate;
+  }
+  scrollToDateColumn(nextIsoDate, { behavior: 'smooth' });
+}
+
+function setScheduledEventDraftDate(field, nextIsoDate) {
+  if (!scheduledEventModalState || !nextIsoDate) return;
+  const draft = scheduledEventModalState.draft;
+  if (field === 'endDate') {
+    if (draft.allDay) {
+      draft.endDate = nextIsoDate < draft.date ? draft.date : nextIsoDate;
+    } else {
+      draft.date = nextIsoDate;
+      draft.endDate = nextIsoDate;
+      updateScheduledEventVisibleDate(nextIsoDate);
+    }
+  } else {
+    draft.date = nextIsoDate;
+    if (!draft.allDay || draft.endDate < nextIsoDate) {
+      draft.endDate = nextIsoDate;
+    }
+    updateScheduledEventVisibleDate(nextIsoDate);
+  }
+  scheduledEventModalState.datePickerField = null;
+  scheduledEventModalState.deleteConfirmArmed = false;
+  scheduledEventModalState.error = '';
+  renderScheduledEventModal();
+}
+
+function setScheduledEventDraftTime(field, nextOffset) {
+  if (!scheduledEventModalState) return;
+  const draft = scheduledEventModalState.draft;
+  const minDuration = 1 / SNAP_STEPS_PER_HOUR;
+  if (field === 'start') {
+    draft.startOffset = clampCalendarOffset(nextOffset, 0);
+    if (draft.endOffset - draft.startOffset < minDuration) {
+      draft.endOffset = Math.min(DEFAULT_CALENDAR_TOTAL_HOURS, draft.startOffset + minDuration);
+    }
+  } else {
+    draft.endOffset = Math.max(minDuration, Math.min(DEFAULT_CALENDAR_TOTAL_HOURS, nextOffset));
+    if (draft.endOffset - draft.startOffset < minDuration) {
+      draft.startOffset = Math.max(0, draft.endOffset - minDuration);
+    }
+  }
+  scheduledEventModalState.timePickerField = null;
+  scheduledEventModalState.deleteConfirmArmed = false;
+  scheduledEventModalState.error = '';
+  renderScheduledEventModal();
+}
+
+function selectScheduledEventChannel(channelId) {
+  if (!scheduledEventModalState) return;
+  scheduledEventModalState.draft.channelId = channelId === 'unassigned' ? null : channelId;
+  scheduledEventModalState.channelPickerOpen = false;
+  scheduledEventModalState.channelPickerQuery = '';
+  scheduledEventModalState.deleteConfirmArmed = false;
+  scheduledEventModalState.error = '';
+  renderScheduledEventModal();
+}
+
+function saveScheduledEventModal() {
+  if (!scheduledEventModalState) return;
+  const draft = scheduledEventModalState.draft;
+  const title = String(draft.title || '').trim();
+  if (!title) {
+    scheduledEventModalState.error = 'Title is required.';
+    scheduledEventModalState.autoFocusTitle = true;
+    renderScheduledEventModal();
+    return;
+  }
+
+  normalizeScheduledEventDraftTimes(draft);
+  const style = getManualScheduledEventStyle(draft.channelId);
+  const duration = getScheduledEventDurationHours(draft);
+  let event = draft.id ? state.calendarEvents.find(item => item.id === draft.id) : null;
+  if (!event) {
+    event = {
+      id: draft.id || ('evt-' + uid()),
+      zOrder: ++calZCounter
+    };
+    state.calendarEvents.push(event);
+  }
+
+  event.title = title;
+  event.date = draft.date;
+  event.endDate = draft.allDay ? draft.endDate : draft.date;
+  event.offset = draft.startOffset;
+  event.duration = duration;
+  event.kind = 'scheduled_event';
+  event.allDay = !!draft.allDay;
+  event.channelId = draft.channelId || null;
+  event.transparency = getScheduledEventTransparencyValue(draft.transparency);
+  event.location = draft.location || '';
+  event.description = draft.description || '';
+  event.colorClass = style.eventClass;
+  event.zOrder = event.zOrder || ++calZCounter;
+  delete event.taskId;
+
+  persistCalendarEvent(event);
+  clearCalendarGhost();
+  renderCalendarEvents();
+  closeScheduledEventModal();
+}
+
+function deleteScheduledEventById(eventId) {
+  if (!eventId) return;
+  state.calendarEvents = state.calendarEvents.filter(event => event.id !== eventId);
+  persistDeleteCalendarEvent(eventId);
+  clearCalendarGhost();
+  renderCalendarEvents();
+  if (scheduledEventModalState && scheduledEventModalState.eventId === eventId) {
+    closeScheduledEventModal();
+  }
+}
+
 function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {}) {
   ensureTaskTimeState(task);
   const isBacklog = options.isBacklog === true;
@@ -12362,10 +13447,16 @@ function refreshSearchPanelIfVisible() {
 
 function getCalendarEventsForDate(isoDate) {
   const filterId = getActiveTaskFilterId();
+  const previewEvent = shouldPreviewExistingScheduledEventDraft()
+    ? buildScheduledEventPreviewEventFromDraft(scheduledEventModalState.draft, scheduledEventModalState.eventId)
+    : null;
   // 1. Get stored calendar events for this date
   const stored = state.calendarEvents.filter(evt => {
-    if (evt.date !== isoDate) return false;
+    if (previewEvent && evt.id === previewEvent.id) return false;
+    if (!doesCalendarEventOccurOnDate(evt, isoDate)) return false;
+    if (evt.allDay) return false;
     if (evt.systemType === 'actual' && !settings.visualizeActualTimeOnCalendar) return false;
+    if (isManualScheduledEvent(evt)) return true;
     if (!evt.taskId) return true;
     const task = findTaskById(evt.taskId);
     return taskMatchesChannelFilterId(task, filterId);
@@ -12393,7 +13484,34 @@ function getCalendarEventsForDate(isoDate) {
     }
   }
 
+  if (previewEvent && !previewEvent.allDay && doesCalendarEventOccurOnDate(previewEvent, isoDate)) {
+    stored.push(previewEvent);
+  }
+
   return [...stored, ...dynamic];
+}
+
+function getAllDayScheduledEventsForDate(isoDate) {
+  const previewEvent = shouldPreviewExistingScheduledEventDraft()
+    ? buildScheduledEventPreviewEventFromDraft(scheduledEventModalState.draft, scheduledEventModalState.eventId)
+    : null;
+  const events = state.calendarEvents
+    .filter(evt => {
+      if (previewEvent && evt.id === previewEvent.id) return false;
+      return isManualScheduledEvent(evt) && evt.allDay && doesCalendarEventOccurOnDate(evt, isoDate);
+    })
+    .sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  if (previewEvent && previewEvent.allDay && doesCalendarEventOccurOnDate(previewEvent, isoDate)) {
+    events.push(previewEvent);
+    events.sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+  }
+  return events;
 }
 
 function getTaskCompletionOffset(task) {
@@ -12461,6 +13579,21 @@ function renderCalendarCompletionMarkers(timeGrid, visibleDate, anchorEl) {
   });
 }
 
+function renderAllDayScheduledEvents(visibleDate) {
+  const container = document.getElementById('calendar-all-day');
+  const eventsEl = document.getElementById('calendar-all-day-events');
+  if (!container || !eventsEl) return;
+  const events = getAllDayScheduledEventsForDate(visibleDate);
+  container.hidden = events.length === 0;
+  eventsEl.innerHTML = events.map(evt => {
+    const style = getManualScheduledEventStyle(evt.channelId);
+    const textColor = getContrastTextColor(style.hashColor);
+    return `<button class="calendar-all-day__event" type="button" data-calendar-all-day-event="${escapeHtml(evt.id)}" style="background-color:${escapeHtml(style.hashColor)};color:${escapeHtml(textColor)};">
+      ${escapeHtml(evt.title || 'Untitled event')}
+    </button>`;
+  }).join('');
+}
+
 // Find a calendar event by ID — checks stored events first, then dynamic (dyn-) events
 function findCalendarEventById(eventId) {
   const stored = state.calendarEvents.find(ev => ev.id === eventId);
@@ -12514,6 +13647,7 @@ function renderCalendarEvents() {
   renderCalendarEvents._overrideDate = null;
   const eventsForDate = getCalendarEventsForDate(visibleDate);
   const laneLayout = buildCalendarLaneLayout(eventsForDate);
+  renderAllDayScheduledEvents(visibleDate);
 
   // Remove all rendered events, keeping the ghost element
   timeGrid.querySelectorAll('.cal-event:not(#cal-event-ghost)').forEach(el => el.remove());
@@ -12527,11 +13661,15 @@ function renderCalendarEvents() {
     const linkedTask = evt.taskId ? findTaskById(evt.taskId) : null;
     const eventColorClass = linkedTask
       ? getTaskEventColorClass(linkedTask, evt.colorClass || 'cal-event--blue')
+      : isManualScheduledEvent(evt)
+        ? getManualScheduledEventStyle(evt.channelId).eventClass
       : (evt.colorClass || 'cal-event--blue');
     evt.colorClass = eventColorClass;
 
     // Resolve the channel's actual hashColor for inline styling
-    const channelStyle = linkedTask ? getChannelStyle(linkedTask.tag) : null;
+    const channelStyle = linkedTask
+      ? getChannelStyle(linkedTask.tag)
+      : (isManualScheduledEvent(evt) ? getManualScheduledEventStyle(evt.channelId) : null);
 
     const el = document.createElement('div');
     el.className = `cal-event ${eventColorClass}`;
@@ -12539,7 +13677,7 @@ function renderCalendarEvents() {
       el.style.backgroundColor = channelStyle.hashColor;
     }
     if (evt.systemType === 'actual') el.classList.add('cal-event--actual');
-    if (evt.taskId) el.classList.add('cal-event--movable');
+    if (evt.taskId || isManualScheduledEvent(evt)) el.classList.add('cal-event--movable');
     el.dataset.eventId = evt.id;
     el.style.setProperty('--offset',   evt.offset);
     el.style.setProperty('--duration', evt.duration);
@@ -12755,7 +13893,10 @@ function attachWorkdayMarkerEvents() {
     const activeDate = getFirstVisibleDate();
     if (activeDate) {
       storeWorkdayOverrideForDate(activeDate);
-      if (dailyPlanningState.isActive) renderDailyPlanningPanel();
+      if (dailyPlanningState.isActive) {
+        syncDailyPlanningDraftShutdownTime();
+        renderDailyPlanningPanel();
+      }
     }
   });
 }
@@ -17426,6 +18567,7 @@ function attachDailyPlanningEvents() {
       e.preventDefault();
       const nextTime = shutdownOption.dataset.dpShutdownOption || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
       draft.shutdownTime = nextTime;
+      draft.shutdownTimeManuallySelected = true;
       draft.updatedAt = new Date().toISOString();
       closeDailyPlanningShutdownDropdown();
       renderDailyPlanningPanel();
@@ -17481,8 +18623,9 @@ function attachDailyPlanningEvents() {
 
     if (e.target.closest('[data-dp-add-shutdown]')) {
       e.preventDefault();
-      const nextTime = draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
+      const nextTime = draft.shutdownTime || getDailyPlanningShutdownTimeForDate(dailyPlanningState.selectedDate || getTodayISO());
       draft.shutdownTime = nextTime;
+      draft.shutdownTimeManuallySelected = true;
       draft.updatedAt = new Date().toISOString();
       upsertDailyShutdownForDate(dailyPlanningState.selectedDate || getTodayISO(), draft.shutdownTime);
     }
@@ -17635,10 +18778,357 @@ function attachTodayViewEscapeEvents() {
    CALENDAR DRAG-AND-DROP
 ═══════════════════════════════════════════════ */
 
+function attachScheduledEventModalEvents() {
+  const overlay = getScheduledEventOverlay();
+  if (!overlay) return;
+
+  const handleCloseIntent = e => {
+    if (!scheduledEventModalState || !(e.target instanceof Element)) return;
+    if (!e.target.closest('[data-scheduled-event-close]')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeScheduledEventModal();
+  };
+
+  overlay.addEventListener('pointerdown', handleCloseIntent, true);
+  overlay.addEventListener('mousedown', handleCloseIntent, true);
+
+  overlay.addEventListener('click', e => {
+    if (!scheduledEventModalState) return;
+
+    if (e.target === overlay) {
+      closeScheduledEventModal();
+      return;
+    }
+    if (!(e.target instanceof Element)) return;
+
+    if (e.target.closest('[data-scheduled-event-close]')) {
+      closeScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-edit]')) {
+      scheduledEventModalState.mode = 'edit';
+      scheduledEventModalState.deleteConfirmArmed = false;
+      scheduledEventModalState.error = '';
+      scheduledEventModalState.autoFocusTitle = true;
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-back]')) {
+      scheduledEventModalState.mode = 'view';
+      scheduledEventModalState.deleteConfirmArmed = false;
+      scheduledEventModalState.error = '';
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      scheduledEventModalState.channelPickerQuery = '';
+      scheduledEventModalState.channelPickerHighlight = 0;
+      if (scheduledEventModalState.savedDraft) {
+        scheduledEventModalState.draft = cloneScheduledEventDraft(scheduledEventModalState.savedDraft);
+        scheduledEventModalState.visibleDateOverride = scheduledEventModalState.draft.date;
+        scrollToDateColumn(scheduledEventModalState.draft.date, { behavior: 'smooth' });
+      }
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-save]')) {
+      saveScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-delete]')) {
+      e.preventDefault();
+      if (scheduledEventModalState.deleteConfirmArmed) {
+        deleteScheduledEventById(scheduledEventModalState.eventId);
+      } else {
+        scheduledEventModalState.deleteConfirmArmed = true;
+        renderScheduledEventModal();
+      }
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-more-options]')) {
+      scheduledEventModalState.view = 'full';
+      scheduledEventModalState.error = '';
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      scheduledEventModalState.channelPickerQuery = '';
+      scheduledEventModalState.channelPickerHighlight = 0;
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-all-day-btn]')) {
+      if (!isScheduledEventModalEditable()) return;
+      scheduledEventModalState.draft.allDay = !scheduledEventModalState.draft.allDay;
+      if (!scheduledEventModalState.draft.allDay) {
+        scheduledEventModalState.draft.endDate = scheduledEventModalState.draft.date;
+      } else if (scheduledEventModalState.draft.endDate < scheduledEventModalState.draft.date) {
+        scheduledEventModalState.draft.endDate = scheduledEventModalState.draft.date;
+      }
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      scheduledEventModalState.deleteConfirmArmed = false;
+      renderScheduledEventModal();
+      return;
+    }
+
+    const dateBtn = e.target.closest('[data-scheduled-event-date-btn]');
+    if (dateBtn) {
+      if (!isScheduledEventModalEditable()) return;
+      const field = dateBtn.getAttribute('data-scheduled-event-date-btn');
+      const pickerIso = field === 'endDate'
+        ? scheduledEventModalState.draft.endDate
+        : scheduledEventModalState.draft.date;
+      const pickerDate = parseISO(pickerIso);
+      const isOpen = scheduledEventModalState.datePickerField === field;
+      scheduledEventModalState.datePickerField = isOpen ? null : field;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      scheduledEventModalState.datePickerViewYear = pickerDate.getFullYear();
+      scheduledEventModalState.datePickerViewMonth = pickerDate.getMonth();
+      renderScheduledEventModal();
+      return;
+    }
+
+    const timeBtn = e.target.closest('[data-scheduled-event-time-btn]');
+    if (timeBtn && !timeBtn.hasAttribute('disabled')) {
+      if (!isScheduledEventModalEditable()) return;
+      const field = timeBtn.getAttribute('data-scheduled-event-time-btn');
+      const isOpen = scheduledEventModalState.timePickerField === field;
+      scheduledEventModalState.timePickerField = isOpen ? null : field;
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-channel-btn]')) {
+      if (!isScheduledEventModalEditable()) return;
+      scheduledEventModalState.channelPickerOpen = !scheduledEventModalState.channelPickerOpen;
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      scheduledEventModalState.channelPickerQuery = '';
+      scheduledEventModalState.channelPickerHighlight = 0;
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-transparency-btn]')) {
+      if (!isScheduledEventModalEditable()) return;
+      scheduledEventModalState.transparencyPickerOpen = !scheduledEventModalState.transparencyPickerOpen;
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      renderScheduledEventModal();
+      return;
+    }
+
+    const datePicker = e.target.closest('[data-scheduled-event-date-picker]');
+    if (datePicker) {
+      e.stopPropagation();
+      const dayBtn = e.target.closest('.sdp-cal__day');
+      if (dayBtn && dayBtn.dataset.date) {
+        setScheduledEventDraftDate(datePicker.getAttribute('data-scheduled-event-date-picker'), dayBtn.dataset.date);
+        return;
+      }
+      if (e.target.closest('[data-cal-prev]')) {
+        scheduledEventModalState.datePickerViewMonth--;
+        if (scheduledEventModalState.datePickerViewMonth < 0) {
+          scheduledEventModalState.datePickerViewMonth = 11;
+          scheduledEventModalState.datePickerViewYear--;
+        }
+        renderScheduledEventModal();
+        return;
+      }
+      if (e.target.closest('[data-cal-next]')) {
+        scheduledEventModalState.datePickerViewMonth++;
+        if (scheduledEventModalState.datePickerViewMonth > 11) {
+          scheduledEventModalState.datePickerViewMonth = 0;
+          scheduledEventModalState.datePickerViewYear++;
+        }
+        renderScheduledEventModal();
+        return;
+      }
+      return;
+    }
+
+    const timePicker = e.target.closest('[data-scheduled-event-time-picker]');
+    if (timePicker) {
+      e.stopPropagation();
+      const option = e.target.closest('[data-scheduled-event-time-option]');
+      if (option) {
+        setScheduledEventDraftTime(
+          option.getAttribute('data-scheduled-event-time-field'),
+          (Number.parseInt(option.getAttribute('data-scheduled-event-time-option'), 10) || 0) / 60
+        );
+      }
+      return;
+    }
+
+    const channelPicker = e.target.closest('[data-scheduled-event-channel-picker]');
+    if (channelPicker) {
+      e.stopPropagation();
+      const item = e.target.closest('[data-scheduled-event-channel-id]');
+      if (item) {
+        selectScheduledEventChannel(item.getAttribute('data-scheduled-event-channel-id'));
+        return;
+      }
+      if (e.target.closest('[data-scheduled-event-manage-channels]')) {
+        e.preventDefault();
+        closeScheduledEventModal();
+        openSettingsView();
+        setTimeout(() => {
+          const section = document.getElementById('settings-section-channels');
+          if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          setSettingsActiveNav('channels');
+        }, 50);
+        return;
+      }
+      return;
+    }
+
+    const transparencyPicker = e.target.closest('[data-scheduled-event-transparency-picker]');
+    if (transparencyPicker) {
+      e.stopPropagation();
+      const option = e.target.closest('[data-scheduled-event-transparency-option]');
+      if (option) {
+        scheduledEventModalState.draft.transparency = getScheduledEventTransparencyValue(option.getAttribute('data-scheduled-event-transparency-option'));
+        scheduledEventModalState.transparencyPickerOpen = false;
+        scheduledEventModalState.deleteConfirmArmed = false;
+        renderScheduledEventModal();
+      }
+      return;
+    }
+
+    if (
+      (scheduledEventModalState.datePickerField || scheduledEventModalState.timePickerField || scheduledEventModalState.channelPickerOpen || scheduledEventModalState.transparencyPickerOpen)
+      && !e.target.closest('[data-scheduled-event-date-btn]')
+      && !e.target.closest('[data-scheduled-event-time-btn]')
+      && !e.target.closest('[data-scheduled-event-channel-btn]')
+      && !e.target.closest('[data-scheduled-event-transparency-btn]')
+    ) {
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      renderScheduledEventModal();
+    }
+  });
+
+  overlay.addEventListener('input', e => {
+    if (!scheduledEventModalState || !(e.target instanceof Element)) return;
+    if (e.target.matches('[data-scheduled-event-title]')) {
+      scheduledEventModalState.draft.title = e.target.value;
+      scheduledEventModalState.deleteConfirmArmed = false;
+      if (scheduledEventModalState.error && e.target.value.trim()) {
+        scheduledEventModalState.error = '';
+      }
+      return;
+    }
+    if (e.target.matches('[data-scheduled-event-location]')) {
+      scheduledEventModalState.draft.location = e.target.value;
+      scheduledEventModalState.deleteConfirmArmed = false;
+      return;
+    }
+    if (e.target.matches('[data-scheduled-event-description]')) {
+      scheduledEventModalState.draft.description = e.target.value;
+      scheduledEventModalState.deleteConfirmArmed = false;
+      autoResizeScheduledEventDescription(e.target);
+      return;
+    }
+    if (e.target.matches('[data-scheduled-event-channel-search]')) {
+      scheduledEventModalState.channelPickerQuery = e.target.value || '';
+      scheduledEventModalState.channelPickerHighlight = 0;
+      renderScheduledEventModal();
+    }
+  });
+
+  overlay.addEventListener('keydown', e => {
+    if (!scheduledEventModalState || !(e.target instanceof Element)) return;
+    if (handleOpenPickerArrowNavigation(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (e.key === 'Enter' && e.target.matches('[data-scheduled-event-title]') && scheduledEventModalState.view === 'quick') {
+      e.preventDefault();
+      saveScheduledEventModal();
+    }
+  });
+
+  document.addEventListener('keydown', e => {
+    if (!scheduledEventModalState || e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (scheduledEventModalState.datePickerField || scheduledEventModalState.timePickerField || scheduledEventModalState.channelPickerOpen || scheduledEventModalState.transparencyPickerOpen) {
+      scheduledEventModalState.datePickerField = null;
+      scheduledEventModalState.timePickerField = null;
+      scheduledEventModalState.channelPickerOpen = false;
+      scheduledEventModalState.transparencyPickerOpen = false;
+      renderScheduledEventModal();
+      return;
+    }
+    closeScheduledEventModal();
+  }, true);
+}
+
 function attachCalendarEvents() {
   const timeGrid    = document.getElementById('time-grid');
   const ghost       = document.getElementById('cal-event-ghost');
   const calDragLine = document.getElementById('cal-drag-line');
+  const allDayEvents = document.getElementById('calendar-all-day-events');
+
+  function isTimelineCreationTarget(target, clientX) {
+    if (!(target instanceof Element)) return false;
+    if (target.closest('.cal-event:not(#cal-event-ghost)')) return false;
+    if (target.closest('.cal-completion-marker')) return false;
+    if (target.closest('.workday-marker')) return false;
+    if (target.closest('.current-time-line')) return false;
+    if (target.closest('.time-grid__label')) return false;
+    const gridRect = timeGrid.getBoundingClientRect();
+    const trackLeft = gridRect.left + 52;
+    return clientX >= trackLeft;
+  }
+
+  function creationRangeFromPointer(clientY, anchorOffset) {
+    const gridTop = timeGrid.getBoundingClientRect().top;
+    const hourHeight = getHourHeightPx(timeGrid);
+    const totalHours = getCalendarTotalHours(timeGrid);
+    const minDuration = 1 / SNAP_STEPS_PER_HOUR;
+    const raw = (clientY - gridTop) / hourHeight;
+    const snapped = Math.max(0, Math.min(Math.round(raw * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR, totalHours));
+    if (snapped >= anchorOffset) {
+      return {
+        offset: anchorOffset,
+        duration: Math.min(Math.max(minDuration, snapped - anchorOffset), totalHours - anchorOffset)
+      };
+    }
+    const nextOffset = Math.max(0, Math.min(snapped, anchorOffset - minDuration));
+    return {
+      offset: nextOffset,
+      duration: anchorOffset - nextOffset
+    };
+  }
+
+  if (allDayEvents) {
+    allDayEvents.addEventListener('click', e => {
+      const eventBtn = e.target instanceof Element ? e.target.closest('[data-calendar-all-day-event]') : null;
+      if (!eventBtn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openScheduledEventFullModalForEvent(eventBtn.getAttribute('data-calendar-all-day-event'));
+    });
+  }
 
   timeGrid.addEventListener('click', e => {
     const marker = e.target.closest('.cal-completion-marker');
@@ -17660,6 +19150,28 @@ function attachCalendarEvents() {
     const anyEventEl = e.target.closest('.cal-event:not(#cal-event-ghost)');
     if (!anyEventEl) return;
     bringEventToFront(anyEventEl.dataset.eventId, anyEventEl);
+  });
+
+  timeGrid.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (!isTimelineCreationTarget(e.target, e.clientX)) return;
+    e.preventDefault();
+    const defaultDuration = DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60;
+    const gridTop = timeGrid.getBoundingClientRect().top;
+    const hourHeight = getHourHeightPx(timeGrid);
+    const rawOffset = (e.clientY - gridTop) / hourHeight;
+    const snappedOffset = Math.round(rawOffset * SNAP_STEPS_PER_HOUR) / SNAP_STEPS_PER_HOUR;
+    const maxStart = getCalendarTotalHours(timeGrid) - (1 / SNAP_STEPS_PER_HOUR);
+    const startOffset = Math.max(0, Math.min(snappedOffset, maxStart));
+    scheduledEventCreationState = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startOffset,
+      currentOffset: startOffset,
+      currentDuration: defaultDuration,
+      started: false
+    };
+    renderScheduledEventDraftGhost(startOffset, defaultDuration);
   });
 
   function eventOffsetFromPointer(clientY, duration, grabOffsetHours) {
@@ -17696,19 +19208,43 @@ function attachCalendarEvents() {
     calPointerDrag = {
       eventId: evt.id,
       grabOffsetHours,
-      sourceEl: evEl
+      sourceEl: evEl,
+      startX: e.clientX,
+      startY: e.clientY,
+      started: false
     };
 
-    evEl.classList.add('cal-event--dragging');
-    ghost.hidden = true;
+    clearCalendarGhost();
     calDragLine.hidden = true;
   });
 
   document.addEventListener('mousemove', e => {
+    if (scheduledEventCreationState) {
+      const distance = Math.hypot(e.clientX - scheduledEventCreationState.startX, e.clientY - scheduledEventCreationState.startY);
+      if (distance >= CALENDAR_EVENT_DRAG_THRESHOLD_PX) {
+        scheduledEventCreationState.started = true;
+      }
+      if (scheduledEventCreationState.started) {
+        e.preventDefault();
+        const range = creationRangeFromPointer(e.clientY, scheduledEventCreationState.startOffset);
+        scheduledEventCreationState.currentOffset = range.offset;
+        scheduledEventCreationState.currentDuration = range.duration;
+        renderScheduledEventDraftGhost(range.offset, range.duration);
+      }
+      return;
+    }
+
     if (!calPointerDrag) return;
 
     const evt = findCalendarEventById(calPointerDrag.eventId);
     if (!evt) return;
+
+    if (!calPointerDrag.started) {
+      const distance = Math.hypot(e.clientX - calPointerDrag.startX, e.clientY - calPointerDrag.startY);
+      if (distance < CALENDAR_EVENT_DRAG_THRESHOLD_PX) return;
+      calPointerDrag.started = true;
+      if (calPointerDrag.sourceEl) calPointerDrag.sourceEl.classList.add('cal-event--dragging');
+    }
 
     e.preventDefault();
     const offset = eventOffsetFromPointer(e.clientY, evt.duration, calPointerDrag.grabOffsetHours);
@@ -17719,15 +19255,40 @@ function attachCalendarEvents() {
   });
 
   document.addEventListener('mouseup', e => {
+    if (scheduledEventCreationState) {
+      const createState = scheduledEventCreationState;
+      scheduledEventCreationState = null;
+      const target = document.elementFromPoint(e.clientX, e.clientY);
+      const droppedOnTimeline = !!(target && target.closest('#time-grid'));
+      calDragLine.hidden = true;
+      if (!droppedOnTimeline) {
+        clearCalendarGhost();
+        return;
+      }
+      const offset = createState.started ? createState.currentOffset : createState.startOffset;
+      const duration = createState.started ? createState.currentDuration : (DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60);
+      openScheduledEventQuickCreate(createScheduledEventDraft(getFirstVisibleDate(), offset, duration));
+      return;
+    }
+
     if (!calPointerDrag) return;
 
-    const { eventId, grabOffsetHours, sourceEl } = calPointerDrag;
+    const { eventId, grabOffsetHours, sourceEl, started } = calPointerDrag;
     calPointerDrag = null;
     if (sourceEl) sourceEl.classList.remove('cal-event--dragging');
 
     const evt = findCalendarEventById(eventId);
     calDragLine.hidden = true;
     if (!evt) return;
+
+    if (!started) {
+      if (isManualScheduledEvent(evt)) {
+        openScheduledEventFullModalForEvent(eventId);
+      } else {
+        renderCalendarEvents();
+      }
+      return;
+    }
 
     const target = document.elementFromPoint(e.clientX, e.clientY);
     const droppedOnTimeline = !!(target && target.closest('#time-grid'));
@@ -17750,6 +19311,9 @@ function attachCalendarEvents() {
         }
       }
       persistCalendarEvent(evt);
+    } else if (isManualScheduledEvent(evt)) {
+      deleteScheduledEventById(eventId);
+      return;
     } else if (evt.systemType === 'actual' && evt.taskId) {
       // Drag actual event off timeline: delete event and subtract actual time
       const task = findTaskById(evt.taskId);
@@ -17836,7 +19400,7 @@ function attachCalendarEvents() {
 
   timeGrid.addEventListener('dragleave', e => {
     if (timeGrid.contains(e.relatedTarget)) return;
-    ghost.hidden = true;
+    clearCalendarGhost();
   });
 
   // Task card drop onto timeline.
@@ -17845,7 +19409,7 @@ function attachCalendarEvents() {
     if (!taskDragId) return;
 
     e.preventDefault();
-    ghost.hidden = true;
+    clearCalendarGhost();
     calDragLine.hidden = true;
 
     const task = findTaskById(taskDragId);
@@ -19526,7 +21090,8 @@ function ensureDateDataLoaded(isoDate) {
   if (!_loadedCalendarDates.has(isoDate) && !_loadingCalendarDates.has(isoDate)) {
     _loadingCalendarDates.add(isoDate);
     DB.loadCalendarEventsForRange(_currentUserId, isoDate, isoDate).then(events => {
-      state.calendarEvents = state.calendarEvents.filter(evt => evt.date !== isoDate).concat(events);
+      const normalizedEvents = events.map(normalizeCalendarEventRecord);
+      state.calendarEvents = state.calendarEvents.filter(evt => evt.date !== isoDate).concat(normalizedEvents);
       _loadedCalendarDates.add(isoDate);
       renderCalendarEvents._overrideDate = isoDate;
       renderCalendarEvents();
@@ -19701,7 +21266,8 @@ function persistRituals() {
 
 function persistCalendarEvent(event) {
   if (!_currentUserId) return;
-  DB.saveCalendarEvent(_currentUserId, event).catch(err =>
+  const normalized = normalizeCalendarEventRecord(event);
+  DB.saveCalendarEvent(_currentUserId, normalized).catch(err =>
     console.error('Failed to save calendar event:', err)
   );
 }
@@ -19762,6 +21328,7 @@ function initializeApp() {
     attachDailyShutdownEscapeEvents();
     attachTodayViewEscapeEvents();
     attachTaskModalEvents();
+    attachScheduledEventModalEvents();
     attachCalendarEvents();
     attachCalendarResizeEvents();
     attachWorkdayMarkerEvents();
@@ -19868,7 +21435,7 @@ async function onAuthReady(userId) {
   try {
     const todayISO = getTodayISO();
     const events = await DB.loadCalendarEventsForRange(userId, startISO, endISO);
-    state.calendarEvents = events;
+    state.calendarEvents = events.map(normalizeCalendarEventRecord);
     for (const col of state.columns) {
       _loadedCalendarDates.add(col.isoDate);
     }

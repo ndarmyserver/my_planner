@@ -169,6 +169,11 @@
               </div>
             </div>
 
+            <div class="calendar-all-day" id="calendar-all-day" hidden>
+              <div class="calendar-all-day__label">All day</div>
+              <div class="calendar-all-day__events" id="calendar-all-day-events"></div>
+            </div>
+
             <div class="time-grid-wrapper">
               <div class="time-grid" id="time-grid">
                 <!-- Hour rows 12 AM – 11 PM -->
@@ -408,6 +413,7 @@
   </div>
 
   <div class="task-modal-overlay" id="task-modal-overlay" hidden></div>
+  <div class="scheduled-event-overlay" id="scheduled-event-overlay" hidden></div>
 
   <!-- Firebase SDK (compat builds) -->
   <script src="https://www.gstatic.com/firebasejs/12.11.0/firebase-app-compat.js"></script>
