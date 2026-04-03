@@ -64,7 +64,7 @@ button { cursor: pointer; }
   --color-complete-fill: #4dcd7d;
 
   --color-event-blue: #4a90d9;
-  --color-event-orange: #f59e0b;
+  --color-event-orange: #ffb74d;
   --color-event-green: #22c55e;
   --color-event-purple: #8b6bd9;
   --color-workday-marker: #d7d7d7;
@@ -2438,6 +2438,14 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
   justify-content: center;
 }
 
+.task-card__integration-icon--image img {
+  width: 15px;
+  height: 15px;
+  display: block;
+  border-radius: 3px;
+  object-fit: cover;
+}
+
 /* Tag */
 .task-card__tag {
   display: inline-flex;
@@ -3607,24 +3615,28 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
 }
 
 .calendar-all-day {
+  position: relative;
   display: flex;
   align-items: stretch;
-  gap: 10px;
-  padding: 10px 12px 10px 0;
+  gap: 0;
+  padding: 10px 12px 10px 52px;
   border-bottom: 1px solid var(--color-border);
   background: var(--color-main-card-bg);
 }
 
+.calendar-all-day::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 48px;
+  width: 1px;
+  background: var(--color-border);
+  pointer-events: none;
+}
+
 .calendar-all-day__label {
-  width: 48px;
-  min-width: 48px;
-  padding: 6px 6px 0 10px;
-  text-align: right;
-  font-size: 10px;
-  font-weight: 600;
-  color: #b4b4b4;
-  line-height: 1.2;
-  text-transform: uppercase;
+  display: none;
 }
 
 .calendar-all-day__events {
@@ -3633,7 +3645,11 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding-right: 12px;
+  padding-left: 0;
+}
+
+.calendar-day-badge:has(+ .calendar-all-day:not([hidden])) {
+  border-bottom-color: transparent;
 }
 
 .calendar-all-day__event {
@@ -3655,6 +3671,13 @@ body.task-selection--keyboard-lock .task-card:hover:not(.task-card--active):not(
 
 .calendar-all-day__event:hover {
   filter: brightness(0.98);
+}
+
+.calendar-all-day__event--ghost {
+  border: 2px dashed rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* Time grid */
@@ -3867,6 +3890,15 @@ body.is-workday-marker-dragging {
     rgba(255, 255, 255, 0.22) 3px,
     rgba(255, 255, 255, 0.22) 5px
   );
+}
+
+.cal-event--draft-preview {
+  border: 2px dashed rgba(255, 255, 255, 0.72);
+  padding-top: 4px;
+}
+
+.cal-event--past-today {
+  opacity: 0.7;
 }
 
 /* ═══════════════════════════════════════════════
@@ -4217,22 +4249,40 @@ body.is-workday-marker-dragging {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: #3f3f3f;
+  color: #413f39;
   font-size: 13px;
+  font-weight: 500;
   height: 30px;
   padding: 0 8px;
   border-radius: 4px;
   margin-left: -8px;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .task-modal__channel:hover {
   background: #f7f8fa;
+  color: #413f39;
 }
 
 .task-modal__channel-hash {
   font-weight: 500;
+}
+
+.task-modal__channel-word {
+  color: inherit;
+}
+
+.task-modal__channel--unassigned {
+  color: #b4b4b4;
+}
+
+.task-modal__channel--unassigned:hover {
+  color: #413f39;
+}
+
+.task-modal__channel--assigned {
+  color: #413f39;
 }
 
 .task-modal__meta-right {
@@ -4251,6 +4301,7 @@ body.is-workday-marker-dragging {
 .task-modal__meta-start-btn {
   font-family: inherit;
   font-size: 13px;
+  font-weight: 500;
   height: 30px;
   padding: 0 8px;
   border-radius: 4px;
@@ -4264,6 +4315,7 @@ body.is-workday-marker-dragging {
 
 .task-modal__meta-start-btn:hover {
   background: #f7f8fa;
+  color: #413f39;
 }
 
 .task-modal__top-actions {
@@ -4278,6 +4330,7 @@ body.is-workday-marker-dragging {
   color: #b4b4b4;
   font-family: inherit;
   font-size: 13px;
+  font-weight: 500;
   height: 30px;
   display: inline-flex;
   align-items: center;
@@ -4285,15 +4338,16 @@ body.is-workday-marker-dragging {
   padding: 0 8px;
   border-radius: 4px;
   cursor: pointer;
-  transition: background 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .task-modal__top-action:hover {
   background: #f7f8fa;
+  color: #413f39;
 }
 
 .task-modal__top-action--icon {
-  padding: 0 4px;
+  padding: 0 8px;
 }
 
 .task-modal__top-action svg {
@@ -4899,8 +4953,8 @@ body.modal-open {
   position: fixed;
   inset: 0;
   padding: 24px;
-  background-color: rgba(43, 36, 62, 0.22);
-  z-index: 4300;
+  background-color: rgba(43, 36, 62, 0.3);
+  z-index: 9500;
   overflow: auto;
 }
 
@@ -4954,6 +5008,33 @@ body.modal-open {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.scheduled-event-modal__header-actions--right {
+  margin-left: auto;
+  gap: 8px;
+}
+
+.scheduled-event-modal__task-toggle-btn {
+  border: 0;
+  background: transparent;
+  color: #b4b4b4;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.3;
+  padding: 0 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.scheduled-event-modal__task-toggle-btn:hover {
+  background: #f7f8fa;
+  color: #413f39;
 }
 
 .scheduled-event-modal__btn {
@@ -5208,6 +5289,10 @@ body.modal-open {
   justify-content: flex-start;
 }
 
+.scheduled-event-modal--full .scheduled-event-modal__header-actions--right {
+  gap: 8px;
+}
+
 .scheduled-event-modal--full .scheduled-event-modal__btn--delete-gap {
   margin-left: 16px;
 }
@@ -5234,6 +5319,10 @@ body.modal-open {
 
 .scheduled-event-modal__delete-link:hover {
   color: #db4b34;
+}
+
+.scheduled-event-modal__divider--notes {
+  margin: 24px 0 12px;
 }
 
 .scheduled-event-modal--full .scheduled-event-modal__value-btn,
@@ -6989,12 +7078,26 @@ body.modal-open {
   margin-bottom: 28px;
 }
 
+.focus-modal__title-column {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  flex: 1;
+  min-width: 0;
+}
+
 .focus-modal__title-wrap {
   display: flex;
   align-items: flex-start;
   gap: 0;
-  flex: 1;
   min-width: 0;
+}
+
+.focus-modal__title-stack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
 }
 
 .focus-modal__title-wrap .task-modal__check {
@@ -7002,6 +7105,13 @@ body.modal-open {
   height: 20px;
   margin-top: 8px;
   margin-right: 16px;
+  border-color: #b4b4b4;
+  color: #b4b4b4;
+}
+
+.focus-modal__title-wrap .task-modal__check.task-modal__check--complete {
+  border-color: #4dcd7d;
+  color: #ffffff;
 }
 
 .focus-modal__title-wrap .task-modal__check svg {
@@ -7017,6 +7127,31 @@ body.modal-open {
   letter-spacing: 0;
   margin: 0;
   outline: none;
+}
+
+.focus-modal__event-timeframe {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 16px;
+  min-width: 0;
+}
+
+.focus-modal__event-timeframe-icon {
+  width: 16px;
+  height: 16px;
+  color: #b4b4b4;
+  flex: 0 0 auto;
+  justify-self: start;
+}
+
+.focus-modal__event-timeframe-text {
+  min-width: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: #787878;
+  text-align: left;
 }
 
 .focus-modal__metrics {
@@ -7213,6 +7348,8 @@ body.modal-open {
   height: 16px;
   margin-top: 0;
   justify-self: center;
+  border-color: #b4b4b4;
+  color: #b4b4b4;
 }
 
 .focus-modal__subtask-check svg {
@@ -7551,6 +7688,39 @@ body.modal-open {
   font-style: normal;
   left: 0;
   padding: 0;
+}
+
+/* ── Scheduled Event Notes Editor ── */
+.scheduled-event-modal__notes-editor,
+.scheduled-event-modal__notes-readonly {
+  margin-left: 24px;
+}
+
+.scheduled-event-modal__notes-editor.ql-container.ql-snow {
+  border: none;
+  height: auto;
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+}
+
+.scheduled-event-modal__notes-editor .ql-editor,
+.scheduled-event-modal__notes-readonly.ql-editor {
+  padding: 0;
+  min-height: 96px;
+  color: #413f39;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.scheduled-event-modal__notes-editor .ql-editor.ql-blank::before {
+  color: #b4b4b4;
+  font-style: normal;
+  left: 0;
+  padding: 0;
+}
+
+.scheduled-event-modal__notes-readonly.ql-editor {
+  min-height: 0;
 }
 
 /* ── Focus Modal Notes Editor ── */
@@ -8397,7 +8567,7 @@ body.modal-open {
 
 .archive-delete-modal__desc {
   margin: 0;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 1.4;
   color: #413f39;
@@ -8429,10 +8599,31 @@ body.modal-open {
   box-shadow: 0 2px 4px #0003;
 }
 
+.archive-delete-modal__btn--primary {
+  background: #2ca7ff;
+  color: #ffffff;
+  border-color: #2ca7ff;
+}
+
 .archive-delete-modal__btn--danger {
   background: #f25a43;
   color: #ffffff;
   border-color: #f25a43;
+}
+
+.event-task-completion-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(43, 36, 62, 0.3);
+  padding: 24px;
+}
+
+.event-task-completion-modal {
+  width: min(460px, 100%);
 }
 
 .settings-channel-modal__field {

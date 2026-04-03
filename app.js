@@ -3,6 +3,7 @@
 ═══════════════════════════════════════════════ */
 let taskModalQuill = null;
 let focusModalQuill = null;
+let scheduledEventModalQuill = null;
 let dpShareQuill = null;
 let dsShareQuill = null;
 let floatingTooltipEl = null;
@@ -255,6 +256,7 @@ const DEFAULT_CALENDAR_TOTAL_HOURS = 24;
 const DEFAULT_HOUR_HEIGHT_PX = 60;
 const DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES = 30;
 const DEFAULT_SCHEDULED_EVENT_COLOR = '#ffb74d';
+const DEFAULT_CALENDAR_EVENT_CLASS = 'cal-event--orange';
 const CALENDAR_EVENT_DRAG_THRESHOLD_PX = 4;
 const DEFAULT_WORKDAY_START_HOUR = 8;
 const DEFAULT_WORKDAY_END_HOUR = 17;
@@ -1616,7 +1618,7 @@ function getChannelStyle(tag) {
   return CHANNEL_COLORS[normalizeTag(tag)] || null;
 }
 
-function getTaskEventColorClass(task, fallback = 'cal-event--blue') {
+function getTaskEventColorClass(task, fallback = DEFAULT_CALENDAR_EVENT_CLASS) {
   const style = task ? getChannelStyle(task.tag) : null;
   return style ? style.eventClass : fallback;
 }
@@ -1753,7 +1755,7 @@ function getCalendarEventClassForColor(color) {
     '#ff8686': 'cal-event--orange', '#e06d6d': 'cal-event--orange', '#a1887f': 'cal-event--blue',
     '#8e7973': 'cal-event--blue',
   };
-  return eventClassMap[String(color || '').toLowerCase()] || 'cal-event--blue';
+  return eventClassMap[String(color || '').toLowerCase()] || DEFAULT_CALENDAR_EVENT_CLASS;
 }
 
 function getManualScheduledEventStyle(channelId = null) {
@@ -1774,6 +1776,15 @@ function isManualScheduledEvent(event) {
   return !!(event && event.kind === 'scheduled_event' && !event.taskId);
 }
 
+function isCalendarEventTask(task) {
+  return !!(task && task.taskKind === 'calendar_event' && task.linkedCalendarEventId);
+}
+
+function getCalendarEventSourceProvider(event) {
+  if (!event) return null;
+  return event.sourceProvider || (isManualScheduledEvent(event) ? 'sunsama' : null);
+}
+
 function doesCalendarEventOccurOnDate(event, isoDate) {
   if (!event || !isoDate) return false;
   if (isManualScheduledEvent(event) && event.allDay && event.endDate) {
@@ -1792,15 +1803,625 @@ function normalizeCalendarEventRecord(event) {
   normalized.channelId = normalized.channelId || null;
   normalized.location = normalized.location || '';
   normalized.description = normalized.description || '';
+  normalized.notes = normalized.notes || '';
   normalized.kind = normalized.kind || null;
   normalized.transparency = normalized.transparency === 'non_blocking' ? 'non_blocking' : 'blocking';
+  normalized.blocksTaskScheduling = normalized.blocksTaskScheduling !== false;
+  normalized.linkedTaskId = normalized.linkedTaskId || null;
+  normalized.externalSourceId = normalized.externalSourceId || null;
+  normalized.sourceProvider = getCalendarEventSourceProvider(normalized);
   if (isManualScheduledEvent(normalized)) {
     const style = getManualScheduledEventStyle(normalized.channelId);
     normalized.colorClass = style.eventClass;
   } else if (!normalized.colorClass) {
-    normalized.colorClass = 'cal-event--blue';
+    normalized.colorClass = DEFAULT_CALENDAR_EVENT_CLASS;
   }
   return normalized;
+}
+
+function canCalendarEventBeAddedToTasks(event) {
+  if (!event || event.systemType === 'actual' || event.taskId) return false;
+  return isManualScheduledEvent(event) || !!getCalendarEventSourceProvider(event) || !!event.externalSourceId;
+}
+
+function findCalendarEventByLinkedTaskId(taskId) {
+  return state.calendarEvents.find(event => event && event.linkedTaskId === taskId) || null;
+}
+
+function findCalendarEventTaskByEventId(eventId) {
+  return getAllKnownTasks().find(task => isCalendarEventTask(task) && task.linkedCalendarEventId === eventId) || null;
+}
+
+function getLinkedCalendarEventForTask(task) {
+  if (!isCalendarEventTask(task)) return null;
+  return findCalendarEventById(task.linkedCalendarEventId);
+}
+
+function getLinkedTaskForCalendarEvent(event) {
+  if (!event) return null;
+  return findTaskById(event.linkedTaskId) || findCalendarEventTaskByEventId(event.id);
+}
+
+function getCalendarEventTaskTag(event) {
+  const channel = event && event.channelId ? getChannelById(event.channelId) : null;
+  return channel ? `#${channel.label}` : null;
+}
+
+function getCalendarEventPlannedMinutes(event) {
+  return Math.max(0, Math.round((Number(event?.duration) || 0) * 60));
+}
+
+function getCalendarEventTaskScheduledTime(event) {
+  if (!event || event.allDay || !Number.isFinite(event.offset)) return null;
+  return formatOffsetAsClockWithMinutes(event.offset);
+}
+
+function buildCalendarEventTaskDefaults(event) {
+  return {
+    id: event.linkedTaskId || uid(),
+    title: event.title || '',
+    timeEstimateMinutes: getCalendarEventPlannedMinutes(event),
+    actualTimeSeconds: 0,
+    ownPlannedMinutes: getCalendarEventPlannedMinutes(event),
+    ownActualTimeSeconds: 0,
+    scheduledTime: getCalendarEventTaskScheduledTime(event),
+    complete: false,
+    completedOnDate: null,
+    completedAt: null,
+    tag: getCalendarEventTaskTag(event),
+    integrationColor: null,
+    taskKind: 'calendar_event',
+    linkedCalendarEventId: event.id,
+    calendarSourceProvider: getCalendarEventSourceProvider(event) || 'sunsama',
+    autoCompletedFromEvent: false,
+    autoFilledActualFromEventCompletion: false,
+    subtasks: [],
+    showSubtasks: false,
+    startDate: event.date || getTodayISO(),
+    dueDate: null,
+    notes: event.notes || '',
+    dailyActualTime: {},
+    subtaskCompletionsByDate: {},
+    systemType: null,
+    backlogHorizon: null,
+    backlogOrder: 0,
+    archivedAt: null,
+    archiveSourceDate: null,
+    repeatSeriesId: null,
+    repeatOccurrenceDate: null,
+    repeatModified: false,
+    isRepeatingTask: false
+  };
+}
+
+function applyCalendarEventTaskMirrorFields(task, event) {
+  if (!task || !event) return task;
+  task.taskKind = 'calendar_event';
+  task.linkedCalendarEventId = event.id;
+  task.calendarSourceProvider = getCalendarEventSourceProvider(event) || 'sunsama';
+  task.title = event.title || '';
+  task.tag = getCalendarEventTaskTag(event);
+  task.startDate = event.date || getTodayISO();
+  task.scheduledTime = getCalendarEventTaskScheduledTime(event);
+  const plannedMinutes = getCalendarEventPlannedMinutes(event);
+  task.ownPlannedMinutes = plannedMinutes;
+  task.timeEstimateMinutes = plannedMinutes;
+  task.notes = event.notes || '';
+  task.integrationColor = null;
+  task.showSubtasks = false;
+  task.subtasks = [];
+  task.dueDate = null;
+  task.backlogHorizon = null;
+  task.backlogOrder = 0;
+  task.archivedAt = null;
+  task.archiveSourceDate = null;
+  task.repeatSeriesId = null;
+  task.repeatOccurrenceDate = null;
+  task.repeatModified = false;
+  task.isRepeatingTask = false;
+  task.systemType = null;
+  ensureTaskTimeState(task);
+  syncTaskAggregateTimes(task);
+  return task;
+}
+
+function removeTaskFromState(taskId) {
+  if (!taskId) return null;
+  for (const column of state.columns) {
+    const index = column.tasks.findIndex(task => task.id === taskId);
+    if (index !== -1) {
+      return column.tasks.splice(index, 1)[0] || null;
+    }
+  }
+  const backlogIndex = state.backlog.findIndex(task => task && task.id === taskId);
+  if (backlogIndex !== -1) {
+    return state.backlog.splice(backlogIndex, 1)[0] || null;
+  }
+  const archiveIndex = state.archive.findIndex(task => task && task.id === taskId);
+  if (archiveIndex !== -1) {
+    return state.archive.splice(archiveIndex, 1)[0] || null;
+  }
+  const trashIndex = state.trash.findIndex(entry => entry?.task && entry.task.id === taskId);
+  if (trashIndex !== -1) {
+    const [entry] = state.trash.splice(trashIndex, 1);
+    return entry ? entry.task : null;
+  }
+  return null;
+}
+
+function placeCalendarEventTaskInColumn(task, targetIsoDate) {
+  if (!task || !targetIsoDate) return null;
+  let sourceColumn = null;
+  let targetColumn = null;
+  let sourceIndex = -1;
+  for (const column of state.columns) {
+    const index = column.tasks.findIndex(item => item.id === task.id);
+    if (index !== -1) {
+      sourceColumn = column;
+      sourceIndex = index;
+      break;
+    }
+  }
+  targetColumn = ensureColumnForDate(targetIsoDate);
+  if (sourceColumn) {
+    if (sourceColumn.isoDate === targetIsoDate) {
+      task.startDate = targetIsoDate;
+      return { sourceColumn, targetColumn, sourceIndex };
+    }
+    sourceColumn.tasks.splice(sourceIndex, 1);
+  } else {
+    removeTaskFromState(task.id);
+  }
+  task.startDate = targetIsoDate;
+  const insertIndex = targetColumn.tasks.findIndex(item => item.complete);
+  const safeIndex = insertIndex === -1 ? targetColumn.tasks.length : insertIndex;
+  targetColumn.tasks.splice(safeIndex, 0, task);
+  return { sourceColumn, targetColumn, sourceIndex: -1 };
+}
+
+function getCalendarEventStartDateTime(event) {
+  if (!event || !event.date) return null;
+  const [year, month, day] = event.date.split('-').map(Number);
+  if (!year || !month || !day) return null;
+  if (event.allDay) {
+    return new Date(year, month - 1, day, 0, 0, 0, 0);
+  }
+  const offset = Number.isFinite(event.offset) ? event.offset : 0;
+  const totalMinutes = Math.round(offset * 60);
+  return new Date(year, month - 1, day, Math.floor(totalMinutes / 60), totalMinutes % 60, 0, 0);
+}
+
+function getCalendarEventEndDateTime(event) {
+  if (!event || !event.date) return null;
+  const endIsoDate = event.allDay ? (event.endDate || event.date) : event.date;
+  const [year, month, day] = String(endIsoDate || '').split('-').map(Number);
+  if (!year || !month || !day) return null;
+  if (event.allDay) {
+    return new Date(year, month - 1, day, 23, 59, 0, 0);
+  }
+  const offset = Number.isFinite(event.offset) ? event.offset : 0;
+  const durationMinutes = Math.max(0, Math.round((Number(event.duration) || 0) * 60));
+  const totalMinutes = Math.round(offset * 60) + durationMinutes;
+  return new Date(year, month - 1, day, Math.floor(totalMinutes / 60), totalMinutes % 60, 0, 0);
+}
+
+function isCalendarEventTaskTimerActionAllowed(task) {
+  if (!isCalendarEventTask(task)) return true;
+  if (focusState.running && focusState.taskId === task.id) return true;
+  const event = getLinkedCalendarEventForTask(task);
+  const endDateTime = getCalendarEventEndDateTime(event);
+  return !!(endDateTime && endDateTime.getTime() >= Date.now());
+}
+
+function clearCalendarEventTaskAutoActual(task) {
+  if (!task) return;
+  task.ownActualTimeSeconds = 0;
+  task.actualTimeSeconds = 0;
+  task.dailyActualTime = {};
+  task.subtaskCompletionsByDate = task.subtaskCompletionsByDate || {};
+  removeActualTimeEventsForTask(task.id);
+  focusState.lastTimerEventId = null;
+  focusState.lastTimerStopTimestamp = null;
+}
+
+function clearCalendarEventTaskAutoCompletionFlags(task) {
+  if (!isCalendarEventTask(task)) return;
+  task.autoCompletedFromEvent = false;
+  task.autoFilledActualFromEventCompletion = false;
+}
+
+function getInProgressCalendarEventCompletionActualSeconds(event, now = new Date()) {
+  if (!event || event.allDay) return null;
+  const startDateTime = getCalendarEventStartDateTime(event);
+  const endDateTime = getCalendarEventEndDateTime(event);
+  if (!startDateTime || !endDateTime) return null;
+  const nowMs = now.getTime();
+  const startMs = startDateTime.getTime();
+  const endMs = endDateTime.getTime();
+  if (!(startMs < nowMs && nowMs < endMs)) return null;
+  return Math.max(0, Math.round((nowMs - startMs) / 1000));
+}
+
+function completeCalendarEventTaskByUser(task, isoDate) {
+  if (!task) return;
+  if (!isCalendarEventTask(task)) {
+    completeTaskAsOf(task, isoDate);
+    return;
+  }
+  const hadActualBefore = !!task.actualTimeSeconds;
+  const linkedEvent = getLinkedCalendarEventForTask(task);
+  const inProgressActualSeconds = hadActualBefore ? null : getInProgressCalendarEventCompletionActualSeconds(linkedEvent);
+  clearCalendarEventTaskAutoCompletionFlags(task);
+  completeTaskAsOf(task, isoDate);
+  if (!hadActualBefore && Number.isFinite(inProgressActualSeconds) && inProgressActualSeconds > 0) {
+    task.ownActualTimeSeconds = inProgressActualSeconds;
+    syncTaskAggregateTimes(task);
+    if (!task.dailyActualTime[isoDate]) task.dailyActualTime[isoDate] = { ownSeconds: 0, subtasks: {} };
+    task.dailyActualTime[isoDate].ownSeconds = inProgressActualSeconds;
+    task.dailyActualTime[isoDate].subtasks = {};
+    removeActualTimeEventsForTask(task.id, isoDate);
+    if (settings.visualizeActualTimeOnCalendar && isoDate === getTodayISO()) {
+      syncActualTimeEventsFromDailyLog(task, isoDate, 'completion');
+    } else {
+      renderCalendarEvents();
+    }
+  }
+  task.autoFilledActualFromEventCompletion = !hadActualBefore && !!task.actualTimeSeconds;
+}
+
+function uncompleteCalendarEventTaskByUser(task) {
+  if (!task) return;
+  const shouldClearAutoActual = isCalendarEventTask(task) && task.autoFilledActualFromEventCompletion;
+  clearTaskCompletionMetadata(task);
+  if (shouldClearAutoActual) {
+    clearCalendarEventTaskAutoActual(task);
+  } else if (isCalendarEventTask(task)) {
+    task.autoFilledActualFromEventCompletion = false;
+  }
+  if (isCalendarEventTask(task)) {
+    task.autoCompletedFromEvent = false;
+  }
+}
+
+function syncCalendarEventTaskCompletionState(task, event) {
+  if (!task || !event) return task;
+  const endDateTime = getCalendarEventEndDateTime(event);
+  if (!endDateTime) return task;
+  const isPastEnd = endDateTime.getTime() <= Date.now();
+  if (isPastEnd && !task.complete) {
+    const hadActualBefore = !!task.actualTimeSeconds;
+    const completionIsoDate = toISO(endDateTime);
+    completeTaskAsOf(task, completionIsoDate, {
+      forceAutoCopyPlannedAsActual: true
+    });
+    task.completedOnDate = completionIsoDate;
+    task.completedAt = endDateTime.toISOString();
+    task.autoCompletedFromEvent = true;
+    task.autoFilledActualFromEventCompletion = !hadActualBefore && !!task.actualTimeSeconds;
+    if (!hadActualBefore && task.actualTimeSeconds) {
+      removeActualTimeEventsForTask(task.id);
+    }
+  } else if (!isPastEnd && task.complete && task.autoCompletedFromEvent) {
+    clearTaskCompletionMetadata(task);
+    task.autoCompletedFromEvent = false;
+    if (task.autoFilledActualFromEventCompletion) {
+      clearCalendarEventTaskAutoActual(task);
+    }
+    task.autoFilledActualFromEventCompletion = false;
+  }
+  return task;
+}
+
+function createOrSyncLinkedTaskFromCalendarEvent(event, options = {}) {
+  if (!canCalendarEventBeAddedToTasks(event)) return null;
+  const persistTaskDoc = options.persistTaskDoc !== false;
+  const persistEventDoc = options.persistEventDoc !== false;
+  const normalizedEvent = normalizeCalendarEventRecord(event);
+  const stateEvent = findCalendarEventById(normalizedEvent.id);
+  const sourceEvent = stateEvent || event || normalizedEvent;
+  Object.assign(sourceEvent, normalizedEvent);
+  let task = null;
+
+  if (sourceEvent.linkedTaskId) {
+    task = findTaskById(sourceEvent.linkedTaskId) || findCalendarEventTaskByEventId(sourceEvent.id);
+  } else {
+    task = findCalendarEventTaskByEventId(sourceEvent.id);
+  }
+
+  if (!task) {
+    task = buildCalendarEventTaskDefaults(sourceEvent);
+  }
+
+  applyCalendarEventTaskMirrorFields(task, sourceEvent);
+  sourceEvent.linkedTaskId = task.id;
+  placeCalendarEventTaskInColumn(task, sourceEvent.date || getTodayISO());
+  syncCalendarEventTaskCompletionState(task, sourceEvent);
+
+  if (persistEventDoc) persistCalendarEvent(sourceEvent);
+  if (persistTaskDoc) persistTask(task, 0);
+  return task;
+}
+
+function addCalendarEventToTasks(event) {
+  if (!event || !canCalendarEventBeAddedToTasks(event)) return null;
+  const existingTask = getLinkedTaskForCalendarEvent(event);
+  if (existingTask) return existingTask;
+  const task = createOrSyncLinkedTaskFromCalendarEvent(event, { persistTaskDoc: true, persistEventDoc: true });
+  if (!task) return null;
+  renderAllColumns();
+  renderBacklogPanel();
+  renderArchivePanel();
+  renderTrashPanel();
+  renderCalendarEvents();
+  return task;
+}
+
+function removeLinkedTaskForCalendarEvent(eventOrId, options = {}) {
+  const event = typeof eventOrId === 'string'
+    ? findCalendarEventById(eventOrId)
+    : eventOrId;
+  const taskId = event?.linkedTaskId || (typeof eventOrId !== 'string' ? null : null);
+  const linkedTask = event ? getLinkedTaskForCalendarEvent(event) : (taskId ? findTaskById(taskId) : null);
+  const resolvedTaskId = linkedTask?.id || taskId;
+
+  if (resolvedTaskId) {
+    if (focusState.taskId === resolvedTaskId) {
+      if (focusState.running) stopFocusTimer();
+      closeFocusMode();
+    }
+    if (openModalTaskId === resolvedTaskId) {
+      closeTaskDetailModal();
+    }
+    removeActualTimeEventsForTask(resolvedTaskId);
+    removeTaskFromState(resolvedTaskId);
+    persistDeleteTask(resolvedTaskId);
+  }
+
+  if (event && options.deleteEvent !== true) {
+    event.linkedTaskId = null;
+    if (options.persistEvent !== false) persistCalendarEvent(event);
+  }
+
+  renderAllColumns();
+  renderBacklogPanel();
+  renderArchivePanel();
+  renderTrashPanel();
+  renderCalendarEvents();
+}
+
+function getHoveredScheduledEventForShortcut() {
+  const pointer = shortcutState.lastPointerPosition;
+  if (!pointer) return null;
+  const target = document.elementFromPoint(pointer.x, pointer.y);
+  if (!(target instanceof Element)) return null;
+  const eventEl = target.closest('.cal-event:not(#cal-event-ghost)');
+  if (!eventEl) return null;
+  const event = findCalendarEventById(eventEl.getAttribute('data-event-id') || eventEl.dataset.eventId);
+  if (!event || !isManualScheduledEvent(event)) return null;
+  if (getLinkedTaskForCalendarEvent(event)) return null;
+  return event;
+}
+
+function handleScheduleTodayShortcut() {
+  const hoveredEvent = getHoveredScheduledEventForShortcut();
+  if (hoveredEvent) {
+    return !!addCalendarEventToTasks(hoveredEvent);
+  }
+  return withActiveTask(loc => moveTaskShortcutToDate(loc.task.id, getTodayISO()));
+}
+
+function handleScheduledEventModalScheduleShortcut() {
+  if (!scheduledEventModalState || scheduledEventModalState.view !== 'full' || scheduledEventModalState.isNew) return false;
+  const event = scheduledEventModalState.eventId ? findCalendarEventById(scheduledEventModalState.eventId) : null;
+  if (!event || !canCalendarEventBeAddedToTasks(event)) return false;
+  if (getLinkedTaskForCalendarEvent(event)) return false;
+  const task = addCalendarEventToTasks(event);
+  if (!task) return false;
+  scheduledEventModalState.draft.linkedTaskId = task.id;
+  scheduledEventModalState.savedDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
+  renderScheduledEventModal();
+  return true;
+}
+
+function getScheduledEventModalLinkedTask() {
+  if (!scheduledEventModalState || scheduledEventModalState.view !== 'full' || scheduledEventModalState.isNew || scheduledEventModalState.mode !== 'view') {
+    return null;
+  }
+  if (scheduledEventModalState.draft.linkedTaskId) {
+    return findTaskById(scheduledEventModalState.draft.linkedTaskId) || null;
+  }
+  return scheduledEventModalState.eventId
+    ? findCalendarEventTaskByEventId(scheduledEventModalState.eventId)
+    : null;
+}
+
+function handleScheduledEventModalFocusShortcut() {
+  const linkedTask = getScheduledEventModalLinkedTask();
+  if (!linkedTask) return false;
+  closeScheduledEventModal();
+  return openFocusMode(linkedTask.id, false, 'kanban') !== false;
+}
+
+function reconcileLinkedCalendarEventTasks() {
+  const eventsById = new Map(state.calendarEvents.map(event => [event.id, event]));
+  getAllKnownTasks()
+    .filter(isCalendarEventTask)
+    .forEach(task => {
+      const event = eventsById.get(task.linkedCalendarEventId);
+      if (!event) {
+        removeLinkedTaskForCalendarEvent({ linkedTaskId: task.id }, { deleteEvent: true });
+        return;
+      }
+      createOrSyncLinkedTaskFromCalendarEvent(event, { persistTaskDoc: true, persistEventDoc: event.linkedTaskId !== task.id });
+    });
+
+  state.calendarEvents
+    .filter(event => canCalendarEventBeAddedToTasks(event) && event.linkedTaskId)
+    .forEach(event => {
+      createOrSyncLinkedTaskFromCalendarEvent(event, { persistTaskDoc: true, persistEventDoc: false });
+    });
+}
+
+function openLinkedCalendarEventModalForTask(taskId) {
+  const task = findTaskById(taskId);
+  if (!isCalendarEventTask(task)) return false;
+  const event = getLinkedCalendarEventForTask(task);
+  if (!event) return false;
+  openScheduledEventFullModalForEvent(event.id);
+  return true;
+}
+
+function persistCalendarEventTaskNotes(task, notesHtml, debounceMs = 500) {
+  if (!isCalendarEventTask(task)) return false;
+  const event = getLinkedCalendarEventForTask(task);
+  if (!event) return false;
+  const normalizedNotes = notesHtml || '';
+  task.notes = normalizedNotes;
+  event.notes = normalizedNotes;
+  persistTask(task, debounceMs);
+  persistCalendarEvent(event, debounceMs);
+  return true;
+}
+
+function syncCalendarEventTaskChannel(task, channelId) {
+  if (!isCalendarEventTask(task)) return false;
+  const event = getLinkedCalendarEventForTask(task);
+  if (!event) return false;
+  event.channelId = channelId || null;
+  const style = getManualScheduledEventStyle(event.channelId);
+  event.colorClass = style.eventClass;
+  event.sourceProvider = getCalendarEventSourceProvider(event) || 'sunsama';
+  applyCalendarEventTaskMirrorFields(task, event);
+  persistCalendarEvent(event);
+  persistTask(task, 0);
+  return true;
+}
+
+function shiftCalendarEventByDays(event, dayDelta) {
+  if (!event || !Number.isFinite(dayDelta) || dayDelta === 0) return event;
+  event.date = addDays(event.date, dayDelta);
+  event.endDate = addDays(event.endDate || event.date, dayDelta);
+  return event;
+}
+
+function moveCalendarEventTaskToDate(taskId, targetIsoDate) {
+  const task = findTaskById(taskId);
+  if (!isCalendarEventTask(task) || !targetIsoDate) return false;
+  const event = getLinkedCalendarEventForTask(task);
+  if (!event) return false;
+  const currentDate = event.date || task.startDate || getTodayISO();
+  if (currentDate === targetIsoDate) return true;
+  const currentDateMs = parseISO(currentDate).getTime();
+  const targetDateMs = parseISO(targetIsoDate).getTime();
+  const dayDelta = Math.round((targetDateMs - currentDateMs) / (24 * 60 * 60 * 1000));
+  shiftCalendarEventByDays(event, dayDelta);
+  createOrSyncLinkedTaskFromCalendarEvent(event, { persistTaskDoc: true, persistEventDoc: true });
+  renderAllColumns();
+  renderCalendarEvents();
+  return true;
+}
+
+function syncLoadedCalendarEventTaskMirrors() {
+  let changed = false;
+
+  state.calendarEvents.forEach(event => {
+    if (!canCalendarEventBeAddedToTasks(event)) return;
+    if (!event.linkedTaskId && !findCalendarEventTaskByEventId(event.id)) return;
+    const task = createOrSyncLinkedTaskFromCalendarEvent(event, {
+      persistTaskDoc: true,
+      persistEventDoc: false
+    });
+    if (task) changed = true;
+  });
+
+  return changed;
+}
+
+function runCalendarEventTaskAutoCompletionSweep() {
+  let changed = false;
+
+  getAllKnownTasks()
+    .filter(isCalendarEventTask)
+    .forEach(task => {
+      const event = getLinkedCalendarEventForTask(task);
+      if (!event) return;
+
+      const prevComplete = !!task.complete;
+      const prevAutoCompleted = !!task.autoCompletedFromEvent;
+      const prevAutoFilled = !!task.autoFilledActualFromEventCompletion;
+      const prevActualSeconds = Number(task.actualTimeSeconds || 0);
+      const prevCompletedOnDate = task.completedOnDate || null;
+
+      syncCalendarEventTaskCompletionState(task, event);
+
+      const didChange = prevComplete !== !!task.complete
+        || prevAutoCompleted !== !!task.autoCompletedFromEvent
+        || prevAutoFilled !== !!task.autoFilledActualFromEventCompletion
+        || prevActualSeconds !== Number(task.actualTimeSeconds || 0)
+        || prevCompletedOnDate !== (task.completedOnDate || null);
+
+      if (!didChange) return;
+      persistTask(task, 0);
+      changed = true;
+    });
+
+  if (changed) {
+    renderAllColumns();
+    renderCalendarEvents();
+  }
+
+  return changed;
+}
+
+let eventTaskCompletionLockedModalState = null;
+
+function closeEventTaskCompletionLockedModal() {
+  eventTaskCompletionLockedModalState = null;
+  const overlay = document.querySelector('[data-event-task-completion-overlay]');
+  if (overlay) overlay.remove();
+  const taskOverlay = document.getElementById('task-modal-overlay');
+  const scheduledEventOverlay = getScheduledEventOverlay();
+  if ((taskOverlay && !taskOverlay.hidden) || (scheduledEventOverlay && !scheduledEventOverlay.hidden)) {
+    return;
+  }
+  document.body.classList.remove('modal-open');
+}
+
+function openEventTaskCompletionLockedModal(taskId) {
+  const task = findTaskById(taskId);
+  if (!isCalendarEventTask(task) || !task.autoCompletedFromEvent) return false;
+
+  closeEventTaskCompletionLockedModal();
+  eventTaskCompletionLockedModalState = { taskId };
+
+  const overlay = document.createElement('div');
+  overlay.className = 'event-task-completion-overlay';
+  overlay.setAttribute('data-event-task-completion-overlay', '');
+  overlay.innerHTML = `
+    <div class="archive-delete-modal event-task-completion-modal" role="dialog" aria-modal="true" aria-labelledby="event-task-completion-title">
+      <h2 class="archive-delete-modal__title" id="event-task-completion-title">Event finished, task completed.</h2>
+      <p class="archive-delete-modal__desc">This task was automatically completed when the event ended. To change this to incomplete, reschedule the event to the future.</p>
+      <div class="archive-delete-modal__actions">
+        <button class="archive-delete-modal__btn" type="button" data-event-task-completion-close>Close</button>
+        <button class="archive-delete-modal__btn archive-delete-modal__btn--primary" type="button" data-event-task-completion-reschedule>Reschedule event</button>
+      </div>
+    </div>
+  `;
+  overlay.addEventListener('click', e => {
+    if (!(e.target instanceof Element)) return;
+    if (e.target === overlay || e.target.closest('[data-event-task-completion-close]')) {
+      closeEventTaskCompletionLockedModal();
+      return;
+    }
+    if (e.target.closest('[data-event-task-completion-reschedule]')) {
+      const targetTaskId = eventTaskCompletionLockedModalState?.taskId || taskId;
+      closeEventTaskCompletionLockedModal();
+      openLinkedCalendarEventModalForTask(targetTaskId);
+    }
+  });
+  document.body.appendChild(overlay);
+  document.body.classList.add('modal-open');
+  return true;
 }
 
 function getContextChildChannelIds(contextLabel) {
@@ -2569,6 +3190,10 @@ function expandCardTimerForShortcut(taskId) {
 
 function openPlannedPickerForShortcut(taskId) {
   if (!taskId) return false;
+  const task = findTaskById(taskId);
+  if (isCalendarEventTask(task)) {
+    return openLinkedCalendarEventModalForTask(taskId);
+  }
   if (openModalTaskId === taskId) {
     const subtaskId = getHoveredModalSubtaskId();
     closeStartDatePicker();
@@ -2660,6 +3285,10 @@ function openFocusModeForShortcut() {
 
 function toggleFocusTimerForShortcut(taskId) {
   if (!taskId) return false;
+  const task = findTaskById(taskId);
+  if (isCalendarEventTask(task) && !isCalendarEventTaskTimerActionAllowed(task)) {
+    return false;
+  }
   if (openModalTaskId === taskId) {
     const subtaskId = getHoveredModalSubtaskId();
     if (subtaskId) {
@@ -2686,6 +3315,7 @@ function toggleFocusTimerForShortcut(taskId) {
 function addSubtaskForShortcut(taskId) {
   const loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return false;
+  if (isCalendarEventTask(loc.task)) return false;
   const subtask = addModalSubtask(loc.task);
   renderTaskLocation(loc);
   persistTask(loc.task, 0);
@@ -2699,6 +3329,10 @@ function addSubtaskForShortcut(taskId) {
 function toggleTaskCompletionForShortcut(taskId) {
   let loc = getTaskLocation(taskId);
   if (!loc) return false;
+  if (isCalendarEventTask(loc.task) && loc.task.complete && loc.task.autoCompletedFromEvent) {
+    openEventTaskCompletionLockedModal(taskId);
+    return true;
+  }
 
   if (loc.location === 'trash') {
     const restored = restoreTrashTask(taskId, { targetIsoDate: getTodayISO(), applyDropRules: true });
@@ -2746,7 +3380,7 @@ function toggleTaskCompletionForShortcut(taskId) {
   if (!task.complete) {
     const incompleteTasks = column.tasks.filter(t => !t.complete);
     task.previousIncompleteIndex = incompleteTasks.findIndex(t => t.id === task.id);
-    completeTaskAsOf(task, todayISO);
+    completeCalendarEventTaskByUser(task, todayISO);
     if (column.isoDate > todayISO) {
       column.tasks.splice(index, 1);
       const todayCol = ensureColumnForDate(todayISO);
@@ -2770,7 +3404,7 @@ function toggleTaskCompletionForShortcut(taskId) {
       if (taskIndex !== -1) {
         column.tasks.splice(taskIndex, 1);
       }
-      clearTaskCompletionMetadata(task);
+      uncompleteCalendarEventTaskByUser(task);
       task.startDate = todayISO;
       task.scheduledTime = null;
 
@@ -2795,7 +3429,7 @@ function toggleTaskCompletionForShortcut(taskId) {
       return true;
     }
 
-    clearTaskCompletionMetadata(task);
+    uncompleteCalendarEventTaskByUser(task);
     const taskIndex = column.tasks.findIndex(t => t.id === task.id);
     if (taskIndex !== -1) {
       const [uncompletedTask] = column.tasks.splice(taskIndex, 1);
@@ -2823,6 +3457,13 @@ function toggleTaskCompletionForShortcut(taskId) {
 function moveTaskShortcutToDate(taskId, targetIsoDate) {
   const loc = getTaskLocation(taskId);
   if (!loc) return false;
+  if (isCalendarEventTask(loc.task)) {
+    const moved = moveCalendarEventTaskToDate(taskId, targetIsoDate);
+    if (!moved) return false;
+    refreshTaskDetailModalIfOpen(taskId);
+    setActiveTaskSelection(taskId, 'keyboard', targetIsoDate);
+    return true;
+  }
   if (loc.location === 'trash') {
     const restored = restoreTrashTask(taskId, { targetIsoDate, applyDropRules: true });
     if (!restored) return false;
@@ -2875,6 +3516,8 @@ function snoozeTaskForShortcut(taskId) {
 }
 
 function openBacklogPickerForShortcut(taskId) {
+  const task = findTaskById(taskId);
+  if (isCalendarEventTask(task)) return false;
   if (openModalTaskId === taskId) {
     closeDueDatePicker();
     closeModalChannelPicker();
@@ -2896,6 +3539,8 @@ function openBacklogPickerForShortcut(taskId) {
 }
 
 function moveTaskToTopOfBacklogForShortcut(taskId) {
+  const task = findTaskById(taskId);
+  if (isCalendarEventTask(task)) return false;
   const moved = moveTaskToBacklog(taskId, 'week', { insertIndex: 0 });
   if (!moved) return false;
   renderBacklogPanel();
@@ -2984,6 +3629,7 @@ function getTaskEventsOnOrAfter(taskId, startIsoDate) {
 function removeTaskFromCalendarForShortcut(taskId) {
   const loc = getTaskLocation(taskId);
   if (!loc) return false;
+  if (isCalendarEventTask(loc.task)) return false;
   const todayISO = getTodayISO();
   const removed = getTaskEventsOnOrAfter(taskId, todayISO);
   if (removed.length === 0 && !loc.task.scheduledTime) return true;
@@ -3011,7 +3657,7 @@ function getDaySchedulingEvents(isoDate, ignoreTaskId = null) {
   return state.calendarEvents
     .filter(evt => doesCalendarEventOccurOnDate(evt, isoDate))
     .filter(evt => !ignoreTaskId || evt.taskId !== ignoreTaskId)
-    .filter(isCalendarEventBlockingForAvailability)
+    .filter(isCalendarEventBlockingForTaskScheduling)
     .map(evt => {
       if (isManualScheduledEvent(evt) && evt.allDay) {
         return {
@@ -3076,6 +3722,7 @@ function findAutoScheduleSegments(task) {
 function autoScheduleTaskForShortcut(taskId) {
   let loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return false;
+  if (isCalendarEventTask(loc.task)) return false;
   if (loc.location !== 'column') {
     const anchorIso = getFirstVisibleDate() < getTodayISO() ? getTodayISO() : getFirstVisibleDate();
     if (!moveTaskShortcutToDate(taskId, anchorIso)) return false;
@@ -3094,7 +3741,7 @@ function autoScheduleTaskForShortcut(taskId) {
     const evt = {
       id: 'evt-' + uid(),
       title: task.title,
-      colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+      colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
       offset: segment.offset,
       duration: segment.duration,
       taskId: task.id,
@@ -3305,7 +3952,7 @@ const SHORTCUT_SECTIONS = [
     rows: [
       { id: 'auto-schedule', label: 'Auto-schedule task to calendar', keysMac: [['X']], keysOther: [['X']], scope: 'task', enabled: true, searchTokens: ['schedule calendar timebox split'], bindings: [{ key: 'x' }], handler: () => withActiveTask(loc => autoScheduleTaskForShortcut(loc.task.id)) },
       { id: 'remove-from-calendar', label: 'Remove task from calendar', keysMac: [['⌘', 'X']], keysOther: [['Ctrl', 'X']], scope: 'task', enabled: true, searchTokens: ['unschedule remove calendar'], bindings: [{ key: 'x', shortKey: true }], handler: () => withActiveTask(loc => removeTaskFromCalendarForShortcut(loc.task.id)) },
-      { id: 'schedule-today', label: 'Schedule to today', keysMac: [['S']], keysOther: [['S']], scope: 'task', enabled: true, searchTokens: ['today start date'], bindings: [{ key: 's' }], handler: () => withActiveTask(loc => moveTaskShortcutToDate(loc.task.id, getTodayISO())) },
+      { id: 'schedule-today', label: 'Schedule to today', keysMac: [['S']], keysOther: [['S']], scope: 'task', enabled: true, searchTokens: ['today start date'], bindings: [{ key: 's' }], handler: () => handleScheduleTodayShortcut() },
       { id: 'snooze-day', label: 'Snooze one day', keysMac: [['D']], keysOther: [['D']], scope: 'task', enabled: true, searchTokens: ['tomorrow next workday'], bindings: [{ key: 'd' }], handler: () => withActiveTask(loc => snoozeTaskForShortcut(loc.task.id)) },
       { id: 'move-backlog', label: 'Move to backlog', keysMac: [['Z']], keysOther: [['Z']], scope: 'task', enabled: true, searchTokens: ['backlog horizon'], bindings: [{ key: 'z' }], handler: () => withActiveTask(loc => openBacklogPickerForShortcut(loc.task.id)) },
       { id: 'move-backlog-top', label: 'Move to top of backlog', keysMac: [['⇧', 'Z']], keysOther: [['Shift', 'Z']], scope: 'task', enabled: true, searchTokens: ['backlog top'], bindings: [{ key: 'z', shiftKey: true }], handler: () => withActiveTask(loc => moveTaskToTopOfBacklogForShortcut(loc.task.id)) }
@@ -3499,6 +4146,34 @@ function handleGlobalShortcutKeydown(e) {
   }
 
   if (scheduledEventModalState) {
+    if (!isTextEntryTarget && matchesShortcutBinding(e, { key: 'f' }) && handleScheduledEventModalFocusShortcut()) {
+      hideFloatingTooltip();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (
+      e.key === 'Enter'
+      && scheduledEventModalState.view === 'full'
+      && isScheduledEventModalEditable()
+      && !scheduledEventModalState.datePickerField
+      && !scheduledEventModalState.timePickerField
+      && !scheduledEventModalState.channelPickerOpen
+      && !scheduledEventModalState.transparencyPickerOpen
+      && !isTextEntryTarget
+      && !(target && target.closest('button, a, [role="button"]'))
+    ) {
+      hideFloatingTooltip();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      saveScheduledEventModal();
+      return;
+    }
+    if (!isTextEntryTarget && matchesShortcutBinding(e, { key: 's' }) && handleScheduledEventModalScheduleShortcut()) {
+      hideFloatingTooltip();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
     return;
   }
 
@@ -4010,12 +4685,16 @@ function trimFutureTimeboxesOnCompletion(task, isoDate) {
   };
 }
 
-function completeTaskAsOf(task, isoDate) {
+function completeTaskAsOf(task, isoDate, options = {}) {
   ensureTaskRolloverState(task);
   ensureTaskTimeState(task);
   applyTaskCompletionMetadata(task, isoDate);
   const trimResult = trimFutureTimeboxesOnCompletion(task, isoDate);
-  const shouldAutoCopyPlannedAsActual = settings.countPlannedAsActual && !task.actualTimeSeconds && task.timeEstimateMinutes;
+  const shouldAutoCopyPlannedAsActual = (
+    (options.forceAutoCopyPlannedAsActual || settings.countPlannedAsActual)
+    && !task.actualTimeSeconds
+    && task.timeEstimateMinutes
+  );
 
   // Auto-set actual time to planned time if no actual time exists
   if (shouldAutoCopyPlannedAsActual) {
@@ -4046,7 +4725,7 @@ function completeTaskAsOf(task, isoDate) {
         const evt = {
           id: 'act-' + uid(),
           title: task.title,
-          colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+          colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
           offset: segment.offset,
           duration: Math.max(segment.duration, 1 / SNAP_STEPS_PER_HOUR),
           taskId: task.id,
@@ -4191,7 +4870,7 @@ function createActualTimeEvent(task, subtaskId, isoDate, offset, duration, sourc
   const evt = {
     id: 'act-' + uid(),
     title,
-    colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+    colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
     offset,
     duration: Math.max(duration, 1 / SNAP_STEPS_PER_HOUR),
     taskId: task.id,
@@ -6884,7 +7563,17 @@ function renderSubtasks(subtasks, taskId, options = {}) {
   return `<ul class="task-card__subtasks">${items}</ul>`;
 }
 
-function renderIntegrationIcon(color) {
+function renderIntegrationIcon(taskOrColor) {
+  if (taskOrColor && typeof taskOrColor === 'object') {
+    const task = taskOrColor;
+    if (isCalendarEventTask(task) && (task.calendarSourceProvider || 'sunsama') === 'sunsama') {
+      return `<span class="task-card__integration-icon task-card__integration-icon--image"><img src="images/icons/sunsama-icon.png" alt="" draggable="false"></span>`;
+    }
+    const color = task.integrationColor || null;
+    if (!color) return '';
+    return `<span class="task-card__integration-icon" style="background:${escapeHtml(color)};"></span>`;
+  }
+  const color = taskOrColor;
   if (!color) return '';
   return `<span class="task-card__integration-icon" style="background:${escapeHtml(color)};"></span>`;
 }
@@ -7401,15 +8090,23 @@ function renderRepeatBannerHtml(task) {
     + `</div>`;
 }
 
+function getTaskModalChannelDisplay(tag) {
+  const rawTag = tag ? String(tag).trim() : '';
+  const hasHash = rawTag.startsWith('#');
+  const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'Unassigned';
+  const channelStyle = getChannelStyle(rawTag);
+  return {
+    className: `task-modal__channel ${rawTag ? 'task-modal__channel--assigned' : 'task-modal__channel--unassigned'}`,
+    hashColor: channelStyle ? channelStyle.hashColor : '#b4b4b4',
+    channelWord
+  };
+}
+
 function renderTaskDetailModal(task, column, options = {}) {
   ensureTaskTimeState(task);
   const isTrash = options.isTrash === true;
   const isBacklog = options.isBacklog === true;
-  const rawTag = task.tag ? String(task.tag).trim() : '';
-  const hasHash = rawTag.startsWith('#');
-  const channelWord = rawTag ? (hasHash ? rawTag.slice(1) : rawTag) : 'Unassigned';
-  const channelStyle = getChannelStyle(rawTag);
-  const hashColor = channelStyle ? channelStyle.hashColor : (rawTag ? '#7da2ff' : '#999999');
+  const channelDisplay = getTaskModalChannelDisplay(task.tag);
   const todayISO = getTodayISO();
   const colDate = column.isoDate || todayISO;
   const displayDate = task.startDate || colDate;
@@ -7453,9 +8150,9 @@ function renderTaskDetailModal(task, column, options = {}) {
       <div class="task-modal__header">
         <div class="task-modal__meta-group">
           <span class="task-modal__meta-label">CHANNEL</span>
-          <span class="task-modal__channel" data-modal-channel-btn data-rich-tooltip-label="Assign channel" data-rich-tooltip-shortcut-id="assign-channel" data-rich-tooltip-shortcut-groups='[["Q"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
-            <span class="task-modal__channel-hash" style="color:${escapeHtml(hashColor)};">#</span>
-            <span class="task-modal__channel-word">${escapeHtml(channelWord)}</span>
+          <span class="${escapeHtml(channelDisplay.className)}" data-modal-channel-btn data-rich-tooltip-label="Assign channel" data-rich-tooltip-shortcut-id="assign-channel" data-rich-tooltip-shortcut-groups='[["Q"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10">
+            <span class="task-modal__channel-hash" style="color:${escapeHtml(channelDisplay.hashColor)};">#</span>
+            <span class="task-modal__channel-word">${escapeHtml(channelDisplay.channelWord)}</span>
           </span>
         </div>
         <div class="task-modal__meta-right">
@@ -7601,6 +8298,7 @@ function renderBacklogHorizonOptions(selectedHorizon = null) {
 
 function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth, options = {}) {
   const mode = options.mode || 'default';
+  const disableBacklogActions = options.disableBacklogActions === true;
   const selectedBacklogHorizon = options.selectedBacklogHorizon || null;
   const calendarSelectedIsoDate = Object.prototype.hasOwnProperty.call(options, 'calendarSelectedIsoDate')
     ? options.calendarSelectedIsoDate
@@ -7647,10 +8345,10 @@ function renderStartDateDropdown(currentIsoDate, viewYear, viewMonth, options = 
         <button class="sdp__menu-item" data-action="snooze-week" type="button">
           <span>Snooze one week</span>
         </button>
-        <button class="sdp__menu-item" data-action="move-backlog" type="button">
+        <button class="sdp__menu-item" data-action="move-backlog" type="button"${disableBacklogActions ? ' disabled' : ''}>
           <span>Move to backlog</span>${renderInlineShortcutForId('move-backlog')}
         </button>
-        <button class="sdp__menu-item" data-action="move-top-backlog" type="button">
+        <button class="sdp__menu-item" data-action="move-top-backlog" type="button"${disableBacklogActions ? ' disabled' : ''}>
           <span>Move to top of backlog</span>
           ${renderInlineShortcutForId('move-backlog-top')}
         </button>
@@ -8079,6 +8777,7 @@ function renderEllipsisMenuInModal() {
 function handleDuplicateTask(taskId) {
   const loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return;
+  if (isCalendarEventTask(loc.task)) return;
   const task = loc.task;
   ensureTaskTimeState(task);
 
@@ -8143,6 +8842,7 @@ function handleDuplicateTask(taskId) {
 function handleDeleteTask(taskId) {
   let loc = getTaskLocation(taskId);
   if (!loc || loc.location === 'trash') return;
+  if (isCalendarEventTask(loc.task)) return;
   if (loc.location === 'column' && loc.index === -1 && isDerivedRepeatTask(loc.task)) {
     materializeDerivedTask(loc.task);
     loc = getTaskLocation(taskId);
@@ -8302,7 +9002,9 @@ function handleStartDateAction(action, data) {
   }
 
   if (targetDate) {
-    if (loc.location === 'trash') {
+    if (isCalendarEventTask(loc.task)) {
+      moveCalendarEventTaskToDate(taskId, targetDate);
+    } else if (loc.location === 'trash') {
       const restored = restoreTrashTask(taskId, { targetIsoDate: targetDate, applyDropRules: true });
       if (restored) {
         renderColumn(restored.column);
@@ -8355,7 +9057,8 @@ function openCardDatePicker(taskId, anchorCard = null) {
     viewYear,
     viewMonth,
     anchorCard,
-    mode: loc.location === 'backlog' ? 'backlog-with-calendar' : 'default'
+    mode: loc.location === 'backlog' ? 'backlog-with-calendar' : 'default',
+    disableBacklogActions: isCalendarEventTask(loc.task)
   };
   // Keep hover icons visible while picker is open
   const card = (anchorCard && anchorCard.isConnected)
@@ -8407,7 +9110,8 @@ function renderCardDatePicker() {
     {
       mode: cardDatePickerState.mode,
       selectedBacklogHorizon: loc.location === 'backlog' ? loc.task.backlogHorizon : null,
-      calendarSelectedIsoDate
+      calendarSelectedIsoDate,
+      disableBacklogActions: !!cardDatePickerState.disableBacklogActions
     }
   );
   const dropdown = wrapper.firstElementChild;
@@ -8489,6 +9193,10 @@ function handleCardDateAction(action, data) {
   const taskId = cardDatePickerState.taskId;
   const loc = getTaskLocation(taskId);
   if (!loc) return;
+  if (isCalendarEventTask(loc.task) && (action === 'move-backlog' || action === 'move-top-backlog' || action === 'select-backlog-horizon')) {
+    closeCardDatePicker();
+    return;
+  }
 
   const currentIsoDate = getTaskPickerIsoDate(loc);
   let targetDate = null;
@@ -8814,17 +9522,23 @@ function selectChannel(taskId, channel) {
   const loc = getTaskLocation(taskId);
   if (!loc) { closeChannelPicker(); return; }
 
-  if (channel.id === 'unassigned') {
-    loc.task.tag = null;
+  const nextChannelId = channel.id === 'unassigned' ? null : channel.id;
+
+  if (isCalendarEventTask(loc.task)) {
+    syncCalendarEventTaskChannel(loc.task, nextChannelId);
   } else {
-    loc.task.tag = '#' + channel.label;
+    if (channel.id === 'unassigned') {
+      loc.task.tag = null;
+    } else {
+      loc.task.tag = '#' + channel.label;
+    }
+    markTaskAsRepeatModified(loc.task);
+    persistTask(loc.task, 0);
   }
-  markTaskAsRepeatModified(loc.task);
 
   closeChannelPicker();
   renderTaskLocation(loc);
   renderCalendarEvents();
-  persistTask(loc.task, 0);
 
   // Update modal if open for this task
   if (openModalTaskId === taskId) {
@@ -8832,12 +9546,11 @@ function selectChannel(taskId, channel) {
     if (overlay) {
       const channelEl = overlay.querySelector('.task-modal__channel');
       if (channelEl) {
-        const style = getChannelStyle(loc.task.tag);
-        const hashColor = style ? style.hashColor : '#7da2ff';
-        const word = loc.task.tag ? loc.task.tag.replace(/^#/, '') : 'Unassigned';
+        const channelDisplay = getTaskModalChannelDisplay(loc.task.tag);
+        channelEl.className = channelDisplay.className;
         channelEl.innerHTML =
-          `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
-          `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
+          `<span class="task-modal__channel-hash" style="color:${channelDisplay.hashColor};">#</span>` +
+          `<span class="task-modal__channel-word">${escapeHtml(channelDisplay.channelWord)}</span>`;
       }
     }
   }
@@ -9150,12 +9863,11 @@ function selectModalChannel(taskId, channel) {
   if (overlay) {
     const channelEl = overlay.querySelector('[data-modal-channel-btn]');
     if (channelEl) {
-      const style = getChannelStyle(loc.task.tag);
-      const hashColor = style ? style.hashColor : (loc.task.tag ? '#7da2ff' : '#999999');
-      const word = loc.task.tag ? loc.task.tag.replace(/^#/, '') : 'Unassigned';
+      const channelDisplay = getTaskModalChannelDisplay(loc.task.tag);
+      channelEl.className = channelDisplay.className;
       channelEl.innerHTML =
-        `<span class="task-modal__channel-hash" style="color:${hashColor};">#</span>` +
-        `<span class="task-modal__channel-word">${escapeHtml(word)}</span>`;
+        `<span class="task-modal__channel-hash" style="color:${channelDisplay.hashColor};">#</span>` +
+        `<span class="task-modal__channel-word">${escapeHtml(channelDisplay.channelWord)}</span>`;
     }
   }
 
@@ -10302,6 +11014,7 @@ function openFocusMode(taskId, autoStart, from, subtaskId = null) {
   }
   const ctx = findTaskContext(taskId);
   if (!ctx) return;
+  const shouldAutoStart = !!autoStart && isCalendarEventTaskTimerActionAllowed(ctx.task);
 
   const todayISO = getTodayISO();
   const isInToday = state.columns.some(col => col.isoDate === todayISO && col.tasks.some(t => t.id === taskId));
@@ -10330,8 +11043,8 @@ function openFocusMode(taskId, autoStart, from, subtaskId = null) {
     }
   }
 
-  renderFocusModal(ctx.task, autoStart);
-  if (autoStart) startFocusTimer();
+  renderFocusModal(ctx.task, shouldAutoStart);
+  if (shouldAutoStart) startFocusTimer();
 }
 
 function closeFocusMode() {
@@ -10382,15 +11095,14 @@ function closeFocusMode() {
 
 function startFocusTimer() {
   if (focusState.running) return;
+  const task = findTaskById(focusState.taskId);
+  if (!task || !isCalendarEventTaskTimerActionAllowed(task)) return;
   focusState.running = true;
   focusState.timerStartTimestamp = Date.now();
 
   // Immediately show H:MM:SS format
-  const task = findTaskById(focusState.taskId);
-  if (task) {
-    const focusActual = document.querySelector('[data-focus-actual]');
-    if (focusActual) focusActual.textContent = formatSeconds(task.actualTimeSeconds || 0);
-  }
+  const focusActual = document.querySelector('[data-focus-actual]');
+  if (focusActual) focusActual.textContent = formatSeconds(task.actualTimeSeconds || 0);
 
   updateFocusTimerUI();
   updateCardDetailTimerState();
@@ -10618,12 +11330,13 @@ function updateFocusTimerUI() {
   if (!el) return;
   const task = findTaskById(focusState.taskId);
   if (!task) return;
+  const canStartTimer = isCalendarEventTaskTimerActionAllowed(task);
   if (focusState.running) {
     el.querySelector('[data-focus-start]')?.classList.add('focus-modal__btn--hidden');
     el.querySelector('[data-focus-stop]')?.classList.remove('focus-modal__btn--hidden');
   } else {
     el.querySelector('[data-focus-stop]')?.classList.add('focus-modal__btn--hidden');
-    el.querySelector('[data-focus-start]')?.classList.remove('focus-modal__btn--hidden');
+    el.querySelector('[data-focus-start]')?.classList.toggle('focus-modal__btn--hidden', !canStartTimer);
   }
   updateFocusModalValues(task);
 }
@@ -10722,16 +11435,22 @@ function saveFocusModalEdits() {
   if (!el || !focusState.taskId) return;
   const task = findTaskById(focusState.taskId);
   if (!task) return;
+  const isEventTask = isCalendarEventTask(task);
 
   const titleEl = el.querySelector('.focus-modal__title');
-  if (titleEl) {
+  if (titleEl && !isEventTask) {
     const newTitle = titleEl.textContent.trim();
     if (newTitle) {
       task.title = newTitle;
     }
   }
   if (focusModalQuill) {
-    task.notes = getQuillHtml(focusModalQuill);
+    const nextNotes = getQuillHtml(focusModalQuill);
+    if (isEventTask) {
+      persistCalendarEventTaskNotes(task, nextNotes, 0);
+    } else {
+      task.notes = nextNotes;
+    }
     focusModalQuill = null;
   }
   el.querySelectorAll('[data-focus-subtask-title]').forEach(titleEl => {
@@ -10748,7 +11467,9 @@ function saveFocusModalEdits() {
   // Re-render kanban column
   const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
   if (col) renderColumn(col);
-  persistTask(task, 0);
+  if (!isEventTask) {
+    persistTask(task, 0);
+  }
 }
 
 function closeFocusPicker() {
@@ -10998,14 +11719,32 @@ function renderFocusModal(task, autoStart) {
   const existing = document.getElementById('focus-modal');
   if (existing) existing.remove();
 
+  const isEventTask = isCalendarEventTask(task);
+  const linkedEvent = isEventTask ? getLinkedCalendarEventForTask(task) : null;
   const isRunning = autoStart || focusState.running;
   const todaySeconds = getTaskDailyActualSeconds(task, getTodayISO());
   const hasActual = isRunning || !!todaySeconds;
   const hasPlanned = !!task.timeEstimateMinutes;
+  const canStartTimer = isCalendarEventTaskTimerActionAllowed(task);
   const plannedDisplay = hasPlanned ? formatMinutes(task.timeEstimateMinutes) : '--:--';
   const actualDisplay = isRunning
     ? formatSeconds(todaySeconds || 0)
     : (todaySeconds ? formatMinutes(Math.floor(todaySeconds / 60)) : '--:--');
+  const eventTimeframeHtml = isEventTask && linkedEvent
+    ? `
+      <div class="focus-modal__event-timeframe">
+        <i data-lucide="clock-4" class="focus-modal__event-timeframe-icon"></i>
+        <span class="focus-modal__event-timeframe-text">${escapeHtml(getCalendarEventTaskTimeframeLabel(linkedEvent))}</span>
+      </div>
+    `
+    : '';
+  const subtaskRowsHtml = isEventTask ? '' : renderFocusSubtaskRows(task);
+  const addSubtaskHtml = isEventTask ? '' : `
+        <button class="focus-modal__add-subtask" type="button" data-focus-add-subtask>
+          <i data-lucide="plus-circle"></i>
+          <span>Add subtask</span>
+        </button>
+  `;
 
   const el = document.createElement('div');
   el.id = 'focus-modal';
@@ -11021,16 +11760,21 @@ function renderFocusModal(task, autoStart) {
     </div>
     <div class="focus-modal__content">
       <div class="focus-modal__task-row">
-        <div class="focus-modal__title-wrap">
-          <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-focus-check>${CHECK_SVG}</button>
-          <h2 class="focus-modal__title" contenteditable="true">${escapeHtml(task.title || 'Task')}</h2>
+        <div class="focus-modal__title-column">
+          <div class="focus-modal__title-wrap">
+            <button class="task-modal__check ${task.complete ? 'task-modal__check--complete' : ''}" type="button" data-focus-check>${CHECK_SVG}</button>
+            <div class="focus-modal__title-stack">
+              <h2 class="focus-modal__title"${isEventTask ? '' : ' contenteditable="true"'}>${escapeHtml(task.title || 'Task')}</h2>
+            </div>
+          </div>
+          ${eventTimeframeHtml}
         </div>
         <div class="focus-modal__metrics">
           <div class="focus-modal__metric focus-modal__metric--clickable${hasActual ? ' focus-modal__metric--has-value' : ''}" data-focus-actual-metric>
             <span class="focus-modal__metric-label">ACTUAL</span>
             <span class="focus-modal__actual${isRunning ? ' focus-modal__actual--running' : (hasActual ? ' focus-modal__actual--set' : ' focus-modal__actual--placeholder')}" data-focus-actual>${actualDisplay}</span>
           </div>
-          <div class="focus-modal__metric focus-modal__metric--clickable${hasPlanned ? ' focus-modal__metric--has-value' : ''}" data-focus-planned-metric>
+          <div class="focus-modal__metric${isEventTask ? '' : ' focus-modal__metric--clickable'}${hasPlanned ? ' focus-modal__metric--has-value' : ''}" data-focus-planned-metric>
             <span class="focus-modal__metric-label">PLANNED</span>
             <span class="focus-modal__planned${hasPlanned ? ' focus-modal__planned--set' : ' focus-modal__planned--placeholder'}" data-focus-planned>${plannedDisplay}</span>
           </div>
@@ -11038,18 +11782,15 @@ function renderFocusModal(task, autoStart) {
             <i data-lucide="pause"></i>
             <span>STOP</span>
           </button>
-          <button class="focus-modal__start-btn${isRunning ? ' focus-modal__btn--hidden' : ''}" type="button" data-focus-start>
+          <button class="focus-modal__start-btn${isRunning || !canStartTimer ? ' focus-modal__btn--hidden' : ''}" type="button" data-focus-start>
             <i data-lucide="play"></i>
             <span>START</span>
           </button>
         </div>
       </div>
       <div class="focus-modal__body">
-        ${renderFocusSubtaskRows(task)}
-        <button class="focus-modal__add-subtask" type="button" data-focus-add-subtask>
-          <i data-lucide="plus-circle"></i>
-          <span>Add subtask</span>
-        </button>
+        ${subtaskRowsHtml}
+        ${addSubtaskHtml}
         <div class="focus-modal__notes-editor" data-focus-notes-editor></div>
       </div>
     </div>
@@ -11063,8 +11804,11 @@ function renderFocusModal(task, autoStart) {
   if (focusNotesContainer) {
     focusModalQuill = initQuillEditor(focusNotesContainer, 'Notes...', task.notes || '');
     focusModalQuill.on('text-change', () => {
-      task.notes = getQuillHtml(focusModalQuill);
-      persistTask(task, 500);
+      const nextNotes = getQuillHtml(focusModalQuill);
+      if (!persistCalendarEventTaskNotes(task, nextNotes, 500)) {
+        task.notes = nextNotes;
+        persistTask(task, 500);
+      }
     });
   }
 
@@ -11166,10 +11910,14 @@ function renderFocusModal(task, autoStart) {
       closeFocusPicker();
       const t = findTaskById(focusState.taskId);
       if (!t) return;
+      if (t.complete && t.autoCompletedFromEvent) {
+        openEventTaskCompletionLockedModal(t.id);
+        return;
+      }
       if (!t.complete) {
-        completeTaskAsOf(t, getTodayISO());
+        completeCalendarEventTaskByUser(t, getTodayISO());
       } else {
-        clearTaskCompletionMetadata(t);
+        uncompleteCalendarEventTaskByUser(t);
       }
       const btn = el.querySelector('[data-focus-check]');
       if (btn) {
@@ -11208,6 +11956,11 @@ function renderFocusModal(task, autoStart) {
     }
     // Planned metric click
     if (e.target.closest('[data-focus-planned-metric]')) {
+      const t = findTaskById(focusState.taskId);
+      if (!t) return;
+      if (isCalendarEventTask(t)) {
+        return;
+      }
       if (focusPickerState && focusPickerState.type === 'planned' && !focusPickerState.subtaskId) {
         closeFocusPicker();
       } else {
@@ -11444,6 +12197,11 @@ let openModalIsBacklog = false;
 let openModalIsArchive = false;
 
 function openTaskDetailModal(taskId) {
+  const directTask = findTaskById(taskId);
+  if (isCalendarEventTask(directTask)) {
+    openLinkedCalendarEventModalForTask(taskId);
+    return;
+  }
   let context = findTaskContext(taskId);
   let isTrash = false;
   let isBacklog = false;
@@ -11620,10 +12378,14 @@ function createScheduledEventDraft(isoDate, startOffset, durationHours) {
     allDay: false,
     startOffset: safeStart,
     endOffset: safeStart + safeDuration,
+    linkedTaskId: null,
+    sourceProvider: 'sunsama',
     channelId: null,
     transparency: 'blocking',
+    blocksTaskScheduling: true,
     location: '',
-    description: ''
+    description: '',
+    notes: ''
   };
 }
 
@@ -11639,10 +12401,14 @@ function buildScheduledEventDraftFromEvent(event) {
     allDay: !!normalized.allDay,
     startOffset: Number.isFinite(normalized.offset) ? normalized.offset : 9,
     endOffset: Number.isFinite(normalized.offset) ? normalized.offset + duration : 9 + duration,
+    linkedTaskId: normalized.linkedTaskId || null,
+    sourceProvider: getCalendarEventSourceProvider(normalized) || 'sunsama',
     channelId: normalized.channelId || null,
     transparency: normalized.transparency === 'non_blocking' ? 'non_blocking' : 'blocking',
+    blocksTaskScheduling: normalized.blocksTaskScheduling !== false,
     location: normalized.location || '',
-    description: normalized.description || ''
+    description: normalized.description || '',
+    notes: normalized.notes || ''
   };
 }
 
@@ -11660,10 +12426,15 @@ function getScheduledEventTransparencyDescription(value) {
     : 'This event will show you as busy on your calendar';
 }
 
-function isCalendarEventBlockingForAvailability(event) {
+function isCalendarEventBlockingForTaskScheduling(event) {
   if (!event || event.systemType === 'actual') return false;
-  if (!isManualScheduledEvent(event)) return true;
-  return getScheduledEventTransparencyValue(event.transparency) !== 'non_blocking';
+  return event.blocksTaskScheduling !== false;
+}
+
+function getScheduledEventTaskBlockingTooltipLabel(isBlocking) {
+  return isBlocking
+    ? 'Tasks will be blocked during this event. Click to toggle.'
+    : 'Tasks will be allowed during this event. Click to toggle.';
 }
 
 function getScheduledEventAllDayTimeLabel(field) {
@@ -11688,14 +12459,22 @@ function shouldPreviewExistingScheduledEventDraft() {
   );
 }
 
-function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
-  if (!draft || !eventId) return null;
-  const previewDraft = { ...draft };
+function getScheduledEventCalendarPreviewEvent() {
+  if (!scheduledEventModalState || scheduledEventModalState.view !== 'full') return null;
+  if (!scheduledEventModalState.isNew) {
+    return shouldPreviewExistingScheduledEventDraft()
+      ? buildScheduledEventPreviewEventFromDraft(scheduledEventModalState.draft, scheduledEventModalState.eventId)
+      : null;
+  }
+  if (!scheduledEventModalState.draft.allDay) {
+    return null;
+  }
+  const previewDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
   normalizeScheduledEventDraftTimes(previewDraft);
   const style = getManualScheduledEventStyle(previewDraft.channelId);
   return {
-    id: eventId,
-    title: String(previewDraft.title || '').trim() || 'Untitled event',
+    id: '__scheduled-event-draft__',
+    title: String(previewDraft.title || '').trim(),
     date: previewDraft.date,
     endDate: previewDraft.allDay ? previewDraft.endDate : previewDraft.date,
     offset: previewDraft.startOffset,
@@ -11706,6 +12485,36 @@ function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
     transparency: getScheduledEventTransparencyValue(previewDraft.transparency),
     location: previewDraft.location || '',
     description: previewDraft.description || '',
+    notes: previewDraft.notes || '',
+    linkedTaskId: null,
+    sourceProvider: previewDraft.sourceProvider || 'sunsama',
+    colorClass: style.eventClass,
+    zOrder: ++calZCounter,
+    isDraftPreview: true
+  };
+}
+
+function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
+  if (!draft || !eventId) return null;
+  const previewDraft = { ...draft };
+  normalizeScheduledEventDraftTimes(previewDraft);
+  const style = getManualScheduledEventStyle(previewDraft.channelId);
+  return {
+    id: eventId,
+    title: String(previewDraft.title || '').trim(),
+    date: previewDraft.date,
+    endDate: previewDraft.allDay ? previewDraft.endDate : previewDraft.date,
+    offset: previewDraft.startOffset,
+    duration: getScheduledEventDurationHours(previewDraft),
+    kind: 'scheduled_event',
+    allDay: !!previewDraft.allDay,
+    channelId: previewDraft.channelId || null,
+    transparency: getScheduledEventTransparencyValue(previewDraft.transparency),
+    location: previewDraft.location || '',
+    description: previewDraft.description || '',
+    notes: previewDraft.notes || '',
+    linkedTaskId: previewDraft.linkedTaskId || null,
+    sourceProvider: previewDraft.sourceProvider || 'sunsama',
     colorClass: style.eventClass,
     zOrder: state.calendarEvents.find(event => event.id === eventId)?.zOrder || ++calZCounter
   };
@@ -11922,8 +12731,36 @@ function buildScheduledEventModalState(draft, options = {}) {
   };
 }
 
+function syncScheduledEventDraftNotesFromEditor(release = false) {
+  if (!scheduledEventModalQuill || !scheduledEventModalState) return;
+  scheduledEventModalState.draft.notes = getQuillHtml(scheduledEventModalQuill);
+  if (release) {
+    scheduledEventModalQuill = null;
+  }
+}
+
+function initScheduledEventNotesEditor() {
+  const overlay = getScheduledEventOverlay();
+  if (!overlay || !scheduledEventModalState || !isScheduledEventModalEditable() || scheduledEventModalState.view !== 'full') {
+    scheduledEventModalQuill = null;
+    return;
+  }
+  const container = overlay.querySelector('[data-scheduled-event-notes-editor]');
+  if (!container) {
+    scheduledEventModalQuill = null;
+    return;
+  }
+  scheduledEventModalQuill = initQuillEditor(container, 'Notes...', scheduledEventModalState.draft.notes || '');
+  scheduledEventModalQuill.on('text-change', () => {
+    if (!scheduledEventModalState) return;
+    scheduledEventModalState.draft.notes = getQuillHtml(scheduledEventModalQuill);
+    scheduledEventModalState.deleteConfirmArmed = false;
+  });
+}
+
 function closeScheduledEventModal() {
   const shouldRefreshCalendar = !!scheduledEventModalState;
+  syncScheduledEventDraftNotesFromEditor(true);
   scheduledEventModalState = null;
   clearCalendarGhost();
   const overlay = getScheduledEventOverlay();
@@ -12116,10 +12953,20 @@ function renderScheduledEventFullModalHeader() {
   const isEditableExisting = !scheduledEventModalState.isNew && scheduledEventModalState.mode === 'edit';
   const isViewExisting = !scheduledEventModalState.isNew && scheduledEventModalState.mode === 'view';
   if (isViewExisting) {
+    const linkedTask = getScheduledEventModalLinkedTask();
+    const blocksTaskScheduling = scheduledEventModalState.draft.blocksTaskScheduling !== false;
+    const taskBlockingIcon = blocksTaskScheduling ? 'calendar-x' : 'calendar';
+    const taskBlockingTooltip = getScheduledEventTaskBlockingTooltipLabel(blocksTaskScheduling);
     return `
       <div class="scheduled-event-modal__header">
         <div class="scheduled-event-modal__header-actions">
           <button class="scheduled-event-modal__btn" type="button" data-scheduled-event-edit>Edit</button>
+        </div>
+        <div class="scheduled-event-modal__header-actions scheduled-event-modal__header-actions--right">
+          <button class="scheduled-event-modal__task-toggle-btn" type="button" data-scheduled-event-task-toggle>${linkedTask ? 'Remove from tasks' : 'Add to tasks'}</button>
+          ${linkedTask ? `<button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Expand" data-scheduled-event-focus-btn data-rich-tooltip-label="Enter focus mode" data-rich-tooltip-shortcut-id="focus-mode" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="maximize-2"></i></button>` : ''}
+          <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Toggle task scheduling block" data-scheduled-event-task-blocking-toggle data-rich-tooltip-label="${escapeHtml(taskBlockingTooltip)}" data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="${taskBlockingIcon}"></i></button>
+          <button class="task-modal__top-action task-modal__top-action--icon" type="button" aria-label="Close event" data-scheduled-event-close data-rich-tooltip-label="Close event" data-rich-tooltip-shortcut-groups='[["Esc"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="10"><i data-lucide="x"></i></button>
         </div>
       </div>
     `;
@@ -12143,6 +12990,7 @@ function renderScheduledEventFullModalReadOnly() {
   const channelLabel = getScheduledEventReadOnlyChannelLabel(draft.channelId);
   const channelColor = getScheduledEventChannelColor(draft.channelId);
   const transparencyValue = getScheduledEventTransparencyValue(draft.transparency);
+  const hasNotes = !!String(draft.notes || '').trim() && String(draft.notes || '').trim() !== '<p><br></p>';
   const locationRow = draft.location
     ? `<div class="scheduled-event-modal__full-row">
         <i data-lucide="map-pin" class="scheduled-event-modal__icon"></i>
@@ -12175,7 +13023,7 @@ function renderScheduledEventFullModalReadOnly() {
         </div>
 
         <div class="scheduled-event-modal__full-row">
-          <i data-lucide="clock-3" class="scheduled-event-modal__icon"></i>
+          <i data-lucide="clock-4" class="scheduled-event-modal__icon"></i>
           <div class="scheduled-event-modal__full-row-main">
             <div class="scheduled-event-modal__static-value">${escapeHtml(formatScheduledEventReadOnlyTimeLabel(draft))}</div>
           </div>
@@ -12202,6 +13050,10 @@ function renderScheduledEventFullModalReadOnly() {
           </div>
         </div>
       </div>
+      ${hasNotes ? `
+        <div class="scheduled-event-modal__divider scheduled-event-modal__divider--notes"></div>
+        <div class="scheduled-event-modal__notes-readonly ql-editor">${draft.notes}</div>
+      ` : ''}
     </div>
   `;
 }
@@ -12299,6 +13151,9 @@ function renderScheduledEventFullModalEdit() {
           </div>
         </div>
       </div>
+
+      <div class="scheduled-event-modal__divider scheduled-event-modal__divider--notes"></div>
+      <div class="scheduled-event-modal__notes-editor" data-scheduled-event-notes-editor></div>
     </div>
   `;
 }
@@ -12314,6 +13169,7 @@ function renderScheduledEventFullModal() {
 
 function renderScheduledEventModal() {
   if (!scheduledEventModalState) return;
+  syncScheduledEventDraftNotesFromEditor(true);
   normalizeScheduledEventDraftTimes(scheduledEventModalState.draft);
   const overlay = getScheduledEventOverlay();
   if (!overlay) return;
@@ -12328,12 +13184,13 @@ function renderScheduledEventModal() {
   const modal = overlay.querySelector('.scheduled-event-modal');
   if (scheduledEventModalState.view === 'quick') {
     positionScheduledEventQuickModal(modal);
-  } else if (!scheduledEventModalState.isNew) {
+  } else {
     renderCalendarEvents._overrideDate = scheduledEventModalState.visibleDateOverride || getFirstVisibleDate();
     renderCalendarEvents();
   }
   syncScheduledEventModalGhost();
   autoResizeScheduledEventDescription(overlay.querySelector('[data-scheduled-event-description]'));
+  initScheduledEventNotesEditor();
 
   const titleInput = overlay.querySelector('[data-scheduled-event-title]');
   if (titleInput && scheduledEventModalState.autoFocusTitle) {
@@ -12383,10 +13240,14 @@ function openScheduledEventModal(draft, options = {}) {
     date: draft.date || getFirstVisibleDate(),
     endDate: draft.endDate || draft.date || getFirstVisibleDate(),
     title: draft.title || '',
+    linkedTaskId: draft.linkedTaskId || null,
+    sourceProvider: draft.sourceProvider || 'sunsama',
     channelId: draft.channelId || null,
     transparency: getScheduledEventTransparencyValue(draft.transparency),
+    blocksTaskScheduling: draft.blocksTaskScheduling !== false,
     location: draft.location || '',
-    description: draft.description || ''
+    description: draft.description || '',
+    notes: draft.notes || ''
   };
   normalizeScheduledEventDraftTimes(nextDraft);
   scheduledEventModalState = buildScheduledEventModalState(nextDraft, {
@@ -12405,7 +13266,7 @@ function openScheduledEventQuickCreate(draft) {
 
 function openScheduledEventFullModalForEvent(eventId) {
   const event = findCalendarEventById(eventId);
-  if (!event || !isManualScheduledEvent(event)) return;
+  if (!event || !canCalendarEventBeAddedToTasks(event)) return;
   openScheduledEventModal(buildScheduledEventDraftFromEvent(event), { isNew: false, view: 'full', mode: 'view' });
 }
 
@@ -12474,6 +13335,7 @@ function selectScheduledEventChannel(channelId) {
 
 function saveScheduledEventModal() {
   if (!scheduledEventModalState) return;
+  syncScheduledEventDraftNotesFromEditor();
   const draft = scheduledEventModalState.draft;
   const title = String(draft.title || '').trim();
   if (!title) {
@@ -12504,27 +13366,94 @@ function saveScheduledEventModal() {
   event.allDay = !!draft.allDay;
   event.channelId = draft.channelId || null;
   event.transparency = getScheduledEventTransparencyValue(draft.transparency);
+  event.blocksTaskScheduling = draft.blocksTaskScheduling !== false;
   event.location = draft.location || '';
   event.description = draft.description || '';
+  event.notes = draft.notes || '';
+  event.sourceProvider = draft.sourceProvider || 'sunsama';
+  event.linkedTaskId = draft.linkedTaskId || event.linkedTaskId || null;
   event.colorClass = style.eventClass;
   event.zOrder = event.zOrder || ++calZCounter;
   delete event.taskId;
 
+  if (event.linkedTaskId) {
+    const linkedTask = createOrSyncLinkedTaskFromCalendarEvent(event, { persistTaskDoc: true, persistEventDoc: false });
+    if (linkedTask) {
+      draft.linkedTaskId = linkedTask.id;
+      event.linkedTaskId = linkedTask.id;
+    }
+  }
+
   persistCalendarEvent(event);
   clearCalendarGhost();
+  renderAllColumns();
   renderCalendarEvents();
+  if (event.linkedTaskId && focusState.taskId === event.linkedTaskId && document.getElementById('focus-modal')) {
+    rerenderFocusModal();
+  }
   closeScheduledEventModal();
+}
+
+function toggleScheduledEventTaskBlocking(eventId) {
+  if (!eventId) return;
+  const event = findCalendarEventById(eventId);
+  if (!event) return;
+  event.blocksTaskScheduling = event.blocksTaskScheduling === false;
+  persistCalendarEvent(event);
+  if (scheduledEventModalState && scheduledEventModalState.eventId === eventId) {
+    scheduledEventModalState.draft.blocksTaskScheduling = event.blocksTaskScheduling !== false;
+    scheduledEventModalState.savedDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
+    renderScheduledEventModal();
+  } else {
+    renderCalendarEvents();
+  }
 }
 
 function deleteScheduledEventById(eventId) {
   if (!eventId) return;
+  const event = findCalendarEventById(eventId);
+  if (event?.linkedTaskId) {
+    removeLinkedTaskForCalendarEvent(event, { persistEvent: false, deleteEvent: true });
+  }
   state.calendarEvents = state.calendarEvents.filter(event => event.id !== eventId);
   persistDeleteCalendarEvent(eventId);
   clearCalendarGhost();
+  renderAllColumns();
   renderCalendarEvents();
   if (scheduledEventModalState && scheduledEventModalState.eventId === eventId) {
     closeScheduledEventModal();
   }
+}
+
+function getOrdinalSuffix(day) {
+  const mod10 = day % 10;
+  const mod100 = day % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'st';
+  if (mod10 === 2 && mod100 !== 12) return 'nd';
+  if (mod10 === 3 && mod100 !== 13) return 'rd';
+  return 'th';
+}
+
+function formatCalendarEventBadgeDate(isoDate) {
+  if (!isoDate) return '';
+  const date = parseISO(isoDate);
+  const month = date.toLocaleDateString([], { month: 'short' });
+  const day = date.getDate();
+  return `${month} ${day}${getOrdinalSuffix(day)}`;
+}
+
+function getCalendarEventTaskBadgeLabel(event) {
+  if (!event) return '';
+  if (event.allDay) return formatCalendarEventBadgeDate(event.date);
+  return formatOffsetAsClockWithMinutes(event.offset || 0);
+}
+
+function getCalendarEventTaskTimeframeLabel(event) {
+  if (!event) return '';
+  if (event.allDay) {
+    return `${formatScheduledEventDateRangeLabel(event.date, event.endDate)} · All day`;
+  }
+  return `${formatScheduledEventTimeLabel(event.offset || 0)} - ${formatScheduledEventTimeLabel((event.offset || 0) + (event.duration || 0))}`;
 }
 
 function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {}) {
@@ -12534,12 +13463,15 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
   const todayISO = getTodayISO();
   const isPast = !isBacklog && !isArchive && columnIsoDate && columnIsoDate < todayISO;
   const isFuture = !isBacklog && !isArchive && columnIsoDate && columnIsoDate > todayISO;
+  const isEventTask = isCalendarEventTask(task);
+  const linkedEvent = isEventTask ? getLinkedCalendarEventForTask(task) : null;
   const card = document.createElement('div');
   card.className = 'task-card'
     + (task.complete ? ' task-card--complete' : '')
     + (isGhost ? ' task-card--ghost' : '')
     + (isGhost && columnIsoDate === todayISO ? ' task-card--ghost-today' : '');
   card.dataset.taskId = task.id;
+  if (isEventTask) card.dataset.calendarEventTask = 'true';
   card.draggable = false;
   if (isGhost) card.dataset.ghostDate = columnIsoDate;
   if (isPast) card.dataset.isPast = 'true';
@@ -12549,18 +13481,23 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
   if (isDerivedRepeatTask(task)) card.dataset.repeatDerived = 'true';
 
   // Show scheduled pills for all timebox events on THIS column's date
-  const columnEvents = !isBacklog && columnIsoDate
+  const columnEvents = !isBacklog && columnIsoDate && !isEventTask
     ? state.calendarEvents.filter(e => e.taskId === task.id && e.date === columnIsoDate && e.systemType !== 'actual').sort((a, b) => a.offset - b.offset)
     : [];
   let scheduledPills = '';
-  if (columnEvents.length > 0) {
+  if (isEventTask && linkedEvent) {
+    const badgeLabel = getCalendarEventTaskBadgeLabel(linkedEvent);
+    if (badgeLabel) {
+      scheduledPills = `<div class="task-card__pills-row"><span class="task-card__scheduled-pill">${escapeHtml(badgeLabel)}</span></div>`;
+    }
+  } else if (columnEvents.length > 0) {
     const maxShow = 2;
     const shown = columnEvents.slice(0, maxShow);
     const overflow = columnEvents.length - maxShow;
     const pillChannelStyle = getChannelStyle(task.tag);
     scheduledPills = '<div class="task-card__pills-row">'
       + shown.map(evt => {
-        const pillColorClass = evt.colorClass || getTaskEventColorClass(task, 'cal-event--blue');
+        const pillColorClass = evt.colorClass || getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS);
         const pillInline = pillChannelStyle ? ` style="background-color:${escapeHtml(pillChannelStyle.hashColor)}"` : '';
         return `<span class="task-card__scheduled-pill ${pillColorClass}"${pillInline}>${escapeHtml(formatOffsetAsClockWithMinutes(evt.offset))}</span>`;
       }).join('')
@@ -12570,7 +13507,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
     scheduledPills = `<div class="task-card__pills-row"><span class="task-card__scheduled-pill">${escapeHtml(task.scheduledTime)}</span></div>`;
   }
 
-  const isTimerRunning = !isBacklog && focusState.running && focusState.taskId === task.id && !isPast;
+  const isTimerRunning = !isBacklog && focusState.running && focusState.taskId === task.id;
   const timerKey = getCardTimerKey(task.id, columnIsoDate);
   const showTimerDropdown = !isBacklog && (isTimerRunning || cardTimerExpanded.has(timerKey));
   const badgeGreenClass = isTimerRunning ? ' task-card__time-badge--running' : '';
@@ -12625,25 +13562,32 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
     : (isTimerRunning ? formatSeconds(task.actualTimeSeconds || 0) : formatActualDisplay(task.actualTimeSeconds || 0));
   const plannedDisplay = cardPlannedMins ? formatMinutes(cardPlannedMins) : '--:--';
 
-  // Timer play/pause button: hidden for past and future cards
-  const timerPlayBtn = (isPast || isFuture || isBacklog) ? '' : `
+  const showTimerButton = !isBacklog && (
+    isEventTask
+      ? isCalendarEventTaskTimerActionAllowed(task)
+      : !isPast && !isFuture
+  );
+  const timerPlayBtn = showTimerButton ? `
     <button class="task-card__timer-btn" type="button" data-card-timer-toggle data-rich-tooltip-label="${isTimerRunning ? 'Stop timer' : 'Start timer'}" data-rich-tooltip-shortcut-groups='[["Space"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
       <i data-lucide="${isTimerRunning ? 'pause' : 'play'}"></i>
-    </button>`;
+    </button>` : '';
 
-  const actualMetric = (isFuture || isBacklog) ? '' : `
+  const actualMetric = (isBacklog || (isFuture && !isEventTask)) ? '' : `
         <div class="task-card__timer-metric${isTimerRunning ? '' : ' task-card__timer-metric--clickable'}" data-card-actual-picker-btn data-rich-tooltip-label="Set actual time" data-rich-tooltip-shortcut-groups='[["E"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
           <span class="task-card__timer-label">ACTUAL</span>
           <span class="task-card__timer-value${isTimerRunning ? ' task-card__timer-value--running' : ''}" data-card-timer-actual>${timerActualDisplay}</span>
         </div>
   `;
 
+  const plannedMetricInteractive = isEventTask || !(isPast && hasColumnTimebox);
+  const plannedMetricTooltipLabel = isEventTask ? 'Open event' : 'Set planned time';
+
   const timerSection = showTimerDropdown ? `
     <div class="task-card__timer" data-card-timer>
       ${timerPlayBtn}
       <div class="task-card__timer-metrics">
         ${actualMetric}
-        <div class="task-card__timer-metric${isPast && hasColumnTimebox ? '' : ' task-card__timer-metric--clickable'}"${isPast && hasColumnTimebox ? '' : ' data-card-planned-picker-btn'} data-rich-tooltip-label="Set planned time" data-rich-tooltip-shortcut-groups='[["W"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
+        <div class="task-card__timer-metric${plannedMetricInteractive ? ' task-card__timer-metric--clickable' : ''}"${plannedMetricInteractive ? ' data-card-planned-picker-btn' : ''} data-rich-tooltip-label="${escapeHtml(plannedMetricTooltipLabel)}" data-rich-tooltip-shortcut-groups='[["W"]]' data-rich-tooltip-placement="bottom" data-rich-tooltip-offset="13">
           <span class="task-card__timer-label">PLANNED</span>
           <span class="task-card__timer-value">${plannedDisplay}</span>
         </div>
@@ -12702,7 +13646,7 @@ function renderTaskCard(task, columnIsoDate, isGhost, dpBadgeStatus, options = {
     <div class="task-card__footer">
       ${completeBtn}
       ${rolloverBadge}
-      ${renderIntegrationIcon(task.integrationColor)}
+      ${renderIntegrationIcon(task)}
       ${task.dueDate ? `<span class="task-card__due${task.dueDate < getTodayISO() ? ' task-card__due--overdue' : ''}"><i data-lucide="flag"></i>${formatDateDisplay(task.dueDate)}</span>` : ''}
       ${hoverIcons}
       ${renderTaskTag(task.tag)}
@@ -13447,9 +14391,7 @@ function refreshSearchPanelIfVisible() {
 
 function getCalendarEventsForDate(isoDate) {
   const filterId = getActiveTaskFilterId();
-  const previewEvent = shouldPreviewExistingScheduledEventDraft()
-    ? buildScheduledEventPreviewEventFromDraft(scheduledEventModalState.draft, scheduledEventModalState.eventId)
-    : null;
+  const previewEvent = getScheduledEventCalendarPreviewEvent();
   // 1. Get stored calendar events for this date
   const stored = state.calendarEvents.filter(evt => {
     if (previewEvent && evt.id === previewEvent.id) return false;
@@ -13474,7 +14416,7 @@ function getCalendarEventsForDate(isoDate) {
         dynamic.push({
           id: 'dyn-' + task.id,
           title: task.title,
-          colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+          colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
           offset,
           duration,
           taskId: task.id,
@@ -13492,9 +14434,7 @@ function getCalendarEventsForDate(isoDate) {
 }
 
 function getAllDayScheduledEventsForDate(isoDate) {
-  const previewEvent = shouldPreviewExistingScheduledEventDraft()
-    ? buildScheduledEventPreviewEventFromDraft(scheduledEventModalState.draft, scheduledEventModalState.eventId)
-    : null;
+  const previewEvent = getScheduledEventCalendarPreviewEvent();
   const events = state.calendarEvents
     .filter(evt => {
       if (previewEvent && evt.id === previewEvent.id) return false;
@@ -13530,6 +14470,7 @@ function getCalendarCompletionMarkersForDate(isoDate) {
   return getAllKnownTasks()
     .filter(task => {
       ensureTaskRolloverState(task);
+      if (isCalendarEventTask(task) && task.autoCompletedFromEvent) return false;
       return task.completedOnDate === isoDate
         && !!task.completedAt
         && taskMatchesChannelFilterId(task, filterId);
@@ -13541,6 +14482,46 @@ function getCalendarCompletionMarkersForDate(isoDate) {
     }))
     .filter(marker => Number.isFinite(marker.offset))
     .sort((a, b) => a.offset - b.offset || a.taskId.localeCompare(b.taskId));
+}
+
+function isTodayTimelineEventFullyPast(evt, visibleDate, now = new Date()) {
+  if (!evt || !visibleDate || visibleDate !== getTodayISO()) return false;
+  if (evt.allDay || !Number.isFinite(evt.offset) || !Number.isFinite(evt.duration)) return false;
+  const nowOffset = now.getHours()
+    + (now.getMinutes() / 60)
+    + (now.getSeconds() / 3600)
+    + (now.getMilliseconds() / 3600000);
+  return (evt.offset + evt.duration) <= nowOffset;
+}
+
+function updateRenderedCalendarPastEventState(visibleDate) {
+  const timeGrid = document.getElementById('time-grid');
+  if (!timeGrid) return;
+  const now = new Date();
+  timeGrid.querySelectorAll('.cal-event:not(#cal-event-ghost)').forEach(el => {
+    const evt = findCalendarEventById(el.dataset.eventId);
+    el.classList.toggle('cal-event--past-today', isTodayTimelineEventFullyPast(evt, visibleDate, now));
+  });
+}
+
+function getCalendarEventRenderBackgroundColor(evt, linkedTask) {
+  if (linkedTask) {
+    const channelStyle = getChannelStyle(linkedTask.tag);
+    if (channelStyle && channelStyle.hashColor) return channelStyle.hashColor;
+    return evt?.systemType === 'actual' ? '#b4b4b4' : DEFAULT_SCHEDULED_EVENT_COLOR;
+  }
+  if (isManualScheduledEvent(evt)) {
+    return getManualScheduledEventStyle(evt.channelId).hashColor;
+  }
+  return null;
+}
+
+function getScheduledEventDraftPreviewColors(channelId) {
+  const style = getManualScheduledEventStyle(channelId);
+  return {
+    fill: hexToRgba(style.hashColor, 0.28),
+    border: hexToRgba(style.hashColor, 0.95)
+  };
 }
 
 function renderCalendarCompletionMarkers(timeGrid, visibleDate, anchorEl) {
@@ -13588,8 +14569,15 @@ function renderAllDayScheduledEvents(visibleDate) {
   eventsEl.innerHTML = events.map(evt => {
     const style = getManualScheduledEventStyle(evt.channelId);
     const textColor = getContrastTextColor(style.hashColor);
-    return `<button class="calendar-all-day__event" type="button" data-calendar-all-day-event="${escapeHtml(evt.id)}" style="background-color:${escapeHtml(style.hashColor)};color:${escapeHtml(textColor)};">
-      ${escapeHtml(evt.title || 'Untitled event')}
+    const ghostClass = evt.isDraftPreview ? ' calendar-all-day__event--ghost' : '';
+    const disabledAttr = evt.isDraftPreview ? ' tabindex="-1" aria-hidden="true"' : '';
+    const dataAttr = evt.isDraftPreview ? '' : ` data-calendar-all-day-event="${escapeHtml(evt.id)}"`;
+    const previewColors = evt.isDraftPreview ? getScheduledEventDraftPreviewColors(evt.channelId) : null;
+    const inlineStyle = evt.isDraftPreview
+      ? `background-color:${escapeHtml(previewColors.fill)};border-color:${escapeHtml(previewColors.border)};color:${escapeHtml(textColor)};`
+      : `background-color:${escapeHtml(style.hashColor)};color:${escapeHtml(textColor)};`;
+    return `<button class="calendar-all-day__event${ghostClass}" type="button"${dataAttr}${disabledAttr} style="${inlineStyle}">
+      ${escapeHtml(evt.title || '')}
     </button>`;
   }).join('');
 }
@@ -13610,7 +14598,7 @@ function findCalendarEventById(eventId) {
         return {
           id: eventId,
           title: task.title,
-          colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+          colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
           offset,
           duration,
           taskId: task.id,
@@ -13660,24 +14648,29 @@ function renderCalendarEvents() {
 
     const linkedTask = evt.taskId ? findTaskById(evt.taskId) : null;
     const eventColorClass = linkedTask
-      ? getTaskEventColorClass(linkedTask, evt.colorClass || 'cal-event--blue')
+      ? getTaskEventColorClass(linkedTask, evt.colorClass || DEFAULT_CALENDAR_EVENT_CLASS)
       : isManualScheduledEvent(evt)
         ? getManualScheduledEventStyle(evt.channelId).eventClass
-      : (evt.colorClass || 'cal-event--blue');
+      : (evt.colorClass || DEFAULT_CALENDAR_EVENT_CLASS);
     evt.colorClass = eventColorClass;
 
     // Resolve the channel's actual hashColor for inline styling
-    const channelStyle = linkedTask
-      ? getChannelStyle(linkedTask.tag)
-      : (isManualScheduledEvent(evt) ? getManualScheduledEventStyle(evt.channelId) : null);
+    const backgroundColor = getCalendarEventRenderBackgroundColor(evt, linkedTask);
 
     const el = document.createElement('div');
     el.className = `cal-event ${eventColorClass}`;
-    if (channelStyle) {
-      el.style.backgroundColor = channelStyle.hashColor;
+    if (backgroundColor) {
+      el.style.backgroundColor = backgroundColor;
+    }
+    if (evt.isDraftPreview) {
+      const previewColors = getScheduledEventDraftPreviewColors(evt.channelId);
+      el.classList.add('cal-event--draft-preview');
+      el.style.backgroundColor = previewColors.fill;
+      el.style.borderColor = previewColors.border;
     }
     if (evt.systemType === 'actual') el.classList.add('cal-event--actual');
     if (evt.taskId || isManualScheduledEvent(evt)) el.classList.add('cal-event--movable');
+    if (isTodayTimelineEventFullyPast(evt, visibleDate)) el.classList.add('cal-event--past-today');
     el.dataset.eventId = evt.id;
     el.style.setProperty('--offset',   evt.offset);
     el.style.setProperty('--duration', evt.duration);
@@ -13686,7 +14679,7 @@ function renderCalendarEvents() {
     el.style.setProperty('--lane-frac', String(lane.laneIndex / lane.laneCount));
     el.style.setProperty('--lane-size', String(1 / lane.laneCount));
     el.innerHTML = `
-      <span class="cal-event__title">${escapeHtml(evt.title)}</span>
+      <span class="cal-event__title">${escapeHtml(evt.title || '')}</span>
       <span class="cal-event__time">${formatTimeRange(evt.offset, evt.duration)}</span>
       <div class="cal-event__resize-handle" draggable="false"></div>
     `;
@@ -13696,6 +14689,7 @@ function renderCalendarEvents() {
   });
 
   renderCalendarCompletionMarkers(timeGrid, visibleDate, ghost);
+  updateRenderedCalendarPastEventState(visibleDate);
 }
 
 function normalizeWorkdayBounds(timeGridEl = null) {
@@ -13752,6 +14746,7 @@ let currentTimeLineInterval = null;
 let currentTimeLineTimeout = null;
 
 function updateCurrentTimeLine() {
+  runCalendarEventTaskAutoCompletionSweep();
   const timeGrid = document.getElementById('time-grid');
   const line = document.getElementById('current-time-line');
   if (!timeGrid || !line) return;
@@ -13766,6 +14761,7 @@ function updateCurrentTimeLine() {
   const offset = (now.getHours() - CALENDAR_START_HOUR) + (now.getMinutes() / 60);
   const clamped = clampCalendarOffset(offset, 0, timeGrid);
   line.style.setProperty('--offset', String(clamped));
+  updateRenderedCalendarPastEventState(visibleDate);
 }
 
 function scheduleCurrentTimeLineUpdates() {
@@ -14021,6 +15017,7 @@ function shiftDayWindowBy(daysDelta, options = {}) {
       const rangeEnd = unloadedDates[unloadedDates.length - 1];
       DB.loadTasksForDateRange(_currentUserId, rangeStart, rangeEnd).then(docs => {
         populateColumnsFromTasks(docs);
+        syncLoadedCalendarEventTaskMirrors();
         unloadedDates.forEach(d => _loadedDateRanges.add(d));
         initializeTaskTimeState();
         renderAllColumns();
@@ -14073,6 +15070,7 @@ function ensureDateIsVisibleInWindow(isoDate) {
       DB.loadTasksForDateRange(_currentUserId, unloadedDates[0], unloadedDates[unloadedDates.length - 1])
         .then(docs => {
           populateColumnsFromTasks(docs);
+          syncLoadedCalendarEventTaskMirrors();
           unloadedDates.forEach(d => _loadedDateRanges.add(d));
           initializeTaskTimeState();
           renderAllColumns();
@@ -14195,6 +15193,10 @@ function findOrCreateColumn(isoDate) {
 function moveTaskToDate(taskId, targetIsoDate) {
   let ctx = findTaskContext(taskId);
   if (!ctx) return;
+  if (isCalendarEventTask(ctx.task)) {
+    moveCalendarEventTaskToDate(taskId, targetIsoDate);
+    return;
+  }
   if (ctx.index === -1 && isDerivedRepeatTask(ctx.task)) {
     materializeDerivedTask(ctx.task);
     ctx = findTaskContext(taskId);
@@ -14632,7 +15634,7 @@ function attachEvents() {
       : settings.defaultTimeboxDurationMinutes / 60;
     const offset = yToOffset(clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
-    const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
+    const ghostColor = channelStyle ? channelStyle.hashColor : DEFAULT_SCHEDULED_EVENT_COLOR;
 
     calGhost.hidden = false;
     if (calDragLine) calDragLine.hidden = true;
@@ -14666,7 +15668,7 @@ function attachEvents() {
     const newTimeboxEvt = {
       id: 'evt-' + uid(),
       title: task.title,
-      colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+      colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
       offset,
       duration,
       taskId: task.id,
@@ -14718,17 +15720,19 @@ function attachEvents() {
       if (!sourceCol) return false;
       const taskIndex = sourceCol.tasks.findIndex(t => t.id === dragState.taskId);
       if (taskIndex === -1) return false;
-      const [task] = sourceCol.tasks.splice(taskIndex, 1);
-      task.scheduledTime = null;
-      const removedCalEvents = state.calendarEvents.filter(evt => evt.taskId === task.id && evt.systemType !== 'actual');
-      state.calendarEvents = state.calendarEvents.filter(evt => evt.taskId !== task.id || evt.systemType === 'actual');
-      insertTaskIntoBacklog(task, targetHorizon, insertIndex);
+      const task = sourceCol.tasks[taskIndex];
+      if (isCalendarEventTask(task)) return false;
+      const [removedTask] = sourceCol.tasks.splice(taskIndex, 1);
+      removedTask.scheduledTime = null;
+      const removedCalEvents = state.calendarEvents.filter(evt => evt.taskId === removedTask.id && evt.systemType !== 'actual');
+      state.calendarEvents = state.calendarEvents.filter(evt => evt.taskId !== removedTask.id || evt.systemType === 'actual');
+      insertTaskIntoBacklog(removedTask, targetHorizon, insertIndex);
 
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderBacklogPanel();
       renderCalendarEvents();
-      persistTask(task, 0);
+      persistTask(removedTask, 0);
       removedCalEvents.forEach(ev => persistDeleteCalendarEvent(ev.id));
       setTimeout(finalizeTaskDragState, 0);
       return true;
@@ -14815,21 +15819,37 @@ function attachEvents() {
     if (!sourceCol) return false;
     const taskIndex = sourceCol.tasks.findIndex(t => t.id === dragState.taskId);
     if (taskIndex === -1) return false;
+    const task = sourceCol.tasks[taskIndex];
 
-    const [task] = sourceCol.tasks.splice(taskIndex, 1);
+    if (isCalendarEventTask(task)) {
+      if (sourceCol === targetCol) {
+        const [draggedTask] = sourceCol.tasks.splice(taskIndex, 1);
+        targetCol.tasks.splice(insertIndex, 0, draggedTask);
+        cleanupTaskDropVisuals();
+        renderColumn(targetCol);
+        persistColumnTaskOrder(targetCol);
+        setTimeout(finalizeTaskDragState, 0);
+        return true;
+      }
+      cleanupTaskDropVisuals();
+      moveCalendarEventTaskToDate(task.id, targetCol.isoDate);
+      setTimeout(finalizeTaskDragState, 0);
+      return true;
+    }
+    const [removedTask] = sourceCol.tasks.splice(taskIndex, 1);
     const todayISO = getTodayISO();
 
     // Dropping onto a past column → move there and mark complete as of that date
     if (targetCol.isoDate < todayISO && sourceCol.isoDate >= todayISO) {
-      targetCol.tasks.push(task);
-      completeTaskAsOf(task, targetCol.isoDate);
-      task.startDate = targetCol.isoDate;
+      targetCol.tasks.push(removedTask);
+      completeTaskAsOf(removedTask, targetCol.isoDate);
+      removedTask.startDate = targetCol.isoDate;
       moveCompletedTasksToBottom(targetCol);
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderColumn(targetCol);
       renderCalendarEvents();
-      persistTask(task, 0);
+      persistTask(removedTask, 0);
       setTimeout(finalizeTaskDragState, 0);
       return true;
     }
@@ -14837,40 +15857,40 @@ function attachEvents() {
     // Dropping within the past → keep complete, but move the completion marker
     // to the new day so untimed/unused tasks behave like a move instead of a duplicate.
     if (sourceCol.isoDate < todayISO && targetCol.isoDate < todayISO) {
-      targetCol.tasks.splice(insertIndex, 0, task);
-      applyTaskCompletionMetadata(task, targetCol.isoDate);
-      task.startDate = targetCol.isoDate;
+      targetCol.tasks.splice(insertIndex, 0, removedTask);
+      applyTaskCompletionMetadata(removedTask, targetCol.isoDate);
+      removedTask.startDate = targetCol.isoDate;
       moveCompletedTasksToBottom(targetCol);
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderColumn(targetCol);
       renderCalendarEvents();
-      persistTask(task, 0);
+      persistTask(removedTask, 0);
       setTimeout(finalizeTaskDragState, 0);
       return true;
     }
 
     // Dropping from past to current/future → uncomplete, set new startDate
     if (sourceCol.isoDate < todayISO && targetCol.isoDate >= todayISO) {
-      targetCol.tasks.splice(insertIndex, 0, task);
-      clearTaskCompletionMetadata(task);
-      task.startDate = targetCol.isoDate;
+      targetCol.tasks.splice(insertIndex, 0, removedTask);
+      clearTaskCompletionMetadata(removedTask);
+      removedTask.startDate = targetCol.isoDate;
       // Clear scheduledTime so it doesn't create a phantom timebox on the new date
-      task.scheduledTime = null;
+      removedTask.scheduledTime = null;
       cleanupTaskDropVisuals();
       renderColumn(sourceCol);
       renderColumn(targetCol);
       renderCalendarEvents();
-      persistTask(task, 0);
+      persistTask(removedTask, 0);
       setTimeout(finalizeTaskDragState, 0);
       return true;
     }
 
-    targetCol.tasks.splice(insertIndex, 0, task);
+    targetCol.tasks.splice(insertIndex, 0, removedTask);
 
     if (sourceCol !== targetCol) {
-      ensureTaskRolloverState(task);
-      task.startDate = targetCol.isoDate;
+      ensureTaskRolloverState(removedTask);
+      removedTask.startDate = targetCol.isoDate;
     }
 
     cleanupTaskDropVisuals();
@@ -14881,7 +15901,7 @@ function attachEvents() {
       const ghostVisualCol = state.columns.find(c => c.id === dragState.ghostVisualColId);
       if (ghostVisualCol && ghostVisualCol !== sourceCol && ghostVisualCol !== targetCol) renderColumn(ghostVisualCol);
     }
-    persistTask(task, 0);
+    persistTask(removedTask, 0);
     setTimeout(finalizeTaskDragState, 0);
     return true;
   }
@@ -15082,7 +16102,7 @@ function attachEvents() {
       if (col) renderColumn(col);
 
       // If no planned time, also open the planned time picker
-      if (!task.timeEstimateMinutes) {
+      if (!task.timeEstimateMinutes && !isCalendarEventTask(task)) {
         setTimeout(() => openCardPicker(taskId, 'planned'), 0);
       }
 
@@ -15196,6 +16216,8 @@ function attachEvents() {
     const card = btn.closest('.task-card');
     if (!card) return;
     const taskId = card.dataset.taskId;
+    const task = findTaskById(taskId);
+    if (!task) return;
     if (focusState.running && focusState.taskId === taskId) {
       // Pause: stop timer and hide timer area
       stopFocusTimer();
@@ -15204,6 +16226,7 @@ function attachEvents() {
       const col = state.columns.find(c => c.tasks.some(t => t.id === taskId));
       if (col) renderColumn(col);
     } else {
+      if (!isCalendarEventTaskTimerActionAllowed(task)) return;
       // Play: enter focus mode and start timer
       openFocusMode(taskId, true);
     }
@@ -15251,6 +16274,13 @@ function attachEvents() {
       const card = plannedBtn.closest('.task-card');
       if (!card) return;
       const taskId = card.dataset.taskId;
+      const task = findTaskById(taskId);
+      if (!task) return;
+      if (isCalendarEventTask(task)) {
+        closeCardPicker();
+        openLinkedCalendarEventModalForTask(taskId);
+        return;
+      }
       if (cardPickerState && cardPickerState.taskId === taskId && cardPickerState.type === 'planned') {
         closeCardPicker();
       } else {
@@ -18816,7 +19846,39 @@ function attachScheduledEventModalEvents() {
       return;
     }
 
+    if (e.target.closest('[data-scheduled-event-task-toggle]')) {
+      const event = scheduledEventModalState.eventId ? findCalendarEventById(scheduledEventModalState.eventId) : null;
+      if (!event) return;
+      const linkedTask = getLinkedTaskForCalendarEvent(event);
+      if (linkedTask) {
+        removeLinkedTaskForCalendarEvent(event, { persistEvent: true });
+        scheduledEventModalState.draft.linkedTaskId = null;
+        scheduledEventModalState.savedDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
+      } else {
+        const task = addCalendarEventToTasks(event);
+        if (task) {
+          scheduledEventModalState.draft.linkedTaskId = task.id;
+          scheduledEventModalState.savedDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
+        }
+      }
+      renderScheduledEventModal();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-focus-btn]')) {
+      handleScheduledEventModalFocusShortcut();
+      return;
+    }
+
+    if (e.target.closest('[data-scheduled-event-task-blocking-toggle]')) {
+      const eventId = scheduledEventModalState.eventId;
+      if (!eventId) return;
+      toggleScheduledEventTaskBlocking(eventId);
+      return;
+    }
+
     if (e.target.closest('[data-scheduled-event-back]')) {
+      syncScheduledEventDraftNotesFromEditor();
       scheduledEventModalState.mode = 'view';
       scheduledEventModalState.deleteConfirmArmed = false;
       scheduledEventModalState.error = '';
@@ -19063,6 +20125,22 @@ function attachScheduledEventModalEvents() {
     if (e.key === 'Enter' && e.target.matches('[data-scheduled-event-title]') && scheduledEventModalState.view === 'quick') {
       e.preventDefault();
       saveScheduledEventModal();
+      return;
+    }
+    if (
+      e.key === 'Enter'
+      && scheduledEventModalState.view === 'full'
+      && isScheduledEventModalEditable()
+      && !scheduledEventModalState.datePickerField
+      && !scheduledEventModalState.timePickerField
+      && !scheduledEventModalState.channelPickerOpen
+      && !scheduledEventModalState.transparencyPickerOpen
+      && !isEditableElement(e.target)
+      && !e.target.closest('button, a, [role="button"]')
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      saveScheduledEventModal();
     }
   });
 
@@ -19284,6 +20362,18 @@ function attachCalendarEvents() {
     if (!started) {
       if (isManualScheduledEvent(evt)) {
         openScheduledEventFullModalForEvent(eventId);
+      } else if (evt.systemType === 'actual' && evt.taskId) {
+        const task = findTaskById(evt.taskId);
+        const linkedEvent = task ? getLinkedCalendarEventForTask(task) : null;
+        if (linkedEvent) {
+          openScheduledEventFullModalForEvent(linkedEvent.id);
+        } else if (task) {
+          openTaskDetailModal(task.id);
+        } else {
+          renderCalendarEvents();
+        }
+      } else if (evt.taskId) {
+        openTaskDetailModal(evt.taskId);
       } else {
         renderCalendarEvents();
       }
@@ -19312,7 +20402,7 @@ function attachCalendarEvents() {
       }
       persistCalendarEvent(evt);
     } else if (isManualScheduledEvent(evt)) {
-      deleteScheduledEventById(eventId);
+      renderCalendarEvents();
       return;
     } else if (evt.systemType === 'actual' && evt.taskId) {
       // Drag actual event off timeline: delete event and subtract actual time
@@ -19385,7 +20475,7 @@ function attachCalendarEvents() {
       : settings.defaultTimeboxDurationMinutes / 60;
     const offset = yToOffset(e.clientY, timeGrid, durationHours);
     const channelStyle = getChannelStyle(task.tag);
-    const ghostColor = channelStyle ? channelStyle.hashColor : '#3b82f6';
+    const ghostColor = channelStyle ? channelStyle.hashColor : DEFAULT_SCHEDULED_EVENT_COLOR;
 
     ghost.hidden = false;
     ghost.style.backgroundColor = hexToRgba(ghostColor, 0.28);
@@ -19440,7 +20530,7 @@ function attachCalendarEvents() {
       const newCalEvt = {
         id:         'evt-' + uid(),
         title:      task.title,
-        colorClass: getTaskEventColorClass(task, 'cal-event--blue'),
+        colorClass: getTaskEventColorClass(task, DEFAULT_CALENDAR_EVENT_CLASS),
         offset,
         duration,
         taskId:     task.id,
@@ -20733,7 +21823,7 @@ function handleChannelSave() {
     '#ff8686': 'cal-event--orange', '#e06d6d': 'cal-event--orange', '#a1887f': 'cal-event--blue',
     '#8e7973': 'cal-event--blue',
   };
-  const eventClass = eventClassMap[color] || 'cal-event--blue';
+  const eventClass = eventClassMap[color] || DEFAULT_CALENDAR_EVENT_CLASS;
 
   let channelId;
   if (isEdit) {
@@ -21067,6 +22157,7 @@ function attachSettingsEvents() {
    TASK PERSISTENCE
 ═══════════════════════════════════════════════ */
 const _taskWriteTimers = {};
+const _calendarEventWriteTimers = {};
 const _loadedDateRanges = new Set();
 const _loadingDateRanges = new Set();
 const _loadedCalendarDates = new Set();
@@ -21079,6 +22170,7 @@ function ensureDateDataLoaded(isoDate) {
     _loadingDateRanges.add(isoDate);
     DB.loadTasksForDateRange(_currentUserId, isoDate, isoDate).then(docs => {
       populateColumnsFromTasks(docs);
+      syncLoadedCalendarEventTaskMirrors();
       _loadedDateRanges.add(isoDate);
       initializeTaskTimeState();
       renderAllColumns();
@@ -21092,7 +22184,9 @@ function ensureDateDataLoaded(isoDate) {
     DB.loadCalendarEventsForRange(_currentUserId, isoDate, isoDate).then(events => {
       const normalizedEvents = events.map(normalizeCalendarEventRecord);
       state.calendarEvents = state.calendarEvents.filter(evt => evt.date !== isoDate).concat(normalizedEvents);
+      syncLoadedCalendarEventTaskMirrors();
       _loadedCalendarDates.add(isoDate);
+      renderAllColumns();
       renderCalendarEvents._overrideDate = isoDate;
       renderCalendarEvents();
     }).catch(err => console.error('Failed to lazy-load calendar events:', err))
@@ -21130,6 +22224,11 @@ function taskToDoc(task, columnDate, orderIndex) {
     completedAt: task.completedAt || null,
     tag: task.tag || null,
     integrationColor: task.integrationColor || null,
+    taskKind: task.taskKind || null,
+    linkedCalendarEventId: task.linkedCalendarEventId || null,
+    calendarSourceProvider: task.calendarSourceProvider || null,
+    autoCompletedFromEvent: !!task.autoCompletedFromEvent,
+    autoFilledActualFromEventCompletion: !!task.autoFilledActualFromEventCompletion,
     subtasks: (task.subtasks || []).map(s => ({
       id: s.id,
       label: s.label || '',
@@ -21170,6 +22269,11 @@ function docToTask(doc) {
     completedAt: doc.completedAt || null,
     tag: doc.tag || null,
     integrationColor: doc.integrationColor || null,
+    taskKind: doc.taskKind || null,
+    linkedCalendarEventId: doc.linkedCalendarEventId || null,
+    calendarSourceProvider: doc.calendarSourceProvider || null,
+    autoCompletedFromEvent: !!doc.autoCompletedFromEvent,
+    autoFilledActualFromEventCompletion: !!doc.autoFilledActualFromEventCompletion,
     subtasks: (doc.subtasks || []).map(s => ({
       id: s.id,
       label: s.label || '',
@@ -21231,6 +22335,8 @@ function persistColumnTaskOrder(column) {
 
 function persistDeleteTask(taskId) {
   if (!_currentUserId) return;
+  clearTimeout(_taskWriteTimers[taskId]);
+  delete _taskWriteTimers[taskId];
   DB.deleteTask(_currentUserId, taskId).catch(err =>
     console.error('Failed to delete task:', err)
   );
@@ -21264,9 +22370,22 @@ function persistRituals() {
   }).catch(err => console.error('Failed to save rituals:', err));
 }
 
-function persistCalendarEvent(event) {
+function persistCalendarEvent(event, debounceMs = 0) {
   if (!_currentUserId) return;
   const normalized = normalizeCalendarEventRecord(event);
+  const eventId = normalized.id;
+  if (debounceMs > 0) {
+    clearTimeout(_calendarEventWriteTimers[eventId]);
+    _calendarEventWriteTimers[eventId] = setTimeout(() => {
+      delete _calendarEventWriteTimers[eventId];
+      DB.saveCalendarEvent(_currentUserId, normalizeCalendarEventRecord(normalized)).catch(err =>
+        console.error('Failed to save calendar event:', err)
+      );
+    }, debounceMs);
+    return;
+  }
+  clearTimeout(_calendarEventWriteTimers[eventId]);
+  delete _calendarEventWriteTimers[eventId];
   DB.saveCalendarEvent(_currentUserId, normalized).catch(err =>
     console.error('Failed to save calendar event:', err)
   );
@@ -21274,6 +22393,8 @@ function persistCalendarEvent(event) {
 
 function persistDeleteCalendarEvent(eventId) {
   if (!_currentUserId) return;
+  clearTimeout(_calendarEventWriteTimers[eventId]);
+  delete _calendarEventWriteTimers[eventId];
   DB.deleteCalendarEvent(_currentUserId, eventId).catch(err =>
     console.error('Failed to delete calendar event:', err)
   );
@@ -21436,6 +22557,7 @@ async function onAuthReady(userId) {
     const todayISO = getTodayISO();
     const events = await DB.loadCalendarEventsForRange(userId, startISO, endISO);
     state.calendarEvents = events.map(normalizeCalendarEventRecord);
+    syncLoadedCalendarEventTaskMirrors();
     for (const col of state.columns) {
       _loadedCalendarDates.add(col.isoDate);
     }
@@ -21467,6 +22589,8 @@ async function onAuthReady(userId) {
 
   // Re-render with loaded data
   initializeTaskTimeState();
+  syncLoadedCalendarEventTaskMirrors();
+  runCalendarEventTaskAutoCompletionSweep();
   reconcileVisibleRepeatTasks();
   performRollover();
   renderAllColumns();
@@ -21486,6 +22610,8 @@ async function onAuthReady(userId) {
 function onAuthClear() {
   _currentUserId = null;
   clearTimeout(_settingsWriteTimer);
+  Object.values(_calendarEventWriteTimers).forEach(clearTimeout);
+  Object.keys(_calendarEventWriteTimers).forEach(key => delete _calendarEventWriteTimers[key]);
   _loadedDateRanges.clear();
   _loadingDateRanges.clear();
   _loadedCalendarDates.clear();
