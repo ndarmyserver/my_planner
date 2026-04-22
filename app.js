@@ -296,6 +296,8 @@ const settings = {
   // Timeboxing
   visualizeActualTimeOnCalendar: true,
   defaultTimeboxDurationMinutes: 30,  // 15 | 30 | 45 | 60
+  // Rituals
+  ritualTaskChannelId: null,
   // Schedule (Sun=0 through Sat=6)
   schedule: [
     { day: 0, workday: false, startMinutes: 480, endMinutes: 1020 },
@@ -462,7 +464,7 @@ function rebuildChannelColors() {
   for (const key in CHANNEL_COLORS) delete CHANNEL_COLORS[key];
   CHANNELS.forEach(ch => {
     if (ch.id !== 'unassigned') {
-      CHANNEL_COLORS['#' + ch.label] = { hashColor: ch.hashColor, eventClass: ch.eventClass };
+      CHANNEL_COLORS[normalizeTaskChannelTag('#' + ch.label)] = { hashColor: ch.hashColor, eventClass: ch.eventClass };
     }
   });
 }
@@ -1654,8 +1656,14 @@ function normalizeTag(tag) {
   return typeof tag === 'string' ? tag.trim().toLowerCase() : '';
 }
 
+function normalizeTaskChannelTag(tag) {
+  const normalized = normalizeTag(tag);
+  if (!normalized) return '';
+  return normalized.startsWith('#') ? normalized : `#${normalized}`;
+}
+
 function getChannelStyle(tag) {
-  return CHANNEL_COLORS[normalizeTag(tag)] || null;
+  return CHANNEL_COLORS[normalizeTaskChannelTag(tag)] || null;
 }
 
 function getTaskEventColorClass(task, fallback = DEFAULT_CALENDAR_EVENT_CLASS) {
@@ -1782,6 +1790,12 @@ function getChannelById(channelId) {
   return CHANNELS.find(ch => ch.id === channelId) || null;
 }
 
+function getCanonicalTaskTagForChannelId(channelId) {
+  const channel = getChannelById(channelId);
+  if (!channel || channel.id === 'unassigned') return null;
+  return `#${channel.label}`;
+}
+
 function getCalendarEventClassForColor(color) {
   const eventClassMap = {
     '#ff79a7': 'cal-event--orange', '#d45d8c': 'cal-event--purple', '#e979fc': 'cal-event--purple',
@@ -1893,6 +1907,12 @@ function normalizeCalendarSettings() {
   }
 
   settings.calendarAccounts = normalizedAccounts;
+}
+
+function normalizeRitualSettings() {
+  settings.ritualTaskChannelId = getChannelById(settings.ritualTaskChannelId)
+    ? settings.ritualTaskChannelId
+    : null;
 }
 
 function getCalendarAccounts() {
@@ -2658,15 +2678,15 @@ function taskMatchesChannelFilterId(task, filterId = getActiveTaskFilterId()) {
   if (!filterId || filterId === 'all') return true;
   const channel = getChannelById(filterId);
   if (!channel) return true;
-  const normalizedTaskTag = normalizeTag(task.tag);
+  const normalizedTaskTag = normalizeTaskChannelTag(task.tag);
   if (channel.id === 'unassigned') return !normalizedTaskTag;
-  const exactTag = '#' + channel.label;
+  const exactTag = normalizeTaskChannelTag('#' + channel.label);
   if (!channel.isContext) return normalizedTaskTag === exactTag;
   if (normalizedTaskTag === exactTag) return true;
   const childChannelIds = getContextChildChannelIds(channel.label);
   return childChannelIds.some(id => {
     const child = getChannelById(id);
-    return child && normalizedTaskTag === '#' + child.label;
+    return child && normalizedTaskTag === normalizeTaskChannelTag('#' + child.label);
   });
 }
 
@@ -5433,10 +5453,10 @@ function isRitualTask(task) {
 
 function isWorkTask(task) {
   if (!task) return false;
-  const tag = normalizeTag(task.tag);
+  const tag = normalizeTaskChannelTag(task.tag);
   if (!tag) return false;
   if (tag === '#work') return true;
-  const channel = CHANNELS.find(ch => '#' + ch.label === tag);
+  const channel = CHANNELS.find(ch => normalizeTaskChannelTag('#' + ch.label) === tag);
   if (!channel) return false;
   return channel.context === 'work' || channel.label === 'work';
 }
@@ -5834,7 +5854,7 @@ function getOrCreateDailyShutdownTask(isoDate) {
       ownActualTimeSeconds: 0,
       scheduledTime: null,
       complete: true,
-      tag: '#planning',
+      tag: getCanonicalTaskTagForChannelId(settings.ritualTaskChannelId),
       integrationColor: null,
       subtasks: [],
       showSubtasks: false,
@@ -5844,7 +5864,6 @@ function getOrCreateDailyShutdownTask(isoDate) {
     col.tasks.push(task);
   }
   task.complete = true;
-  task.tag = '#planning';
   task.systemType = 'daily_shutdown';
   return { task, column: col };
 }
@@ -5855,6 +5874,7 @@ function appendDailyShutdownSnapshotToTask(snapshot) {
   const prior = String(task.notes || '').trim();
   task.notes = prior ? `${prior}<p><br></p><hr><p><br></p>${entry}` : entry;
   renderColumn(column);
+  persistTask(task, 0);
 }
 
 function buildDailyShutdownSnapshot() {
@@ -7414,7 +7434,7 @@ function upsertDailyShutdownForDate(isoDate, shutdownTime) {
     ownActualTimeSeconds: 0,
     scheduledTime: null,
     complete: false,
-    tag: '#planning',
+    tag: getCanonicalTaskTagForChannelId(settings.ritualTaskChannelId),
     integrationColor: null,
     subtasks: [],
     showSubtasks: false,
@@ -7428,6 +7448,7 @@ function upsertDailyShutdownForDate(isoDate, shutdownTime) {
 
   const offset = parseTime24ToOffset(sanitizedTime);
   const existingEvent = state.calendarEvents.find(evt => evt.systemType === 'daily_shutdown' && evt.date === isoDate);
+  let shutdownEvent = existingEvent;
   if (existingEvent) {
     existingEvent.offset = offset;
     existingEvent.duration = 5 / 60;
@@ -7436,7 +7457,7 @@ function upsertDailyShutdownForDate(isoDate, shutdownTime) {
     existingEvent.colorClass = getTaskEventColorClass(task, 'cal-event--orange');
     existingEvent.zOrder = ++calZCounter;
   } else {
-    state.calendarEvents.push({
+    shutdownEvent = {
       id: 'evt-' + uid(),
       title: task.title,
       colorClass: getTaskEventColorClass(task, 'cal-event--orange'),
@@ -7446,12 +7467,15 @@ function upsertDailyShutdownForDate(isoDate, shutdownTime) {
       date: isoDate,
       systemType: 'daily_shutdown',
       zOrder: ++calZCounter
-    });
+    };
+    state.calendarEvents.push(shutdownEvent);
   }
 
   renderColumn(col);
   renderCalendarEvents._overrideDate = isoDate;
   renderCalendarEvents();
+  persistTask(task, 0);
+  if (shutdownEvent) persistCalendarEvent(shutdownEvent, 0);
 }
 
 function buildDailyPlanningSnapshot() {
@@ -7524,7 +7548,7 @@ function getOrCreateDailyPlanningTask(isoDate) {
     t.systemType === 'daily_planning'
     || (
       String(t.title || '').trim().toLowerCase() === 'daily planning'
-      && normalizeTag(t.tag) === '#planning'
+      && normalizeTaskChannelTag(t.tag) === '#planning'
     )
   );
   if (!task) {
@@ -7537,7 +7561,7 @@ function getOrCreateDailyPlanningTask(isoDate) {
       ownActualTimeSeconds: 0,
       scheduledTime: null,
       complete: true,
-      tag: '#planning',
+      tag: getCanonicalTaskTagForChannelId(settings.ritualTaskChannelId),
       integrationColor: null,
       subtasks: [],
       showSubtasks: false,
@@ -7547,7 +7571,6 @@ function getOrCreateDailyPlanningTask(isoDate) {
     col.tasks.push(task);
   }
   task.complete = true;
-  task.tag = '#planning';
   task.systemType = 'daily_planning';
   return { task, column: col };
 }
@@ -7558,6 +7581,7 @@ function appendDailyPlanningSnapshotToTask(snapshot) {
   const prior = String(task.notes || '').trim();
   task.notes = prior ? `${prior}<p><br></p><hr><p><br></p>${entry}` : entry;
   renderColumn(column);
+  persistTask(task, 0);
 }
 
 function buildDailyPlanningCopyText() {
@@ -10140,11 +10164,11 @@ function renderChannelOptionListHTML(options, config = {}) {
 }
 
 function renderChannelListHTML(filtered, currentTag) {
-  const normalizedCurrent = normalizeTag(currentTag);
+  const normalizedCurrent = normalizeTaskChannelTag(currentTag);
   const selectedOption = filtered.find(ch => (
     ch.id === 'unassigned'
       ? !currentTag
-      : normalizedCurrent === '#' + ch.label
+      : normalizedCurrent === normalizeTaskChannelTag('#' + ch.label)
   ));
   return renderChannelOptionListHTML(filtered, {
     selectedId: selectedOption ? selectedOption.id : null,
@@ -10573,11 +10597,11 @@ function renderModalChannelPicker() {
 }
 
 function renderModalChannelListHTML(filtered, currentTag) {
-  const normalizedCurrent = normalizeTag(currentTag);
+  const normalizedCurrent = normalizeTaskChannelTag(currentTag);
   return filtered.map((ch, i) => {
     const isSelected = ch.id === 'unassigned'
       ? !currentTag
-      : normalizedCurrent === '#' + ch.label;
+      : normalizedCurrent === normalizeTaskChannelTag('#' + ch.label);
     const nested = ch.context ? ' channel-picker__item--nested' : '';
     const selected = isSelected ? ' channel-picker__item--selected' : '';
     const highlighted = (modalChannelPickerState && modalChannelPickerState.highlightIndex === i)
@@ -16151,7 +16175,7 @@ function commitAddTask(colEl) {
     ownActualTimeSeconds: 0,
     scheduledTime: null,
     complete: false,
-    tag: settings.defaultChannelId ? (CHANNELS.find(c => c.id === settings.defaultChannelId) || {}).label || null : null,
+    tag: getCanonicalTaskTagForChannelId(settings.defaultChannelId),
     integrationColor: null,
     subtasks: [],
     showSubtasks: false,
@@ -21784,6 +21808,7 @@ let settingsDropdownOpen = null; // { key, el }
 let settingsChannelModalState = null; // { mode: 'create-context'|'edit-context'|'create-channel'|'edit-channel', data }
 let settingsCalendarModalState = null; // { accountId, calendarId, draft, original, channelPickerField, channelPickerQuery, channelPickerHighlight }
 let settingsCalendarModalKeydownHandler = null;
+let settingsRitualsChannelPickerState = null; // { query, highlightIndex }
 
 const SETTINGS_COLOR_PALETTE = [
   '#ff79a7','#d45d8c','#e979fc','#ff62be','#856cc2','#a382ff',
@@ -21872,6 +21897,7 @@ function closeSettingsView() {
   settingsEl.hidden = true;
   appShell.style.display = '';
   cleanupSettingsScrollSpy();
+  closeSettingsRitualsChannelPicker();
   closeSettingsDropdown();
   closeSettingsCalendarModal();
   applySettingsToApp();
@@ -22063,6 +22089,77 @@ function renderSettingsTimeboxing() {
     ${settingsRowHTML('Visualize actual time for tasks on calendar', "Show when you've tracked actually working on a task on your calendar.", settingsToggleHTML('visualizeActualTimeOnCalendar', settings.visualizeActualTimeOnCalendar))}
     ${settingsRowHTML('Default duration when scheduling tasks', 'When you drag a task onto your calendar, how much time to block off', settingsSelectHTML('defaultTimeboxDurationMinutes', label))}
   </section>`;
+}
+
+function renderSettingsRitualsChannelPickerHtml() {
+  if (!settingsRitualsChannelPickerState) return '';
+  const filtered = getFilteredChannels(settingsRitualsChannelPickerState.query || '');
+  const selectedId = settings.ritualTaskChannelId || 'unassigned';
+  const listHtml = renderChannelOptionListHTML(filtered, {
+    selectedId,
+    highlightIndex: settingsRitualsChannelPickerState.highlightIndex,
+    itemIdAttr: 'data-settings-rituals-channel-id',
+    itemIndexAttr: 'data-settings-rituals-channel-idx'
+  });
+  return `<div class="channel-picker settings-calendars__channel-picker settings-rituals__channel-picker" data-settings-rituals-channel-picker>
+    <div class="channel-picker__arrow"></div>
+    <div class="channel-picker__header">Assign to channel:</div>
+    <input class="channel-picker__search" placeholder="Search..." type="text" value="${escapeHtml(settingsRitualsChannelPickerState.query || '')}" data-settings-rituals-channel-search>
+    <div class="channel-picker__list">${listHtml}</div>
+    <div class="channel-picker__divider"></div>
+    <a class="channel-picker__manage" href="#" data-settings-rituals-manage-channels>Manage channels</a>
+  </div>`;
+}
+
+function renderSettingsRituals() {
+  const controlHtml = `<div class="settings-view__dropdown-anchor settings-calendars__picker-anchor settings-rituals__picker-anchor">
+    <button class="settings-calendars__picker-btn${settings.ritualTaskChannelId ? '' : ' settings-calendars__picker-btn--placeholder'}" type="button" data-settings-rituals-channel-btn aria-expanded="${settingsRitualsChannelPickerState ? 'true' : 'false'}">
+      ${getSettingsCalendarChannelButtonHtml(settings.ritualTaskChannelId)}
+    </button>
+    ${renderSettingsRitualsChannelPickerHtml()}
+  </div>`;
+
+  return `<section class="settings-view__section" id="settings-section-rituals">
+    <h2 class="settings-view__section-title">Rituals</h2>
+    ${settingsRowHTML('Default channel for rituals tasks', 'Planning and reflection tasks will automatically be created in this channel', controlHtml)}
+  </section>`;
+}
+
+function rerenderSettingsRitualsSection() {
+  const ritualsSection = document.getElementById('settings-section-rituals');
+  if (!ritualsSection) return;
+  ritualsSection.outerHTML = renderSettingsRituals();
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+function closeSettingsRitualsChannelPicker(options = {}) {
+  if (!settingsRitualsChannelPickerState) return;
+  settingsRitualsChannelPickerState = null;
+  const picker = document.querySelector('[data-settings-rituals-channel-picker]');
+  if (picker) picker.remove();
+  if (options.rerender) rerenderSettingsRitualsSection();
+}
+
+function selectSettingsRitualsChannel(channelId) {
+  settings.ritualTaskChannelId = channelId === 'unassigned' ? null : channelId;
+  normalizeRitualSettings();
+  settingsRitualsChannelPickerState = null;
+  persistSettings();
+  rerenderSettingsRitualsSection();
+}
+
+function updateSettingsRitualsChannelPickerList() {
+  if (!settingsRitualsChannelPickerState) return;
+  const picker = document.querySelector('[data-settings-rituals-channel-picker]');
+  const list = picker ? picker.querySelector('.channel-picker__list') : null;
+  if (!list) return;
+  const filtered = getFilteredChannels(settingsRitualsChannelPickerState.query || '');
+  list.innerHTML = renderChannelOptionListHTML(filtered, {
+    selectedId: settings.ritualTaskChannelId || 'unassigned',
+    highlightIndex: settingsRitualsChannelPickerState.highlightIndex,
+    itemIdAttr: 'data-settings-rituals-channel-id',
+    itemIndexAttr: 'data-settings-rituals-channel-idx'
+  });
 }
 
 function renderSettingsSchedule() {
@@ -22792,6 +22889,7 @@ function renderSettingsContent() {
     ${renderSettingsGeneral()}
     ${renderSettingsDisplay()}
     ${renderSettingsTimeboxing()}
+    ${renderSettingsRituals()}
     ${renderSettingsSchedule()}
     ${renderSettingsChannels()}
     ${renderSettingsCalendars()}
@@ -23282,6 +23380,7 @@ function handleChannelSave() {
 
   rebuildChannelColors();
   normalizeCalendarSettings();
+  normalizeRitualSettings();
   persistSettings();
   closeChannelModal();
 
@@ -23317,6 +23416,7 @@ function handleChannelDelete() {
   delete settings.channelEnabled[data.id];
   rebuildChannelColors();
   normalizeCalendarSettings();
+  normalizeRitualSettings();
   persistSettings();
   closeChannelModal();
 
@@ -23404,6 +23504,40 @@ function attachSettingsEvents() {
           scheduleSection.outerHTML = renderSettingsSchedule();
           if (typeof lucide !== 'undefined') lucide.createIcons();
         }
+      }
+      return;
+    }
+
+    const ritualsChannelBtn = e.target.closest('[data-settings-rituals-channel-btn]');
+    if (ritualsChannelBtn) {
+      e.preventDefault();
+      settingsRitualsChannelPickerState = settingsRitualsChannelPickerState
+        ? null
+        : { query: '', highlightIndex: 0 };
+      rerenderSettingsRitualsSection();
+      if (settingsRitualsChannelPickerState) {
+        requestAnimationFrame(() => {
+          const input = document.querySelector('[data-settings-rituals-channel-search]');
+          if (input) input.focus();
+        });
+      }
+      return;
+    }
+
+    const ritualsChannelOption = e.target.closest('[data-settings-rituals-channel-id]');
+    if (ritualsChannelOption) {
+      e.preventDefault();
+      selectSettingsRitualsChannel(ritualsChannelOption.getAttribute('data-settings-rituals-channel-id'));
+      return;
+    }
+
+    if (e.target.closest('[data-settings-rituals-manage-channels]')) {
+      e.preventDefault();
+      closeSettingsRitualsChannelPicker({ rerender: true });
+      const channelsSection = document.getElementById('settings-section-channels');
+      if (channelsSection) {
+        channelsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        setSettingsActiveNav('channels');
       }
       return;
     }
@@ -23530,10 +23664,27 @@ function attachSettingsEvents() {
     if (settingsDropdownOpen && !e.target.closest('[data-settings-dropdown]')) {
       closeSettingsDropdown();
     }
+
+    if (
+      settingsRitualsChannelPickerState
+      && !e.target.closest('[data-settings-rituals-channel-picker]')
+      && !e.target.closest('[data-settings-rituals-channel-btn]')
+    ) {
+      closeSettingsRitualsChannelPicker({ rerender: true });
+    }
   });
 
   // Text inputs
   settingsView.addEventListener('input', e => {
+    const ritualsChannelSearch = e.target.closest('[data-settings-rituals-channel-search]');
+    if (ritualsChannelSearch) {
+      if (!settingsRitualsChannelPickerState) return;
+      settingsRitualsChannelPickerState.query = ritualsChannelSearch.value;
+      settingsRitualsChannelPickerState.highlightIndex = 0;
+      updateSettingsRitualsChannelPickerList();
+      return;
+    }
+
     const input = e.target.closest('[data-settings-input]');
     if (input) {
       const key = input.dataset.settingsInput;
@@ -23547,6 +23698,39 @@ function attachSettingsEvents() {
         avatar.textContent = initials;
       }
     }
+  });
+
+  settingsView.addEventListener('keydown', e => {
+    const ritualsChannelSearch = e.target.closest('[data-settings-rituals-channel-search]');
+    if (!ritualsChannelSearch || !settingsRitualsChannelPickerState) return;
+
+    const filtered = getFilteredChannels(settingsRitualsChannelPickerState.query || '');
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSettingsRitualsChannelPicker({ rerender: true });
+      return;
+    }
+    if (!filtered.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      settingsRitualsChannelPickerState.highlightIndex = Math.min(settingsRitualsChannelPickerState.highlightIndex + 1, filtered.length - 1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      settingsRitualsChannelPickerState.highlightIndex = Math.max(settingsRitualsChannelPickerState.highlightIndex - 1, 0);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const selected = filtered[settingsRitualsChannelPickerState.highlightIndex];
+      selectSettingsRitualsChannel(selected ? selected.id : 'unassigned');
+      return;
+    } else {
+      return;
+    }
+
+    updateSettingsRitualsChannelPickerList();
+    const highlighted = document.querySelector('[data-settings-rituals-channel-picker] .channel-picker__item--highlighted');
+    if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
   });
 
   // File upload (use event delegation since input is JS-rendered)
@@ -23595,6 +23779,12 @@ function attachSettingsEvents() {
       } else {
         closeSettingsCalendarModal();
       }
+      return;
+    }
+
+    if (settingsRitualsChannelPickerState) {
+      e.preventDefault();
+      closeSettingsRitualsChannelPicker({ rerender: true });
       return;
     }
 
@@ -23969,6 +24159,7 @@ async function onAuthReady(userId) {
 
   normalizeSearchSettings();
   normalizeCalendarSettings();
+  normalizeRitualSettings();
 
   // Initialize day window first so columns exist
   initializeApp();

@@ -26,6 +26,7 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
 - Stay compatible with the current global-script style. Do not introduce ESM imports, bundler-only syntax, or a Node-based runtime assumption unless the user explicitly asks for a larger refactor.
 - The app state is primarily stored in module-level objects such as `state`, `settings`, `dailyPlanningState`, `dailyShutdownState`, `todayViewState`, and several drag/overlay state objects.
 - View-level task filtering is transient UI state, not persisted settings. The shared Home/Today filter also drives Backlog, Archive, and task-linked calendar events; Daily Planning and Daily Shutdown each have their own temporary filter state and both reset their own filter plus the shared Home/Today filter when entering the ritual.
+- Task channel tags should be written in canonical task-tag form, `#channelLabel` or `null`. Older bare-label tags may still exist, so channel matching/rendering should continue to normalize both bare labels and `#` labels.
 - Task persistence depends on `taskToDoc`, `docToTask`, `getTaskContext`, and `persistTask`. If task fields change, update both serialization and deserialization paths.
 - Repeating tasks use two layers:
   - persisted `repeatSeries` records in `state.repeatSeries`
@@ -34,7 +35,7 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
 - Special task locations use sentinel `columnDate` values:
   - `__backlog__`
   - `__archive__`
-- Settings persistence also stores channel definitions. Preserve the migration behavior in `onAuthReady()` that hydrates saved `channels` before merging settings.
+- Settings persistence also stores channel definitions. Preserve the migration behavior in `onAuthReady()` that hydrates saved `channels` before merging settings. Settings that store channel IDs, such as `settings.ritualTaskChannelId`, should be normalized after channels are hydrated so deleted channels fall back safely.
 
 ## Editing Guidelines
 
@@ -58,7 +59,7 @@ These instructions apply to the entire repository rooted at `/Users/shaida/repos
   - repeat navigation helpers such as `getRepeatNavigationDate()`
   - `renderRepeatBannerHtml()`
   - trash restore / expiration flows
-- When changing channels or settings behavior, verify `rebuildChannelColors()`, `settings.channelEnabled`, settings rendering, and saved-settings hydration still agree.
+- When changing channels or settings behavior, verify `rebuildChannelColors()`, `settings.channelEnabled`, settings rendering, saved-settings hydration, and channel-ID settings normalization still agree.
 
 ## Frontend Expectations
 
@@ -98,6 +99,7 @@ Recommended smoke checks:
 - If your change touches manual scheduled events, smoke-test both creation and editing flows: empty-space click/drag creation, quick-create modal, full modal, all-day row rendering, move/resize/delete, and persistence after refresh.
 - Check topbar filtering if your change touches channels, board rendering, backlog/archive panels, or the calendar timeline. Home/Today/Backlog/Archive should stay aligned; Search and Trash should not be affected by the active topbar filter.
 - Open Settings and verify updated values persist if your change touches settings or channels.
+- If your change touches ritual tasks or settings channels, verify the Settings > Rituals default channel picker persists, new Daily Planning/Daily Shutdown system tasks use the chosen channel, and existing ritual tasks are not retagged when the setting changes.
 - Confirm icons and Quill editors still initialize after any markup or script-order changes.
 
 ## Refactor Guidance
@@ -118,6 +120,7 @@ Recommended smoke checks:
 - The search panel channel dropdown is intentionally grouped like the regular channel picker: contexts first, enabled child channels nested under them, uncategorized enabled channels next, and `Unassigned` last. Keep it aligned with `CHANNELS` plus `settings.channelEnabled` behavior.
 - The topbar filter picker intentionally mirrors the regular channel picker styling and grouping, but with `#all` first and `#Unassigned` last. Keep its item rendering and typography aligned with the regular channel picker instead of introducing a separate visual treatment.
 - The shared Home/Today filter is coupled to Backlog and Archive panel filtering and to task-linked calendar timeline filtering. Search and Trash intentionally ignore the active topbar filter.
+- Settings has a Rituals section between Timeboxing and Schedule. `settings.ritualTaskChannelId` stores the stable channel ID for newly created Daily Planning/Daily Shutdown system tasks only; it should not retag existing ritual tasks when changed. Use the shared channel picker visual behavior and keep `normalizeRitualSettings()` aligned with channel create/delete/hydration paths.
 - The Daily Planning sidebar item now has three today-only states: unvisited shows a small pink dot, visited-but-incomplete shows no indicator, and completed shows dimmed label/icon plus a check. That state is driven by `dailyPlanningState.visitedByDate` and `dailyPlanningState.runHistoryByDate`, with the sidebar DOM in `index.html` and styling in `styles.css`.
 - Daily Planning can now start with an injected prior-shutdown review page for yesterday when planning today and `dailyShutdownHistory[yesterday]` is missing. That pre-step is not a numbered Daily Planning step, reuses the Daily Shutdown review panel/columns inside Daily Planning mode, and must not mark shutdown complete by itself. Keep `dailyPlanningState.showPriorShutdownReview` / `showingPriorShutdownReview` / `priorShutdownReviewDateISO`, `dailyShutdownState.historyByDate`, `goToNextDailyPlanningStep()`, `goToPrevDailyPlanningStep()`, and `updateTodayButtonLabel()` aligned if you change ritual flow.
 - Daily Planning step 1 can temporarily branch from the shutdown-time card into a `Fill in calendar events` card. That branch is transient UI state in `dailyPlanningState.calendarEventsMode` and `calendarEventPickerSelectedIds`; do not persist it. Eligible events are unlinked, timed scheduled events on the selected planning date. Bulk-add must reuse the same event-backed task linking path as the scheduled-event modal / hover-card `Add to tasks` action.

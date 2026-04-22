@@ -9415,6 +9415,10 @@ body.modal-open {
   right: 34px;
 }
 
+.settings-rituals__picker-anchor {
+  min-width: 160px;
+}
+
 @media (max-width: 1000px) {
   .settings-view__section--calendars {
     width: 100%;
