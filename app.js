@@ -10,8 +10,17 @@ let floatingTooltipEl = null;
 let activeFloatingTooltipTarget = null;
 let activeFloatingTooltipConfig = null;
 let floatingTooltipShowTimer = null;
+let calendarHoverCardEl = null;
 
 const FLOATING_TOOLTIP_DELAY_MS = 1000;
+const CALENDAR_HOVER_CLOSE_DELAY_MS = 90;
+
+const calendarHoverState = {
+  anchorEl: null,
+  eventId: null,
+  source: null,
+  closeTimer: null
+};
 
 const QUILL_EDITOR_CONFIG = {
   theme: 'snow',
@@ -267,6 +276,9 @@ const DEFAULT_SEARCH_FILTERS = {
   hidePlanningTasks: true,
   hideRepeatingTasks: false
 };
+const SETTINGS_SUNSAMA_ACCOUNT_ID = 'calendar-account-sunsama';
+const SETTINGS_SUNSAMA_CALENDAR_ID = 'calendar-sunsama-primary';
+const DEFAULT_SUNSAMA_CALENDAR_COLOR = '#ffb74d';
 const settings = {
   // General
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -303,6 +315,8 @@ const settings = {
   // Channels
   channelEnabled: {},
   defaultChannelId: null,
+  // Calendars
+  calendarAccounts: createDefaultCalendarAccounts(),
   // Search
   searchFilters: { ...DEFAULT_SEARCH_FILTERS },
   searchDateRange: 'anytime',
@@ -317,6 +331,30 @@ const userSettings = {
       .map(d => d.day);
   }
 };
+
+function createDefaultSunsamaCalendar() {
+  return {
+    id: SETTINGS_SUNSAMA_CALENDAR_ID,
+    name: 'Sunsama Calendar',
+    color: DEFAULT_SUNSAMA_CALENDAR_COLOR,
+    importChannelId: null,
+    timeboxChannelId: null,
+    importEvents: false,
+    enabled: true,
+    defaultForTaskScheduling: true,
+    defaultForEventScheduling: true
+  };
+}
+
+function createDefaultCalendarAccounts() {
+  return [{
+    id: SETTINGS_SUNSAMA_ACCOUNT_ID,
+    provider: 'sunsama',
+    label: 'sunsama',
+    removable: false,
+    calendars: [createDefaultSunsamaCalendar()]
+  }];
+}
 const WORKDAY_SCROLL_LEAD_HOURS = 1;
 const MIN_CALENDAR_ZOOM = 1;
 const MAX_CALENDAR_ZOOM = 3;
@@ -1758,6 +1796,164 @@ function getCalendarEventClassForColor(color) {
   return eventClassMap[String(color || '').toLowerCase()] || DEFAULT_CALENDAR_EVENT_CLASS;
 }
 
+function normalizeCalendarSettings() {
+  const fallbackAccounts = createDefaultCalendarAccounts();
+  const sourceAccounts = Array.isArray(settings.calendarAccounts) && settings.calendarAccounts.length
+    ? settings.calendarAccounts
+    : fallbackAccounts;
+
+  const normalizedAccounts = sourceAccounts.map((account, accountIndex) => {
+    const isSunsamaAccount = account && account.id === SETTINGS_SUNSAMA_ACCOUNT_ID;
+    const fallbackCalendar = isSunsamaAccount ? createDefaultSunsamaCalendar() : {
+      id: account && account.id ? `${account.id}-calendar-1` : `calendar-account-${accountIndex + 1}-1`,
+      name: account && account.label ? `${account.label} Calendar` : 'Calendar',
+      color: DEFAULT_SUNSAMA_CALENDAR_COLOR,
+      importChannelId: null,
+      timeboxChannelId: null,
+      importEvents: false,
+      enabled: true,
+      defaultForTaskScheduling: false,
+      defaultForEventScheduling: false
+    };
+    const rawCalendars = Array.isArray(account && account.calendars) && account.calendars.length
+      ? account.calendars
+      : [fallbackCalendar];
+
+    return {
+      id: account && account.id ? account.id : `calendar-account-${accountIndex + 1}`,
+      provider: account && account.provider ? account.provider : (isSunsamaAccount ? 'sunsama' : 'custom'),
+      label: account && account.label ? account.label : (isSunsamaAccount ? 'sunsama' : 'calendar'),
+      removable: !!(account && account.removable),
+      calendars: rawCalendars.map((calendar, calendarIndex) => {
+        const fallbackId = `${account && account.id ? account.id : `calendar-account-${accountIndex + 1}`}-calendar-${calendarIndex + 1}`;
+        return {
+          id: calendar && calendar.id ? calendar.id : fallbackId,
+          name: calendar && calendar.name ? calendar.name : `Calendar ${calendarIndex + 1}`,
+          color: calendar && calendar.color ? calendar.color : DEFAULT_SUNSAMA_CALENDAR_COLOR,
+          importChannelId: getChannelById(calendar && calendar.importChannelId) ? calendar.importChannelId : null,
+          timeboxChannelId: getChannelById(calendar && calendar.timeboxChannelId) ? calendar.timeboxChannelId : null,
+          importEvents: !!(calendar && calendar.importEvents),
+          enabled: calendar && calendar.enabled !== false,
+          defaultForTaskScheduling: !!(calendar && calendar.defaultForTaskScheduling),
+          defaultForEventScheduling: !!(calendar && calendar.defaultForEventScheduling)
+        };
+      })
+    };
+  });
+
+  let sunsamaAccount = normalizedAccounts.find(account => account.id === SETTINGS_SUNSAMA_ACCOUNT_ID);
+  if (!sunsamaAccount) {
+    sunsamaAccount = createDefaultCalendarAccounts()[0];
+    normalizedAccounts.unshift(sunsamaAccount);
+  }
+
+  let sunsamaCalendar = sunsamaAccount.calendars.find(calendar => calendar.id === SETTINGS_SUNSAMA_CALENDAR_ID);
+  if (!sunsamaCalendar) {
+    sunsamaCalendar = createDefaultSunsamaCalendar();
+    sunsamaAccount.calendars.unshift(sunsamaCalendar);
+  }
+
+  sunsamaAccount.provider = 'sunsama';
+  sunsamaAccount.label = 'sunsama';
+  sunsamaAccount.removable = false;
+  sunsamaCalendar.enabled = true;
+
+  const allCalendars = normalizedAccounts.flatMap(account => account.calendars);
+  if (!allCalendars.length) {
+    settings.calendarAccounts = createDefaultCalendarAccounts();
+    return;
+  }
+
+  let enabledCalendars = allCalendars.filter(calendar => calendar.enabled !== false);
+  if (!enabledCalendars.length) {
+    sunsamaCalendar.enabled = true;
+    enabledCalendars = [sunsamaCalendar];
+  }
+
+  const singleCalendar = allCalendars.length === 1;
+  if (singleCalendar) {
+    const onlyCalendar = allCalendars[0];
+    onlyCalendar.enabled = true;
+    onlyCalendar.defaultForTaskScheduling = true;
+    onlyCalendar.defaultForEventScheduling = true;
+  } else {
+    const taskDefaults = allCalendars.filter(calendar => calendar.defaultForTaskScheduling);
+    const resolvedTaskDefault = taskDefaults.find(calendar => calendar.enabled !== false) || enabledCalendars[0] || sunsamaCalendar;
+    allCalendars.forEach(calendar => {
+      calendar.defaultForTaskScheduling = calendar.id === resolvedTaskDefault.id;
+    });
+
+    const eventDefaults = allCalendars.filter(calendar => calendar.defaultForEventScheduling);
+    const resolvedEventDefault = eventDefaults.find(calendar => calendar.enabled !== false) || enabledCalendars[0] || sunsamaCalendar;
+    allCalendars.forEach(calendar => {
+      calendar.defaultForEventScheduling = calendar.id === resolvedEventDefault.id;
+    });
+  }
+
+  settings.calendarAccounts = normalizedAccounts;
+}
+
+function getCalendarAccounts() {
+  if (!Array.isArray(settings.calendarAccounts)) {
+    settings.calendarAccounts = createDefaultCalendarAccounts();
+  }
+  return settings.calendarAccounts;
+}
+
+function getCalendarAccountById(accountId) {
+  return getCalendarAccounts().find(account => account.id === accountId) || null;
+}
+
+function getCalendarEntry(accountId, calendarId) {
+  const account = getCalendarAccountById(accountId);
+  if (!account) return null;
+  const calendar = (account.calendars || []).find(item => item.id === calendarId) || null;
+  return calendar ? { account, calendar } : null;
+}
+
+function getAllCalendarEntries() {
+  return getCalendarAccounts().flatMap(account => (
+    (account.calendars || []).map(calendar => ({ account, calendar }))
+  ));
+}
+
+function isOnlyCalendar(calendarId) {
+  const entries = getAllCalendarEntries();
+  return entries.length === 1 && entries[0] && entries[0].calendar.id === calendarId;
+}
+
+function isPrimarySunsamaCalendar(accountId, calendarId) {
+  return accountId === SETTINGS_SUNSAMA_ACCOUNT_ID && calendarId === SETTINGS_SUNSAMA_CALENDAR_ID;
+}
+
+function getDefaultCalendarEntryForUsage(defaultField) {
+  const entries = getAllCalendarEntries().filter(entry => entry && entry.calendar && entry.calendar.enabled !== false);
+  return entries.find(entry => !!entry.calendar[defaultField]) || entries[0] || null;
+}
+
+function getScheduledEventCalendarStyle(eventLike = null) {
+  const explicitEntry = eventLike && eventLike.calendarAccountId && eventLike.calendarId
+    ? getCalendarEntry(eventLike.calendarAccountId, eventLike.calendarId)
+    : null;
+  const fallbackEntry = getDefaultCalendarEntryForUsage('defaultForEventScheduling')
+    || getCalendarEntry(SETTINGS_SUNSAMA_ACCOUNT_ID, SETTINGS_SUNSAMA_CALENDAR_ID);
+  const resolvedEntry = explicitEntry || fallbackEntry;
+  const account = resolvedEntry && resolvedEntry.account
+    ? resolvedEntry.account
+    : { id: SETTINGS_SUNSAMA_ACCOUNT_ID, provider: 'sunsama' };
+  const calendar = resolvedEntry && resolvedEntry.calendar
+    ? resolvedEntry.calendar
+    : createDefaultSunsamaCalendar();
+  const color = calendar.color || DEFAULT_SUNSAMA_CALENDAR_COLOR;
+  return {
+    accountId: account.id || SETTINGS_SUNSAMA_ACCOUNT_ID,
+    calendarId: calendar.id || SETTINGS_SUNSAMA_CALENDAR_ID,
+    provider: account.provider || 'sunsama',
+    color,
+    eventClass: getCalendarEventClassForColor(color)
+  };
+}
+
 function getManualScheduledEventStyle(channelId = null) {
   const channel = channelId ? getChannelById(channelId) : null;
   if (channel) {
@@ -1811,7 +2007,10 @@ function normalizeCalendarEventRecord(event) {
   normalized.externalSourceId = normalized.externalSourceId || null;
   normalized.sourceProvider = getCalendarEventSourceProvider(normalized);
   if (isManualScheduledEvent(normalized)) {
-    const style = getManualScheduledEventStyle(normalized.channelId);
+    const style = getScheduledEventCalendarStyle(normalized);
+    normalized.calendarAccountId = style.accountId;
+    normalized.calendarId = style.calendarId;
+    normalized.sourceProvider = normalized.sourceProvider || style.provider;
     normalized.colorClass = style.eventClass;
   } else if (!normalized.colorClass) {
     normalized.colorClass = DEFAULT_CALENDAR_EVENT_CLASS;
@@ -2288,9 +2487,9 @@ function syncCalendarEventTaskChannel(task, channelId) {
   const event = getLinkedCalendarEventForTask(task);
   if (!event) return false;
   event.channelId = channelId || null;
-  const style = getManualScheduledEventStyle(event.channelId);
+  const style = getScheduledEventCalendarStyle(event);
   event.colorClass = style.eventClass;
-  event.sourceProvider = getCalendarEventSourceProvider(event) || 'sunsama';
+  event.sourceProvider = getCalendarEventSourceProvider(event) || style.provider || 'sunsama';
   applyCalendarEventTaskMirrorFields(task, event);
   persistCalendarEvent(event);
   persistTask(task, 0);
@@ -7361,6 +7560,430 @@ function formatTimeRange(offset, duration) {
   return `${formatOffsetAsClock(offset)} – ${formatOffsetAsClock(offset + duration)}`;
 }
 
+function formatCalendarHoverTimeRange(offset, duration) {
+  return `${formatScheduledEventTimeLabel(offset)} - ${formatScheduledEventTimeLabel(offset + duration)}`;
+}
+
+function formatCalendarHoverDuration(durationHours) {
+  const minutes = Math.max(0, Math.round((Number(durationHours) || 0) * 60));
+  if (minutes <= 0) return '0min';
+  if (minutes < 60) return `${minutes}min`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours}h ${remainingMinutes}min` : `${hours}h`;
+}
+
+function getCalendarHoverTaskChannel(task) {
+  if (!task || !task.tag) return null;
+  const style = getChannelStyle(task.tag);
+  if (!style) return null;
+  return {
+    label: String(task.tag).replace(/^#/, ''),
+    color: style.hashColor
+  };
+}
+
+function getCalendarHoverEventChannel(event) {
+  const channel = event && event.channelId ? getChannelById(event.channelId) : null;
+  if (!channel) return null;
+  return {
+    label: channel.label,
+    color: channel.hashColor
+  };
+}
+
+function renderCalendarHoverInfoRow(iconName, label, options = {}) {
+  if (!label) return '';
+  const mutedClass = options.muted ? ' calendar-hover-card__row--muted' : '';
+  return `
+    <div class="calendar-hover-card__row${mutedClass}">
+      <span class="calendar-hover-card__row-icon" aria-hidden="true"><i data-lucide="${escapeHtml(iconName)}"></i></span>
+      <span class="calendar-hover-card__row-label">${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
+function renderCalendarHoverChannelRow(channel) {
+  if (!channel) return '';
+  return `
+    <div class="calendar-hover-card__row calendar-hover-card__row--channel">
+      <span class="calendar-hover-card__channel-hash" style="color:${escapeHtml(channel.color)};" aria-hidden="true">#</span>
+      <span class="calendar-hover-card__row-label">${escapeHtml(channel.label)}</span>
+    </div>
+  `;
+}
+
+function renderCalendarHoverIconButton(action, iconName, label, extraClass = '') {
+  return `
+    <button class="calendar-hover-card__icon-btn${extraClass ? ` ${extraClass}` : ''}" type="button" data-calendar-hover-action="${escapeHtml(action)}" aria-label="${escapeHtml(label)}">
+      <i data-lucide="${escapeHtml(iconName)}"></i>
+    </button>
+  `;
+}
+
+function renderCalendarHoverPillButton(action, label, iconName = '') {
+  const iconHtml = iconName
+    ? `<i data-lucide="${escapeHtml(iconName)}"></i>`
+    : '';
+  return `
+    <button class="calendar-hover-card__pill-btn" type="button" data-calendar-hover-action="${escapeHtml(action)}" aria-label="${escapeHtml(label)}">
+      ${iconHtml}
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function getCalendarHoverPayload(eventId) {
+  const event = findCalendarEventById(eventId);
+  if (!event || event.isDraftPreview) return null;
+  const task = event.taskId ? findTaskById(event.taskId) : null;
+  if (event.systemType === 'actual') {
+    return {
+      type: 'actual',
+      event,
+      task,
+      channel: getCalendarHoverTaskChannel(task)
+    };
+  }
+  if (isManualScheduledEvent(event)) {
+    return {
+      type: 'scheduled_event',
+      event,
+      task: getLinkedTaskForCalendarEvent(event),
+      channel: getCalendarHoverEventChannel(event)
+    };
+  }
+  if (event.taskId) {
+    return {
+      type: 'scheduled_task',
+      event,
+      task,
+      channel: getCalendarHoverTaskChannel(task)
+    };
+  }
+  return null;
+}
+
+function renderCalendarHoverCardContent(payload) {
+  if (!payload || !payload.event) return '';
+  const { type, event, channel } = payload;
+  const isAllDayScheduledEvent = type === 'scheduled_event' && !!event.allDay;
+  const title = event.title || '';
+  let actionButtonsHtml = '';
+  let detailRowsHtml = '';
+  let metaRowsHtml = '';
+
+  if (type === 'actual') {
+    actionButtonsHtml = renderCalendarHoverIconButton('delete-actual', 'trash-2', 'Delete actual time');
+    detailRowsHtml = [
+      renderCalendarHoverInfoRow('clock-4', formatCalendarHoverTimeRange(event.offset, event.duration)),
+      renderCalendarHoverInfoRow('timer', formatCalendarHoverDuration(event.duration)),
+      renderCalendarHoverChannelRow(channel)
+    ].join('');
+    metaRowsHtml = [
+      renderCalendarHoverInfoRow('timer', 'Actual time', { muted: true }),
+      renderCalendarHoverInfoRow('eye-off', 'Only visible to you in Sunsama', { muted: true })
+    ].join('');
+  } else if (type === 'scheduled_task') {
+    actionButtonsHtml = renderCalendarHoverPillButton('delete-scheduled-task', 'Unpin from calendar', 'pin-off');
+    detailRowsHtml = [
+      renderCalendarHoverInfoRow('clock-4', formatCalendarHoverTimeRange(event.offset, event.duration)),
+      renderCalendarHoverChannelRow(channel)
+    ].join('');
+    metaRowsHtml = [
+      renderCalendarHoverInfoRow('calendar-days', 'Scheduled task', { muted: true }),
+      renderCalendarHoverInfoRow('calendar-x', 'Blocking', { muted: true }),
+      renderCalendarHoverInfoRow('eye-off', 'Only visible to you in Sunsama', { muted: true })
+    ].join('');
+  } else if (type === 'scheduled_event') {
+    const linkedTask = getLinkedTaskForCalendarEvent(event);
+    const blocksTaskScheduling = isCalendarEventBlockingForTaskScheduling(event);
+    const taskBlockingIcon = blocksTaskScheduling ? 'calendar-x' : 'calendar';
+    if (!linkedTask) {
+      actionButtonsHtml += renderCalendarHoverPillButton('add-to-tasks', 'Add to tasks');
+    }
+    actionButtonsHtml += [
+      renderCalendarHoverIconButton('toggle-task-blocking', taskBlockingIcon, blocksTaskScheduling ? 'Allow task scheduling during event' : 'Block task scheduling during event'),
+      renderCalendarHoverIconButton('delete-event', 'trash-2', 'Delete scheduled event')
+    ].join('');
+    detailRowsHtml = [
+      isAllDayScheduledEvent
+        ? renderCalendarHoverInfoRow('calendar-days', formatScheduledEventDateRangeLabel(event.date, event.endDate))
+        : renderCalendarHoverInfoRow('clock-4', formatCalendarHoverTimeRange(event.offset, event.duration)),
+      isAllDayScheduledEvent ? renderCalendarHoverInfoRow('clock-4', 'All day') : '',
+      renderCalendarHoverChannelRow(channel)
+    ].join('');
+    metaRowsHtml = [
+      renderCalendarHoverInfoRow('calendar-days', 'Scheduled event', { muted: true }),
+      renderCalendarHoverInfoRow(taskBlockingIcon, blocksTaskScheduling ? 'Blocking' : 'Non-blocking', { muted: true }),
+      renderCalendarHoverInfoRow('eye-off', 'Only visible to you in Sunsama', { muted: true })
+    ].join('');
+  }
+
+  return `
+    <div class="calendar-hover-card__actions">
+      ${actionButtonsHtml}
+    </div>
+    <div class="calendar-hover-card__title">${escapeHtml(title)}</div>
+    <div class="calendar-hover-card__details">${detailRowsHtml}</div>
+    <div class="calendar-hover-card__divider"></div>
+    <div class="calendar-hover-card__meta">${metaRowsHtml}</div>
+  `;
+}
+
+function ensureCalendarHoverCardElement() {
+  if (calendarHoverCardEl && calendarHoverCardEl.isConnected) return calendarHoverCardEl;
+  const card = document.createElement('div');
+  card.className = 'calendar-hover-card';
+  card.hidden = true;
+  card.setAttribute('data-calendar-hover-card', '');
+  card.addEventListener('mouseenter', () => {
+    clearCalendarHoverCloseTimer();
+  });
+  card.addEventListener('mouseleave', e => {
+    if (calendarHoverState.anchorEl && e.relatedTarget instanceof Element && calendarHoverState.anchorEl.contains(e.relatedTarget)) {
+      return;
+    }
+    scheduleCalendarHoverClose();
+  });
+  card.addEventListener('click', e => {
+    const actionBtn = e.target instanceof Element ? e.target.closest('[data-calendar-hover-action]') : null;
+    if (actionBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const payload = getCalendarHoverPayload(calendarHoverState.eventId);
+      if (!payload) {
+        closeCalendarHoverCard();
+        return;
+      }
+      const action = actionBtn.getAttribute('data-calendar-hover-action');
+      closeCalendarHoverCard();
+      if (action === 'delete-actual') {
+        deleteActualTimeCalendarEventById(payload.event.id);
+      } else if (action === 'delete-scheduled-task') {
+        deleteScheduledTaskTimeboxByEventId(payload.event.id);
+      } else if (action === 'add-to-tasks') {
+        addCalendarEventToTasks(payload.event);
+      } else if (action === 'toggle-task-blocking') {
+        toggleScheduledEventTaskBlocking(payload.event.id);
+      } else if (action === 'delete-event') {
+        deleteScheduledEventById(payload.event.id);
+      }
+      return;
+    }
+    if (calendarHoverState.eventId) {
+      e.preventDefault();
+      e.stopPropagation();
+      const eventId = calendarHoverState.eventId;
+      closeCalendarHoverCard();
+      openCalendarItemFromEvent(eventId);
+    }
+  });
+  document.body.appendChild(card);
+  calendarHoverCardEl = card;
+  return card;
+}
+
+function clearCalendarHoverCloseTimer() {
+  if (calendarHoverState.closeTimer) {
+    clearTimeout(calendarHoverState.closeTimer);
+    calendarHoverState.closeTimer = null;
+  }
+}
+
+function scheduleCalendarHoverClose() {
+  clearCalendarHoverCloseTimer();
+  calendarHoverState.closeTimer = setTimeout(() => {
+    closeCalendarHoverCard();
+  }, CALENDAR_HOVER_CLOSE_DELAY_MS);
+}
+
+function closeCalendarHoverCard() {
+  clearCalendarHoverCloseTimer();
+  if (calendarHoverCardEl) {
+    calendarHoverCardEl.hidden = true;
+    calendarHoverCardEl.innerHTML = '';
+  }
+  calendarHoverState.anchorEl = null;
+  calendarHoverState.eventId = null;
+  calendarHoverState.source = null;
+}
+
+function positionCalendarHoverCard() {
+  const card = ensureCalendarHoverCardElement();
+  const anchor = calendarHoverState.anchorEl;
+  if (!anchor || !anchor.isConnected || card.hidden) {
+    closeCalendarHoverCard();
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  const spacing = 12;
+  const viewportPadding = 12;
+  const scrollX = window.scrollX || window.pageXOffset || 0;
+  const scrollY = window.scrollY || window.pageYOffset || 0;
+  let top = 0;
+  let left = 0;
+
+  if (calendarHoverState.source === 'all-day') {
+    left = rect.left + scrollX;
+    top = rect.bottom + scrollY + spacing;
+    if (left + card.offsetWidth > scrollX + window.innerWidth - viewportPadding) {
+      left = scrollX + window.innerWidth - viewportPadding - card.offsetWidth;
+    }
+    if (top + card.offsetHeight > scrollY + window.innerHeight - viewportPadding) {
+      top = rect.top + scrollY - card.offsetHeight - spacing;
+    }
+  } else {
+    top = rect.top + scrollY + (rect.height / 2) - (card.offsetHeight / 2);
+    left = rect.left + scrollX - card.offsetWidth - spacing;
+    if (left < scrollX + viewportPadding) {
+      left = rect.right + scrollX + spacing;
+    }
+  }
+
+  top = Math.max(scrollY + viewportPadding, Math.min(top, scrollY + window.innerHeight - viewportPadding - card.offsetHeight));
+  left = Math.max(scrollX + viewportPadding, Math.min(left, scrollX + window.innerWidth - viewportPadding - card.offsetWidth));
+  card.style.top = `${top}px`;
+  card.style.left = `${left}px`;
+}
+
+function showCalendarHoverCard(anchorEl, eventId, source) {
+  if (!anchorEl || !eventId || document.body.classList.contains('modal-open')) {
+    closeCalendarHoverCard();
+    return;
+  }
+  const payload = getCalendarHoverPayload(eventId);
+  if (!payload) {
+    closeCalendarHoverCard();
+    return;
+  }
+  const card = ensureCalendarHoverCardElement();
+  const isSameAnchor = calendarHoverState.anchorEl === anchorEl && calendarHoverState.eventId === eventId && calendarHoverState.source === source && !card.hidden;
+  clearCalendarHoverCloseTimer();
+  if (!isSameAnchor) {
+    calendarHoverState.anchorEl = anchorEl;
+    calendarHoverState.eventId = eventId;
+    calendarHoverState.source = source;
+    card.innerHTML = renderCalendarHoverCardContent(payload);
+    card.hidden = false;
+    if (typeof lucide !== 'undefined') {
+      lucide.createIcons({ nodes: [card] });
+    }
+  } else {
+    card.hidden = false;
+  }
+  positionCalendarHoverCard();
+}
+
+function resolveCalendarHoverAnchor(target) {
+  if (!(target instanceof Element)) return null;
+  const hoverCard = target.closest('[data-calendar-hover-card]');
+  if (hoverCard) {
+    return { type: 'card', el: hoverCard, eventId: calendarHoverState.eventId };
+  }
+  const allDayEvent = target.closest('[data-calendar-all-day-event]');
+  if (allDayEvent) {
+    return {
+      type: 'all-day',
+      el: allDayEvent,
+      eventId: allDayEvent.getAttribute('data-calendar-all-day-event') || ''
+    };
+  }
+  const timelineEvent = target.closest('.cal-event:not(#cal-event-ghost)');
+  if (timelineEvent && !timelineEvent.classList.contains('cal-event--draft-preview')) {
+    return {
+      type: 'timeline',
+      el: timelineEvent,
+      eventId: timelineEvent.getAttribute('data-event-id') || timelineEvent.dataset.eventId || ''
+    };
+  }
+  return null;
+}
+
+function deleteActualTimeCalendarEventById(eventId) {
+  const evt = findCalendarEventById(eventId);
+  if (!evt || evt.systemType !== 'actual' || !evt.taskId) return false;
+  const task = findTaskById(evt.taskId);
+  const durationSeconds = Math.round(evt.duration * 3600);
+  state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
+  if (task) {
+    if (evt.subtaskId) {
+      const subtask = findSubtask(task, evt.subtaskId);
+      if (subtask) {
+        subtask.actualTimeSeconds = Math.max(0, (subtask.actualTimeSeconds || 0) - durationSeconds);
+        recordDailyTime(task, evt.date, -durationSeconds, evt.subtaskId);
+      }
+    } else {
+      task.ownActualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) - durationSeconds);
+      recordDailyTime(task, evt.date, -durationSeconds, null);
+    }
+    syncTaskAggregateTimes(task);
+    const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
+    if (col) renderColumn(col);
+    updateFocusModalValues(task);
+    updateCardDetailTimerState();
+    persistTask(task, 0);
+  }
+  persistDeleteCalendarEvent(eventId);
+  renderCalendarEvents();
+  return true;
+}
+
+function deleteScheduledTaskTimeboxByEventId(eventId) {
+  const evt = findCalendarEventById(eventId);
+  if (!evt || evt.systemType === 'actual' || !evt.taskId) return false;
+  const task = findTaskById(evt.taskId);
+  const removedEventDate = evt.date;
+  if (!evt._dynamic) {
+    state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
+    persistDeleteCalendarEvent(eventId);
+  }
+  if (task) {
+    const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
+    const eventCol = state.columns.find(c => c.isoDate === removedEventDate);
+    if (homeCol && removedEventDate === homeCol.isoDate) {
+      task.scheduledTime = null;
+    }
+    if (homeCol) renderColumn(homeCol);
+    if (eventCol && eventCol !== homeCol) renderColumn(eventCol);
+    rerenderGhostColumns(task);
+    persistTask(task, 0);
+  }
+  renderCalendarEvents();
+  return true;
+}
+
+function openCalendarItemFromEvent(eventOrId) {
+  const evt = typeof eventOrId === 'string'
+    ? findCalendarEventById(eventOrId)
+    : eventOrId;
+  if (!evt) return false;
+  if (isManualScheduledEvent(evt)) {
+    openScheduledEventFullModalForEvent(evt.id);
+    return true;
+  }
+  if (evt.systemType === 'actual' && evt.taskId) {
+    const task = findTaskById(evt.taskId);
+    const linkedEvent = task ? getLinkedCalendarEventForTask(task) : null;
+    if (linkedEvent) {
+      openScheduledEventFullModalForEvent(linkedEvent.id);
+      return true;
+    }
+    if (task) {
+      openTaskDetailModal(task.id);
+      return true;
+    }
+    renderCalendarEvents();
+    return false;
+  }
+  if (evt.taskId) {
+    openTaskDetailModal(evt.taskId);
+    return true;
+  }
+  renderCalendarEvents();
+  return false;
+}
+
 function buildCalendarLaneLayout(events) {
   const sorted = [...events].sort((a, b) => {
     if (a.offset !== b.offset) return a.offset - b.offset;
@@ -7567,7 +8190,7 @@ function renderIntegrationIcon(taskOrColor) {
   if (taskOrColor && typeof taskOrColor === 'object') {
     const task = taskOrColor;
     if (isCalendarEventTask(task) && (task.calendarSourceProvider || 'sunsama') === 'sunsama') {
-      return `<span class="task-card__integration-icon task-card__integration-icon--image"><img src="images/icons/sunsama-icon.png" alt="" draggable="false"></span>`;
+      return `<span class="task-card__integration-icon task-card__integration-icon--image"><img src="images/icons/sunsama-icon.svg" alt="" draggable="false"></span>`;
     }
     const color = task.integrationColor || null;
     if (!color) return '';
@@ -10995,6 +11618,7 @@ function showToast(message, variant) {
 }
 
 function openFocusMode(taskId, autoStart, from, subtaskId = null) {
+  closeCalendarHoverCard();
   if (isTaskInTrash(taskId) || isTaskInBacklog(taskId)) {
     showToast('Must focus on today');
     return;
@@ -12197,6 +12821,7 @@ let openModalIsBacklog = false;
 let openModalIsArchive = false;
 
 function openTaskDetailModal(taskId) {
+  closeCalendarHoverCard();
   const directTask = findTaskById(taskId);
   if (isCalendarEventTask(directTask)) {
     openLinkedCalendarEventModalForTask(taskId);
@@ -12370,6 +12995,7 @@ function createScheduledEventDraft(isoDate, startOffset, durationHours) {
   const requestedDuration = Math.max(minDuration, durationHours);
   const safeStart = clampCalendarOffset(startOffset, requestedDuration);
   const safeDuration = Math.max(minDuration, Math.min(requestedDuration, DEFAULT_CALENDAR_TOTAL_HOURS - safeStart));
+  const calendarStyle = getScheduledEventCalendarStyle();
   return {
     id: null,
     title: '',
@@ -12379,7 +13005,9 @@ function createScheduledEventDraft(isoDate, startOffset, durationHours) {
     startOffset: safeStart,
     endOffset: safeStart + safeDuration,
     linkedTaskId: null,
-    sourceProvider: 'sunsama',
+    sourceProvider: calendarStyle.provider || 'sunsama',
+    calendarAccountId: calendarStyle.accountId,
+    calendarId: calendarStyle.calendarId,
     channelId: null,
     transparency: 'blocking',
     blocksTaskScheduling: true,
@@ -12393,6 +13021,7 @@ function buildScheduledEventDraftFromEvent(event) {
   const normalized = normalizeCalendarEventRecord(event);
   const minDuration = 1 / SNAP_STEPS_PER_HOUR;
   const duration = Math.max(minDuration, normalized.duration || (DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60));
+  const calendarStyle = getScheduledEventCalendarStyle(normalized);
   return {
     id: normalized.id,
     title: normalized.title || '',
@@ -12402,7 +13031,9 @@ function buildScheduledEventDraftFromEvent(event) {
     startOffset: Number.isFinite(normalized.offset) ? normalized.offset : 9,
     endOffset: Number.isFinite(normalized.offset) ? normalized.offset + duration : 9 + duration,
     linkedTaskId: normalized.linkedTaskId || null,
-    sourceProvider: getCalendarEventSourceProvider(normalized) || 'sunsama',
+    sourceProvider: getCalendarEventSourceProvider(normalized) || calendarStyle.provider || 'sunsama',
+    calendarAccountId: normalized.calendarAccountId || calendarStyle.accountId,
+    calendarId: normalized.calendarId || calendarStyle.calendarId,
     channelId: normalized.channelId || null,
     transparency: normalized.transparency === 'non_blocking' ? 'non_blocking' : 'blocking',
     blocksTaskScheduling: normalized.blocksTaskScheduling !== false,
@@ -12471,7 +13102,7 @@ function getScheduledEventCalendarPreviewEvent() {
   }
   const previewDraft = cloneScheduledEventDraft(scheduledEventModalState.draft);
   normalizeScheduledEventDraftTimes(previewDraft);
-  const style = getManualScheduledEventStyle(previewDraft.channelId);
+  const style = getScheduledEventCalendarStyle(previewDraft);
   return {
     id: '__scheduled-event-draft__',
     title: String(previewDraft.title || '').trim(),
@@ -12487,7 +13118,9 @@ function getScheduledEventCalendarPreviewEvent() {
     description: previewDraft.description || '',
     notes: previewDraft.notes || '',
     linkedTaskId: null,
-    sourceProvider: previewDraft.sourceProvider || 'sunsama',
+    sourceProvider: previewDraft.sourceProvider || style.provider || 'sunsama',
+    calendarAccountId: previewDraft.calendarAccountId || style.accountId,
+    calendarId: previewDraft.calendarId || style.calendarId,
     colorClass: style.eventClass,
     zOrder: ++calZCounter,
     isDraftPreview: true
@@ -12498,7 +13131,7 @@ function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
   if (!draft || !eventId) return null;
   const previewDraft = { ...draft };
   normalizeScheduledEventDraftTimes(previewDraft);
-  const style = getManualScheduledEventStyle(previewDraft.channelId);
+  const style = getScheduledEventCalendarStyle(previewDraft);
   return {
     id: eventId,
     title: String(previewDraft.title || '').trim(),
@@ -12514,7 +13147,9 @@ function buildScheduledEventPreviewEventFromDraft(draft, eventId) {
     description: previewDraft.description || '',
     notes: previewDraft.notes || '',
     linkedTaskId: previewDraft.linkedTaskId || null,
-    sourceProvider: previewDraft.sourceProvider || 'sunsama',
+    sourceProvider: previewDraft.sourceProvider || style.provider || 'sunsama',
+    calendarAccountId: previewDraft.calendarAccountId || style.accountId,
+    calendarId: previewDraft.calendarId || style.calendarId,
     colorClass: style.eventClass,
     zOrder: state.calendarEvents.find(event => event.id === eventId)?.zOrder || ++calZCounter
   };
@@ -12567,13 +13202,13 @@ function clearCalendarGhost() {
   if (timeEl) timeEl.textContent = '';
 }
 
-function renderScheduledEventDraftGhost(offset, duration, channelId = null) {
+function renderScheduledEventDraftGhost(offset, duration, draft = null) {
   const ghost = getCalendarGhostElement();
   if (!ghost) return;
-  const style = getManualScheduledEventStyle(channelId);
+  const style = getScheduledEventCalendarStyle(draft);
   ghost.hidden = false;
-  ghost.style.backgroundColor = hexToRgba(style.hashColor, 0.28);
-  ghost.style.borderColor = hexToRgba(style.hashColor, 0.95);
+  ghost.style.backgroundColor = hexToRgba(style.color, 0.28);
+  ghost.style.borderColor = hexToRgba(style.color, 0.95);
   ghost.style.borderStyle = 'dashed';
   ghost.style.borderWidth = '2px';
   ghost.style.zIndex = '1002';
@@ -12613,7 +13248,7 @@ function syncScheduledEventModalGhost() {
     clearCalendarGhost();
     return;
   }
-  renderScheduledEventDraftGhost(draft.startOffset, getScheduledEventDurationHours(draft), draft.channelId || null);
+  renderScheduledEventDraftGhost(draft.startOffset, getScheduledEventDurationHours(draft), draft);
 }
 
 function formatScheduledEventTimeLabel(offset) {
@@ -12653,8 +13288,8 @@ function getScheduledEventChannelLabel(channelId) {
 }
 
 function getScheduledEventChannelColor(channelId) {
-  if (!channelId) return '#b4b4b4';
-  return getManualScheduledEventStyle(channelId).hashColor;
+  const channel = channelId ? getChannelById(channelId) : null;
+  return channel && channel.hashColor ? channel.hashColor : '#b4b4b4';
 }
 
 function cloneScheduledEventDraft(draft) {
@@ -13234,6 +13869,7 @@ function renderScheduledEventModal() {
 }
 
 function openScheduledEventModal(draft, options = {}) {
+  closeCalendarHoverCard();
   closeTaskDetailModal();
   const nextDraft = {
     ...draft,
@@ -13346,7 +13982,7 @@ function saveScheduledEventModal() {
   }
 
   normalizeScheduledEventDraftTimes(draft);
-  const style = getManualScheduledEventStyle(draft.channelId);
+  const style = getScheduledEventCalendarStyle(draft);
   const duration = getScheduledEventDurationHours(draft);
   let event = draft.id ? state.calendarEvents.find(item => item.id === draft.id) : null;
   if (!event) {
@@ -13370,7 +14006,9 @@ function saveScheduledEventModal() {
   event.location = draft.location || '';
   event.description = draft.description || '';
   event.notes = draft.notes || '';
-  event.sourceProvider = draft.sourceProvider || 'sunsama';
+  event.sourceProvider = draft.sourceProvider || style.provider || 'sunsama';
+  event.calendarAccountId = draft.calendarAccountId || style.accountId;
+  event.calendarId = draft.calendarId || style.calendarId;
   event.linkedTaskId = draft.linkedTaskId || event.linkedTaskId || null;
   event.colorClass = style.eventClass;
   event.zOrder = event.zOrder || ++calZCounter;
@@ -14511,16 +15149,16 @@ function getCalendarEventRenderBackgroundColor(evt, linkedTask) {
     return evt?.systemType === 'actual' ? '#b4b4b4' : DEFAULT_SCHEDULED_EVENT_COLOR;
   }
   if (isManualScheduledEvent(evt)) {
-    return getManualScheduledEventStyle(evt.channelId).hashColor;
+    return getScheduledEventCalendarStyle(evt).color;
   }
   return null;
 }
 
-function getScheduledEventDraftPreviewColors(channelId) {
-  const style = getManualScheduledEventStyle(channelId);
+function getScheduledEventDraftPreviewColors(draftOrEvent = null) {
+  const style = getScheduledEventCalendarStyle(draftOrEvent);
   return {
-    fill: hexToRgba(style.hashColor, 0.28),
-    border: hexToRgba(style.hashColor, 0.95)
+    fill: hexToRgba(style.color, 0.28),
+    border: hexToRgba(style.color, 0.95)
   };
 }
 
@@ -14567,15 +15205,15 @@ function renderAllDayScheduledEvents(visibleDate) {
   const events = getAllDayScheduledEventsForDate(visibleDate);
   container.hidden = events.length === 0;
   eventsEl.innerHTML = events.map(evt => {
-    const style = getManualScheduledEventStyle(evt.channelId);
-    const textColor = getContrastTextColor(style.hashColor);
+    const style = getScheduledEventCalendarStyle(evt);
+    const textColor = getContrastTextColor(style.color);
     const ghostClass = evt.isDraftPreview ? ' calendar-all-day__event--ghost' : '';
     const disabledAttr = evt.isDraftPreview ? ' tabindex="-1" aria-hidden="true"' : '';
     const dataAttr = evt.isDraftPreview ? '' : ` data-calendar-all-day-event="${escapeHtml(evt.id)}"`;
-    const previewColors = evt.isDraftPreview ? getScheduledEventDraftPreviewColors(evt.channelId) : null;
+    const previewColors = evt.isDraftPreview ? getScheduledEventDraftPreviewColors(evt) : null;
     const inlineStyle = evt.isDraftPreview
       ? `background-color:${escapeHtml(previewColors.fill)};border-color:${escapeHtml(previewColors.border)};color:${escapeHtml(textColor)};`
-      : `background-color:${escapeHtml(style.hashColor)};color:${escapeHtml(textColor)};`;
+      : `background-color:${escapeHtml(style.color)};color:${escapeHtml(textColor)};`;
     return `<button class="calendar-all-day__event${ghostClass}" type="button"${dataAttr}${disabledAttr} style="${inlineStyle}">
       ${escapeHtml(evt.title || '')}
     </button>`;
@@ -14631,6 +15269,7 @@ function promoteDynamicEvent(evt) {
 function renderCalendarEvents() {
   const timeGrid = document.getElementById('time-grid');
   const ghost    = document.getElementById('cal-event-ghost');
+  closeCalendarHoverCard();
   const visibleDate = renderCalendarEvents._overrideDate || getFirstVisibleDate();
   renderCalendarEvents._overrideDate = null;
   const eventsForDate = getCalendarEventsForDate(visibleDate);
@@ -14650,7 +15289,7 @@ function renderCalendarEvents() {
     const eventColorClass = linkedTask
       ? getTaskEventColorClass(linkedTask, evt.colorClass || DEFAULT_CALENDAR_EVENT_CLASS)
       : isManualScheduledEvent(evt)
-        ? getManualScheduledEventStyle(evt.channelId).eventClass
+        ? getScheduledEventCalendarStyle(evt).eventClass
       : (evt.colorClass || DEFAULT_CALENDAR_EVENT_CLASS);
     evt.colorClass = eventColorClass;
 
@@ -14663,7 +15302,7 @@ function renderCalendarEvents() {
       el.style.backgroundColor = backgroundColor;
     }
     if (evt.isDraftPreview) {
-      const previewColors = getScheduledEventDraftPreviewColors(evt.channelId);
+      const previewColors = getScheduledEventDraftPreviewColors(evt);
       el.classList.add('cal-event--draft-preview');
       el.style.backgroundColor = previewColors.fill;
       el.style.borderColor = previewColors.border;
@@ -14672,6 +15311,7 @@ function renderCalendarEvents() {
     if (evt.taskId || isManualScheduledEvent(evt)) el.classList.add('cal-event--movable');
     if (isTodayTimelineEventFullyPast(evt, visibleDate)) el.classList.add('cal-event--past-today');
     el.dataset.eventId = evt.id;
+    el.setAttribute('data-event-id', evt.id);
     el.style.setProperty('--offset',   evt.offset);
     el.style.setProperty('--duration', evt.duration);
     el.style.zIndex = String(evt.zOrder);
@@ -20204,7 +20844,7 @@ function attachCalendarEvents() {
       if (!eventBtn) return;
       e.preventDefault();
       e.stopPropagation();
-      openScheduledEventFullModalForEvent(eventBtn.getAttribute('data-calendar-all-day-event'));
+      openCalendarItemFromEvent(eventBtn.getAttribute('data-calendar-all-day-event'));
     });
   }
 
@@ -20227,12 +20867,14 @@ function attachCalendarEvents() {
   timeGrid.addEventListener('mousedown', e => {
     const anyEventEl = e.target.closest('.cal-event:not(#cal-event-ghost)');
     if (!anyEventEl) return;
+    closeCalendarHoverCard();
     bringEventToFront(anyEventEl.dataset.eventId, anyEventEl);
   });
 
   timeGrid.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
     if (!isTimelineCreationTarget(e.target, e.clientX)) return;
+    closeCalendarHoverCard();
     e.preventDefault();
     const defaultDuration = DEFAULT_SCHEDULED_EVENT_DURATION_MINUTES / 60;
     const gridTop = timeGrid.getBoundingClientRect().top;
@@ -20266,6 +20908,7 @@ function attachCalendarEvents() {
 
     const evEl = e.target.closest('.cal-event--movable:not(#cal-event-ghost)');
     if (!evEl) return;
+    closeCalendarHoverCard();
 
     let evt = findCalendarEventById(evEl.dataset.eventId);
     if (!evt) return;
@@ -20360,23 +21003,7 @@ function attachCalendarEvents() {
     if (!evt) return;
 
     if (!started) {
-      if (isManualScheduledEvent(evt)) {
-        openScheduledEventFullModalForEvent(eventId);
-      } else if (evt.systemType === 'actual' && evt.taskId) {
-        const task = findTaskById(evt.taskId);
-        const linkedEvent = task ? getLinkedCalendarEventForTask(task) : null;
-        if (linkedEvent) {
-          openScheduledEventFullModalForEvent(linkedEvent.id);
-        } else if (task) {
-          openTaskDetailModal(task.id);
-        } else {
-          renderCalendarEvents();
-        }
-      } else if (evt.taskId) {
-        openTaskDetailModal(evt.taskId);
-      } else {
-        renderCalendarEvents();
-      }
+      openCalendarItemFromEvent(evt);
       return;
     }
 
@@ -20405,47 +21032,11 @@ function attachCalendarEvents() {
       renderCalendarEvents();
       return;
     } else if (evt.systemType === 'actual' && evt.taskId) {
-      // Drag actual event off timeline: delete event and subtract actual time
-      const task = findTaskById(evt.taskId);
-      const durationSeconds = Math.round(evt.duration * 3600);
-      state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
-      if (task) {
-        if (evt.subtaskId) {
-          const dragSubtask = findSubtask(task, evt.subtaskId);
-          if (dragSubtask) {
-            dragSubtask.actualTimeSeconds = Math.max(0, (dragSubtask.actualTimeSeconds || 0) - durationSeconds);
-            recordDailyTime(task, evt.date, -durationSeconds, evt.subtaskId);
-          }
-        } else {
-          task.ownActualTimeSeconds = Math.max(0, (task.ownActualTimeSeconds || 0) - durationSeconds);
-          recordDailyTime(task, evt.date, -durationSeconds, null);
-        }
-        syncTaskAggregateTimes(task);
-        const col = state.columns.find(c => c.tasks.some(t => t.id === task.id));
-        if (col) renderColumn(col);
-        updateFocusModalValues(task);
-        updateCardDetailTimerState();
-        persistTask(task, 0);
-      }
-      persistDeleteCalendarEvent(eventId);
+      deleteActualTimeCalendarEventById(eventId);
+      return;
     } else if (evt.taskId) {
-      const task = findTaskById(evt.taskId);
-      const removedEventDate = evt.date;
-      state.calendarEvents = state.calendarEvents.filter(ev => ev.id !== eventId);
-      if (task) {
-        // Only clear scheduledTime if the removed event was on the task's home column date
-        const homeCol = state.columns.find(c => c.tasks.some(t => t.id === evt.taskId));
-        const eventCol = state.columns.find(c => c.isoDate === removedEventDate);
-        if (homeCol && removedEventDate === homeCol.isoDate) {
-          task.scheduledTime = null;
-        }
-        if (homeCol) renderColumn(homeCol);
-        if (eventCol && eventCol !== homeCol) renderColumn(eventCol);
-        // Re-render ghost columns — removing the event may remove a ghost card
-        rerenderGhostColumns(task);
-        persistTask(task, 0);
-      }
-      persistDeleteCalendarEvent(eventId);
+      deleteScheduledTaskTimeboxByEventId(eventId);
+      return;
     }
 
     renderCalendarEvents();
@@ -20455,6 +21046,7 @@ function attachCalendarEvents() {
   timeGrid.addEventListener('dragenter', e => {
     const taskDragId = resolveTaskDragTaskId(e);
     if (!taskDragId) return;
+    closeCalendarHoverCard();
     e.preventDefault();
     ghost.hidden = false;
     calDragLine.hidden = true;
@@ -20498,6 +21090,7 @@ function attachCalendarEvents() {
     const taskDragId = resolveTaskDragTaskId(e);
     if (!taskDragId) return;
 
+    closeCalendarHoverCard();
     e.preventDefault();
     clearCalendarGhost();
     calDragLine.hidden = true;
@@ -20546,6 +21139,41 @@ function attachCalendarEvents() {
     rerenderGhostColumns(task);
 
     setTimeout(renderCalendarEvents, 0);
+  });
+
+  document.addEventListener('mouseover', e => {
+    const target = resolveCalendarHoverAnchor(e.target);
+    if (!target) return;
+    if (target.type === 'card') {
+      clearCalendarHoverCloseTimer();
+      return;
+    }
+    const previous = resolveCalendarHoverAnchor(e.relatedTarget);
+    if (previous && previous.type !== 'card' && previous.el === target.el) return;
+    showCalendarHoverCard(target.el, target.eventId, target.type);
+  }, true);
+
+  document.addEventListener('mouseout', e => {
+    const current = resolveCalendarHoverAnchor(e.target);
+    if (!current) return;
+    const next = resolveCalendarHoverAnchor(e.relatedTarget);
+    if (current.type === 'card') {
+      if (calendarHoverState.anchorEl && next && next.el === calendarHoverState.anchorEl) return;
+      scheduleCalendarHoverClose();
+      return;
+    }
+    if (next && (next.type === 'card' || next.el === current.el)) return;
+    scheduleCalendarHoverClose();
+  }, true);
+
+  document.addEventListener('scroll', () => {
+    if (!calendarHoverState.anchorEl) return;
+    closeCalendarHoverCard();
+  }, true);
+
+  window.addEventListener('resize', () => {
+    if (!calendarHoverState.anchorEl) return;
+    closeCalendarHoverCard();
   });
 
 }
@@ -20933,6 +21561,8 @@ let settingsScrollSpySuppressed = false;
 let settingsScrollSpyTimer = null;
 let settingsDropdownOpen = null; // { key, el }
 let settingsChannelModalState = null; // { mode: 'create-context'|'edit-context'|'create-channel'|'edit-channel', data }
+let settingsCalendarModalState = null; // { accountId, calendarId, draft, original, channelPickerField, channelPickerQuery, channelPickerHighlight }
+let settingsCalendarModalKeydownHandler = null;
 
 const SETTINGS_COLOR_PALETTE = [
   '#ff79a7','#d45d8c','#e979fc','#ff62be','#856cc2','#a382ff',
@@ -21022,6 +21652,7 @@ function closeSettingsView() {
   appShell.style.display = '';
   cleanupSettingsScrollSpy();
   closeSettingsDropdown();
+  closeSettingsCalendarModal();
   applySettingsToApp();
 }
 
@@ -21369,6 +22000,570 @@ function renderSettingsChannels() {
   return html;
 }
 
+function rerenderSettingsCalendarsSection() {
+  const calendarsSection = document.getElementById('settings-section-calendars');
+  if (!calendarsSection) return;
+  calendarsSection.outerHTML = renderSettingsCalendars();
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+  requestAnimationFrame(syncSettingsCalendarTableWidths);
+}
+
+function syncSettingsCalendarTableWidths() {
+  const tables = document.querySelectorAll('.settings-calendars__table');
+  tables.forEach(table => {
+    const maxWidths = [0, 0, 0];
+    const measuredCells = table.querySelectorAll('[data-settings-calendars-measure]');
+    measuredCells.forEach(cell => {
+      const index = Number(cell.getAttribute('data-settings-calendars-measure'));
+      if (!Number.isInteger(index) || index < 0 || index > 2) return;
+      const measureTarget = cell.firstElementChild || cell;
+      const measuredWidth = Math.ceil(measureTarget.getBoundingClientRect().width || cell.scrollWidth || 0);
+      maxWidths[index] = Math.max(maxWidths[index], measuredWidth);
+    });
+
+    table.style.setProperty('--settings-calendars-col-import', `${maxWidths[0]}px`);
+    table.style.setProperty('--settings-calendars-col-timebox', `${maxWidths[1]}px`);
+    table.style.setProperty('--settings-calendars-col-enable', `${maxWidths[2]}px`);
+  });
+}
+
+function getCalendarChannelSummaryHtml(channelId) {
+  const channel = getChannelById(channelId);
+  if (!channel) {
+    return '<span class="settings-calendars__channel-summary settings-calendars__channel-summary--empty"></span>';
+  }
+  return `<span class="settings-calendars__channel-summary">
+    <span class="settings-calendars__channel-hash" style="color:${escapeHtml(channel.hashColor)};">#</span>
+    <span class="settings-calendars__channel-text">${escapeHtml(channel.label)}</span>
+  </span>`;
+}
+
+function renderSettingsCalendarPills(calendar) {
+  const pills = [];
+  if (calendar.defaultForTaskScheduling) {
+    pills.push('<span class="settings-calendars__pill">Default for tasks</span>');
+  }
+  if (calendar.defaultForEventScheduling) {
+    pills.push('<span class="settings-calendars__pill">Default for events</span>');
+  }
+  return pills.length ? `<div class="settings-calendars__pill-row">${pills.join('')}</div>` : '';
+}
+
+function renderSettingsCalendarSummaryToggle(value, tooltip, ariaLabel) {
+  const tooltipAttr = tooltip ? ` data-tooltip="${escapeHtml(tooltip)}"` : '';
+  return `<button class="settings-toggle${value ? ' settings-toggle--on' : ''} settings-toggle--disabled" type="button" tabindex="-1" aria-label="${escapeHtml(ariaLabel)}"${tooltipAttr}>
+    <span class="settings-toggle__knob"></span>
+  </button>`;
+}
+
+function renderSettingsCalendarRow(account, calendar) {
+  const isPrimary = isPrimarySunsamaCalendar(account.id, calendar.id);
+  const enabledTooltip = isPrimary ? "Your primary calendar can't be disabled." : '';
+  return `<div class="settings-calendars__table-row" data-calendar-edit="${escapeHtml(account.id)}:${escapeHtml(calendar.id)}">
+    <div class="settings-calendars__calendar-cell">
+      <div class="settings-calendars__calendar-main">
+        <span class="settings-calendars__calendar-dot" style="--calendar-color:${escapeHtml(calendar.color || DEFAULT_SUNSAMA_CALENDAR_COLOR)};"></span>
+        <div class="settings-calendars__calendar-copy">
+          <div class="settings-calendars__calendar-name">${escapeHtml(calendar.name)}</div>
+          ${renderSettingsCalendarPills(calendar)}
+        </div>
+      </div>
+    </div>
+    <div class="settings-calendars__cluster">
+      <div class="settings-calendars__table-cell settings-calendars__table-cell--import" data-settings-calendars-measure="0">${getCalendarChannelSummaryHtml(calendar.importChannelId)}</div>
+      <div class="settings-calendars__table-cell settings-calendars__table-cell--timebox" data-settings-calendars-measure="1">${getCalendarChannelSummaryHtml(calendar.timeboxChannelId)}</div>
+      <div class="settings-calendars__table-cell settings-calendars__table-cell--toggle" data-settings-calendars-measure="2">
+        ${renderSettingsCalendarSummaryToggle(calendar.enabled !== false, enabledTooltip, `Calendar ${calendar.name} enabled`)}
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderSettingsCalendarAccount(account) {
+  const accountRows = (account.calendars || []).map(calendar => renderSettingsCalendarRow(account, calendar)).join('');
+  const removeBtn = account.removable
+    ? '<button class="settings-calendars__remove-btn" type="button" data-calendar-account-remove>Remove</button>'
+    : '';
+  const accountTitle = account.provider === 'sunsama'
+    ? 'Sunsama'
+    : String(account.label || 'calendar');
+  const accountIcon = account.provider === 'sunsama'
+    ? `<img class="settings-calendars__account-logo" src="images/icons/sunsama-icon.svg" alt="Sunsama">`
+    : `<span class="settings-calendars__account-fallback">${escapeHtml(String(account.label || 'C').charAt(0).toUpperCase())}</span>`;
+  const note = account.provider === 'sunsama'
+    ? `<div class="settings-calendars__note">
+        <i data-lucide="info" class="settings-calendars__note-icon"></i>
+        <span>This calendar is not accessible outside of Sunsama.</span>
+      </div>`
+    : '';
+  return `<div class="settings-calendars__account" data-calendar-account="${escapeHtml(account.id)}">
+    <div class="settings-calendars__account-header">
+      <div class="settings-calendars__account-main">
+        <span class="settings-calendars__account-badge">${accountIcon}</span>
+        <span class="settings-calendars__account-label">${escapeHtml(accountTitle)}</span>
+      </div>
+      ${removeBtn}
+    </div>
+    <div class="settings-calendars__table">
+      <div class="settings-calendars__table-header settings-calendars__table-header--grid">
+        <span class="settings-calendars__calendar-heading">Calendar</span>
+        <div class="settings-calendars__cluster settings-calendars__cluster--header">
+          <span class="settings-calendars__table-cell settings-calendars__table-cell--import" data-settings-calendars-measure="0">Import Channel</span>
+          <span class="settings-calendars__table-cell settings-calendars__table-cell--timebox" data-settings-calendars-measure="1">Timebox Channel</span>
+          <span class="settings-calendars__table-cell settings-calendars__table-cell--toggle" data-settings-calendars-measure="2">Enable</span>
+        </div>
+      </div>
+      ${accountRows}
+    </div>
+    ${note}
+  </div>`;
+}
+
+function renderSettingsCalendars() {
+  const accountsHtml = getCalendarAccounts().map(account => renderSettingsCalendarAccount(account)).join('');
+  return `<section class="settings-view__section settings-view__section--calendars" id="settings-section-calendars">
+    <h2 class="settings-view__section-title">Calendars</h2>
+    <div class="settings-calendars__actions">
+      <button class="settings-calendars__add-btn" type="button" data-add-google-calendar>
+        <img class="settings-calendars__add-icon" src="images/icons/google-calendar-icon.svg" alt="" aria-hidden="true">
+        <span>Add Google Calendar</span>
+      </button>
+    </div>
+    <div class="settings-calendars__accounts">${accountsHtml}</div>
+  </section>`;
+}
+
+function getSettingsCalendarChannelButtonHtml(channelId) {
+  const channel = getChannelById(channelId);
+  if (!channel) {
+    return `<span class="settings-calendars__picker-placeholder"># channel</span>`;
+  }
+  return `<span class="settings-calendars__picker-channel">
+    <span class="settings-calendars__picker-hash" style="color:${escapeHtml(channel.hashColor)};">#</span>
+    <span>${escapeHtml(channel.label)}</span>
+  </span>`;
+}
+
+function getSettingsCalendarDefaultTooltip(field) {
+  if (!settingsCalendarModalState) return '';
+  const { original, calendarId } = settingsCalendarModalState;
+  if (isOnlyCalendar(calendarId)) {
+    return 'There is no other calendar you can use as your default.';
+  }
+  if (original && original[field]) {
+    return 'A default calendar must be set. Enable this on another calendar to switch the default.';
+  }
+  return '';
+}
+
+function isSettingsCalendarDefaultLocked(field) {
+  if (!settingsCalendarModalState) return false;
+  const { original, calendarId } = settingsCalendarModalState;
+  return isOnlyCalendar(calendarId) || !!(original && original[field]);
+}
+
+function isSettingsCalendarEnabledLocked() {
+  if (!settingsCalendarModalState) return false;
+  return isPrimarySunsamaCalendar(settingsCalendarModalState.accountId, settingsCalendarModalState.calendarId);
+}
+
+function renderSettingsCalendarModalToggle(field, value, options = {}) {
+  const locked = !!options.locked;
+  const tooltipAttr = locked && options.tooltip ? ` data-tooltip="${escapeHtml(options.tooltip)}"` : '';
+  return `<button class="settings-toggle${value ? ' settings-toggle--on' : ''}${locked ? ' settings-toggle--disabled' : ''}" type="button" data-settings-calendar-toggle="${escapeHtml(field)}"${locked ? ' data-settings-calendar-toggle-locked="true"' : ''}${tooltipAttr}>
+    <span class="settings-toggle__knob"></span>
+  </button>`;
+}
+
+function renderSettingsCalendarChannelPickerHtml(field) {
+  if (!settingsCalendarModalState || settingsCalendarModalState.channelPickerField !== field) return '';
+  const filtered = getFilteredChannels(settingsCalendarModalState.channelPickerQuery || '');
+  const selectedId = settingsCalendarModalState.draft[field] || 'unassigned';
+  const listHtml = renderChannelOptionListHTML(filtered, {
+    selectedId,
+    highlightIndex: settingsCalendarModalState.channelPickerHighlight,
+    itemIdAttr: 'data-settings-calendar-channel-id',
+    itemIndexAttr: 'data-settings-calendar-channel-idx'
+  });
+  return `<div class="channel-picker settings-calendars__channel-picker" data-settings-calendar-channel-picker>
+    <div class="channel-picker__arrow"></div>
+    <div class="channel-picker__header">Assign to channel:</div>
+    <input class="channel-picker__search" placeholder="Search..." type="text" value="${escapeHtml(settingsCalendarModalState.channelPickerQuery || '')}" data-settings-calendar-channel-search>
+    <div class="channel-picker__list">${listHtml}</div>
+    <div class="channel-picker__divider"></div>
+    <a class="channel-picker__manage" href="#" data-settings-calendar-manage-channels>Manage channels</a>
+  </div>`;
+}
+
+function openSettingsCalendarModal(accountId, calendarId) {
+  const entry = getCalendarEntry(accountId, calendarId);
+  if (!entry) return;
+  settingsCalendarModalState = {
+    accountId,
+    calendarId,
+    original: { ...entry.calendar },
+    draft: { ...entry.calendar },
+    channelPickerField: null,
+    channelPickerQuery: '',
+    channelPickerHighlight: 0
+  };
+  renderSettingsCalendarModal();
+}
+
+function closeSettingsCalendarModal() {
+  settingsCalendarModalState = null;
+  if (settingsCalendarModalKeydownHandler) {
+    document.removeEventListener('keydown', settingsCalendarModalKeydownHandler, true);
+    settingsCalendarModalKeydownHandler = null;
+  }
+  const overlay = document.getElementById('settings-calendar-overlay');
+  if (overlay) overlay.remove();
+}
+
+function renderSettingsCalendarModal() {
+  if (!settingsCalendarModalState) return;
+  if (settingsCalendarModalKeydownHandler) {
+    document.removeEventListener('keydown', settingsCalendarModalKeydownHandler, true);
+    settingsCalendarModalKeydownHandler = null;
+  }
+  const existing = document.getElementById('settings-calendar-overlay');
+  if (existing) existing.remove();
+
+  const { draft } = settingsCalendarModalState;
+  const taskDefaultLocked = isSettingsCalendarDefaultLocked('defaultForTaskScheduling');
+  const eventDefaultLocked = isSettingsCalendarDefaultLocked('defaultForEventScheduling');
+  const enabledLocked = isSettingsCalendarEnabledLocked();
+
+  let colorSwatches = '';
+  for (const color of SETTINGS_COLOR_PALETTE) {
+    const selected = color === draft.color ? ' settings-channel-modal__color-swatch--selected' : '';
+    colorSwatches += `<button class="settings-channel-modal__color-swatch${selected}" type="button" data-settings-calendar-color="${color}" style="background:${color}"><i data-lucide="check"></i></button>`;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'settings-calendar-overlay';
+  overlay.className = 'settings-channel-overlay';
+  overlay.innerHTML = `<div class="settings-channel-modal settings-channel-modal--calendar">
+    <div class="settings-channel-modal__header">
+      <h2 class="settings-channel-modal__title">Edit calendar</h2>
+      <div class="settings-channel-modal__header-actions">
+        <button class="settings-channel-modal__btn" type="button" data-settings-calendar-close>Discard</button>
+        <button class="settings-channel-modal__btn settings-channel-modal__btn--primary" type="button" data-settings-calendar-save>Save</button>
+      </div>
+    </div>
+    <div class="settings-channel-modal__body">
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-label">Name</div>
+        <input class="settings-channel-modal__input" type="text" value="${escapeHtml(draft.name || '')}" data-settings-calendar-name>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-label">Color</div>
+        <div class="settings-channel-modal__color-grid">${colorSwatches}</div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__toggle-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Default calendar when scheduling tasks</div>
+            <div class="settings-channel-modal__field-desc">When you drag and drop a task to the calendar or auto-schedule it, put the task on this calendar.</div>
+          </div>
+          <div class="settings-calendars__field-control">
+            ${renderSettingsCalendarModalToggle('defaultForTaskScheduling', !!draft.defaultForTaskScheduling, {
+              locked: taskDefaultLocked,
+              tooltip: getSettingsCalendarDefaultTooltip('defaultForTaskScheduling')
+            })}
+          </div>
+        </div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__toggle-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Default calendar when scheduling events</div>
+            <div class="settings-channel-modal__field-desc">When you click on an empty time on the calendar to create a new event, put the event on this calendar.</div>
+          </div>
+          <div class="settings-calendars__field-control">
+            ${renderSettingsCalendarModalToggle('defaultForEventScheduling', !!draft.defaultForEventScheduling, {
+              locked: eventDefaultLocked,
+              tooltip: getSettingsCalendarDefaultTooltip('defaultForEventScheduling')
+            })}
+          </div>
+        </div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__modal-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Import channel</div>
+            <div class="settings-channel-modal__field-desc">When you import events from this calendar, the tasks will be assigned to this channel.</div>
+          </div>
+          <div class="settings-view__dropdown-anchor settings-calendars__picker-anchor settings-calendars__field-control">
+            <button class="settings-calendars__picker-btn${draft.importChannelId ? '' : ' settings-calendars__picker-btn--placeholder'}" type="button" data-settings-calendar-channel-btn="importChannelId">
+              ${getSettingsCalendarChannelButtonHtml(draft.importChannelId)}
+            </button>
+            ${renderSettingsCalendarChannelPickerHtml('importChannelId')}
+          </div>
+        </div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__modal-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Timeboxing channel</div>
+            <div class="settings-channel-modal__field-desc">When you add a task to your calendar that's assigned to this channel, it will be scheduled to this calendar. Overrides default.</div>
+          </div>
+          <div class="settings-view__dropdown-anchor settings-calendars__picker-anchor settings-calendars__field-control">
+            <button class="settings-calendars__picker-btn${draft.timeboxChannelId ? '' : ' settings-calendars__picker-btn--placeholder'}" type="button" data-settings-calendar-channel-btn="timeboxChannelId">
+              ${getSettingsCalendarChannelButtonHtml(draft.timeboxChannelId)}
+            </button>
+            ${renderSettingsCalendarChannelPickerHtml('timeboxChannelId')}
+          </div>
+        </div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__toggle-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Import events</div>
+            <div class="settings-channel-modal__field-desc">When planning your day, import events from this calendar.</div>
+          </div>
+          <div class="settings-calendars__field-control">
+            ${renderSettingsCalendarModalToggle('importEvents', !!draft.importEvents)}
+          </div>
+        </div>
+      </div>
+      <div class="settings-channel-modal__field">
+        <div class="settings-channel-modal__field-row settings-calendars__toggle-row">
+          <div class="settings-calendars__field-copy">
+            <div class="settings-channel-modal__field-label">Enabled</div>
+            <div class="settings-channel-modal__field-desc">Include this calendar in your list of calendars.</div>
+          </div>
+          <div class="settings-calendars__field-control">
+            ${renderSettingsCalendarModalToggle('enabled', !!draft.enabled, {
+              locked: enabledLocked,
+              tooltip: enabledLocked ? "Your primary calendar can't be disabled." : ''
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+  document.getElementById('settings-view').appendChild(overlay);
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+
+  overlay.addEventListener('click', e => {
+    const pickerOpen = settingsCalendarModalState && settingsCalendarModalState.channelPickerField;
+    const clickedChannelUi = e.target.closest('[data-settings-calendar-channel-btn]') || e.target.closest('[data-settings-calendar-channel-picker]');
+    const pickerClosedByOutsideClick = !!(pickerOpen && !clickedChannelUi);
+    if (pickerClosedByOutsideClick) {
+      settingsCalendarModalState.channelPickerField = null;
+      settingsCalendarModalState.channelPickerQuery = '';
+      settingsCalendarModalState.channelPickerHighlight = 0;
+    }
+
+    if (e.target.closest('[data-settings-calendar-close]')) {
+      closeSettingsCalendarModal();
+      return;
+    }
+    if (e.target === overlay) {
+      closeSettingsCalendarModal();
+      return;
+    }
+    if (e.target.closest('[data-settings-calendar-save]')) {
+      handleSettingsCalendarSave();
+      return;
+    }
+
+    const swatch = e.target.closest('[data-settings-calendar-color]');
+    if (swatch) {
+      settingsCalendarModalState.draft.color = swatch.getAttribute('data-settings-calendar-color') || DEFAULT_SUNSAMA_CALENDAR_COLOR;
+      renderSettingsCalendarModal();
+      return;
+    }
+
+    const toggle = e.target.closest('[data-settings-calendar-toggle]');
+    if (toggle) {
+      e.preventDefault();
+      const field = toggle.getAttribute('data-settings-calendar-toggle');
+      if (!field) return;
+      const locked = toggle.getAttribute('data-settings-calendar-toggle-locked') === 'true';
+      if (locked) {
+        if (pickerClosedByOutsideClick) renderSettingsCalendarModal();
+        return;
+      }
+      settingsCalendarModalState.draft[field] = !settingsCalendarModalState.draft[field];
+      if (
+        (field === 'defaultForTaskScheduling' || field === 'defaultForEventScheduling')
+        && settingsCalendarModalState.draft[field]
+      ) {
+        settingsCalendarModalState.draft.enabled = true;
+      }
+      renderSettingsCalendarModal();
+      return;
+    }
+
+    const channelBtn = e.target.closest('[data-settings-calendar-channel-btn]');
+    if (channelBtn) {
+      const field = channelBtn.getAttribute('data-settings-calendar-channel-btn');
+      if (!field) return;
+      settingsCalendarModalState.channelPickerField = settingsCalendarModalState.channelPickerField === field ? null : field;
+      settingsCalendarModalState.channelPickerQuery = '';
+      settingsCalendarModalState.channelPickerHighlight = 0;
+      renderSettingsCalendarModal();
+      return;
+    }
+
+    const channelOption = e.target.closest('[data-settings-calendar-channel-id]');
+    if (channelOption) {
+      const field = settingsCalendarModalState.channelPickerField;
+      if (!field) return;
+      const channelId = channelOption.getAttribute('data-settings-calendar-channel-id');
+      settingsCalendarModalState.draft[field] = channelId === 'unassigned' ? null : channelId;
+      settingsCalendarModalState.channelPickerField = null;
+      settingsCalendarModalState.channelPickerQuery = '';
+      settingsCalendarModalState.channelPickerHighlight = 0;
+      renderSettingsCalendarModal();
+      return;
+    }
+
+    if (e.target.closest('[data-settings-calendar-manage-channels]')) {
+      e.preventDefault();
+      closeSettingsCalendarModal();
+      const channelsSection = document.getElementById('settings-section-channels');
+      if (channelsSection) {
+        channelsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        setSettingsActiveNav('channels');
+      }
+      return;
+    }
+
+    if (pickerClosedByOutsideClick) {
+      renderSettingsCalendarModal();
+    }
+  });
+
+  overlay.addEventListener('input', e => {
+    const nameInput = e.target.closest('[data-settings-calendar-name]');
+    if (nameInput) {
+      settingsCalendarModalState.draft.name = nameInput.value;
+      return;
+    }
+
+    const searchInput = e.target.closest('[data-settings-calendar-channel-search]');
+    if (searchInput) {
+      settingsCalendarModalState.channelPickerQuery = searchInput.value;
+      settingsCalendarModalState.channelPickerHighlight = 0;
+      const list = overlay.querySelector('.channel-picker__list');
+      if (!list) return;
+      const filtered = getFilteredChannels(settingsCalendarModalState.channelPickerQuery || '');
+      list.innerHTML = renderChannelOptionListHTML(filtered, {
+        selectedId: settingsCalendarModalState.draft[settingsCalendarModalState.channelPickerField] || 'unassigned',
+        highlightIndex: settingsCalendarModalState.channelPickerHighlight,
+        itemIdAttr: 'data-settings-calendar-channel-id',
+        itemIndexAttr: 'data-settings-calendar-channel-idx'
+      });
+    }
+  });
+
+  const searchInput = overlay.querySelector('[data-settings-calendar-channel-search]');
+  if (searchInput) {
+    requestAnimationFrame(() => searchInput.focus());
+    searchInput.addEventListener('keydown', e => {
+      if (!settingsCalendarModalState || !settingsCalendarModalState.channelPickerField) return;
+      const filtered = getFilteredChannels(settingsCalendarModalState.channelPickerQuery || '');
+      if (!filtered.length) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          settingsCalendarModalState.channelPickerField = null;
+          settingsCalendarModalState.channelPickerQuery = '';
+          settingsCalendarModalState.channelPickerHighlight = 0;
+          renderSettingsCalendarModal();
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        settingsCalendarModalState.channelPickerHighlight = Math.min(settingsCalendarModalState.channelPickerHighlight + 1, filtered.length - 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        settingsCalendarModalState.channelPickerHighlight = Math.max(settingsCalendarModalState.channelPickerHighlight - 1, 0);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        const selected = filtered[settingsCalendarModalState.channelPickerHighlight];
+        settingsCalendarModalState.draft[settingsCalendarModalState.channelPickerField] = selected && selected.id !== 'unassigned' ? selected.id : null;
+        settingsCalendarModalState.channelPickerField = null;
+        settingsCalendarModalState.channelPickerQuery = '';
+        settingsCalendarModalState.channelPickerHighlight = 0;
+        renderSettingsCalendarModal();
+        return;
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        settingsCalendarModalState.channelPickerField = null;
+        settingsCalendarModalState.channelPickerQuery = '';
+        settingsCalendarModalState.channelPickerHighlight = 0;
+        renderSettingsCalendarModal();
+        return;
+      } else {
+        return;
+      }
+
+      const list = overlay.querySelector('.channel-picker__list');
+      if (!list) return;
+      list.innerHTML = renderChannelOptionListHTML(filtered, {
+        selectedId: settingsCalendarModalState.draft[settingsCalendarModalState.channelPickerField] || 'unassigned',
+        highlightIndex: settingsCalendarModalState.channelPickerHighlight,
+        itemIdAttr: 'data-settings-calendar-channel-id',
+        itemIndexAttr: 'data-settings-calendar-channel-idx'
+      });
+      const highlighted = list.querySelector('.channel-picker__item--highlighted');
+      if (highlighted) highlighted.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  settingsCalendarModalKeydownHandler = function handleCalendarModalKeydown(e) {
+    if (e.key !== 'Escape') return;
+    const currentOverlay = document.getElementById('settings-calendar-overlay');
+    if (!currentOverlay) {
+      if (settingsCalendarModalKeydownHandler) {
+        document.removeEventListener('keydown', settingsCalendarModalKeydownHandler, true);
+        settingsCalendarModalKeydownHandler = null;
+      }
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (settingsCalendarModalState && settingsCalendarModalState.channelPickerField) {
+      settingsCalendarModalState.channelPickerField = null;
+      settingsCalendarModalState.channelPickerQuery = '';
+      settingsCalendarModalState.channelPickerHighlight = 0;
+      renderSettingsCalendarModal();
+      return;
+    }
+    closeSettingsCalendarModal();
+  };
+  document.addEventListener('keydown', settingsCalendarModalKeydownHandler, true);
+}
+
+function handleSettingsCalendarSave() {
+  if (!settingsCalendarModalState) return;
+  const { accountId, calendarId, draft } = settingsCalendarModalState;
+  const entry = getCalendarEntry(accountId, calendarId);
+  if (!entry) return;
+
+  entry.calendar.name = String(draft.name || '').trim() || entry.calendar.name;
+  entry.calendar.color = draft.color || DEFAULT_SUNSAMA_CALENDAR_COLOR;
+  entry.calendar.importChannelId = getChannelById(draft.importChannelId) ? draft.importChannelId : null;
+  entry.calendar.timeboxChannelId = getChannelById(draft.timeboxChannelId) ? draft.timeboxChannelId : null;
+  entry.calendar.importEvents = !!draft.importEvents;
+  entry.calendar.enabled = draft.enabled !== false;
+  entry.calendar.defaultForTaskScheduling = !!draft.defaultForTaskScheduling;
+  entry.calendar.defaultForEventScheduling = !!draft.defaultForEventScheduling;
+
+  normalizeCalendarSettings();
+  persistSettings();
+  closeSettingsCalendarModal();
+  rerenderSettingsCalendarsSection();
+  renderCalendarEvents();
+}
+
 function renderSettingsContent() {
   const contentEl = document.getElementById('settings-content');
   if (!contentEl) return;
@@ -21378,10 +22573,12 @@ function renderSettingsContent() {
     ${renderSettingsTimeboxing()}
     ${renderSettingsSchedule()}
     ${renderSettingsChannels()}
+    ${renderSettingsCalendars()}
     ${renderSettingsShortcuts()}
     ${renderSettingsProfile()}
     ${renderSettingsAccountMgmt()}
   </div>`;
+  requestAnimationFrame(syncSettingsCalendarTableWidths);
 }
 
 // ── Scroll Spy ──
@@ -21863,6 +23060,7 @@ function handleChannelSave() {
   }
 
   rebuildChannelColors();
+  normalizeCalendarSettings();
   persistSettings();
   closeChannelModal();
 
@@ -21872,6 +23070,7 @@ function handleChannelSave() {
     channelsSection.outerHTML = renderSettingsChannels();
     if (typeof lucide !== 'undefined') lucide.createIcons();
   }
+  rerenderSettingsCalendarsSection();
 }
 
 function handleChannelDelete() {
@@ -21896,6 +23095,7 @@ function handleChannelDelete() {
 
   delete settings.channelEnabled[data.id];
   rebuildChannelColors();
+  normalizeCalendarSettings();
   persistSettings();
   closeChannelModal();
 
@@ -21905,6 +23105,7 @@ function handleChannelDelete() {
     channelsSection.outerHTML = renderSettingsChannels();
     if (typeof lucide !== 'undefined') lucide.createIcons();
   }
+  rerenderSettingsCalendarsSection();
 }
 
 // ── Event Delegation ──
@@ -22082,6 +23283,28 @@ function attachSettingsEvents() {
       return;
     }
 
+    const removeCalendarAccountBtn = e.target.closest('[data-calendar-account-remove]');
+    if (removeCalendarAccountBtn) {
+      const accountEl = removeCalendarAccountBtn.closest('[data-calendar-account]');
+      const accountId = accountEl ? accountEl.getAttribute('data-calendar-account') : null;
+      if (!accountId || accountId === SETTINGS_SUNSAMA_ACCOUNT_ID) return;
+      settings.calendarAccounts = getCalendarAccounts().filter(account => account.id !== accountId);
+      normalizeCalendarSettings();
+      persistSettings();
+      rerenderSettingsCalendarsSection();
+      return;
+    }
+
+    const calendarRow = e.target.closest('[data-calendar-edit]');
+    if (calendarRow) {
+      const value = calendarRow.getAttribute('data-calendar-edit') || '';
+      const [accountId, calendarId] = value.split(':');
+      if (accountId && calendarId) {
+        openSettingsCalendarModal(accountId, calendarId);
+      }
+      return;
+    }
+
     // Close dropdown on click elsewhere
     if (settingsDropdownOpen && !e.target.closest('[data-settings-dropdown]')) {
       closeSettingsDropdown();
@@ -22137,6 +23360,20 @@ function attachSettingsEvents() {
     if (settingsChannelModalState) {
       e.preventDefault();
       closeChannelModal();
+      return;
+    }
+
+    if (settingsCalendarModalState) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (settingsCalendarModalState.channelPickerField) {
+        settingsCalendarModalState.channelPickerField = null;
+        settingsCalendarModalState.channelPickerQuery = '';
+        settingsCalendarModalState.channelPickerHighlight = 0;
+        renderSettingsCalendarModal();
+      } else {
+        closeSettingsCalendarModal();
+      }
       return;
     }
 
@@ -22510,6 +23747,7 @@ async function onAuthReady(userId) {
   }
 
   normalizeSearchSettings();
+  normalizeCalendarSettings();
 
   // Initialize day window first so columns exist
   initializeApp();
