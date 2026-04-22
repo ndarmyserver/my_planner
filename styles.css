@@ -838,7 +838,7 @@ button { cursor: pointer; }
   padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
 .daily-planning-panel__card h3 {
@@ -891,6 +891,155 @@ button { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.daily-planning-panel__events-divider {
+  width: 100%;
+  height: 1px;
+  background: #f0f0f0;
+  margin-top: 4px;
+}
+
+.daily-planning-panel__add-meetings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  align-self: flex-end;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #b4b4b4;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.daily-planning-panel__add-meetings i,
+.daily-planning-panel__add-meetings svg {
+  width: 14px;
+  height: 14px;
+}
+
+.daily-planning-panel__events-choice-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.daily-planning-panel__events-add-btn {
+  flex: 1;
+}
+
+.daily-planning-panel__events-card > .daily-planning-panel__events-add-btn {
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.daily-planning-panel__event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.daily-planning-panel__event-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.daily-planning-panel__event-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #413f39;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: left;
+  cursor: pointer;
+}
+
+.daily-planning-panel__event-row--unchecked .daily-planning-panel__event-check {
+  color: #b4b4b4;
+}
+
+.daily-planning-panel__event-check i,
+.daily-planning-panel__event-check svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.daily-planning-panel__event-check span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.daily-planning-panel__event-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #b4b4b4;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.daily-planning-panel__event-row:hover .daily-planning-panel__event-open,
+.daily-planning-panel__event-open:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.daily-planning-panel__event-open:hover {
+  color: #787878;
+  background: #f7f8fa;
+}
+
+.daily-planning-panel__event-open i,
+.daily-planning-panel__event-open svg {
+  width: 10px;
+  height: 10px;
+}
+
+.daily-planning-panel__card-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #b4b4b4;
+  cursor: pointer;
+}
+
+.daily-planning-panel__card-back:hover {
+  color: #787878;
+}
+
+.daily-planning-panel__card-back i,
+.daily-planning-panel__card-back svg {
+  width: 16px;
+  height: 16px;
 }
 
 .daily-planning-panel__time-select {
@@ -1024,10 +1173,29 @@ button { cursor: pointer; }
   height: 36px;
 }
 
+.daily-planning-panel__btn--success:hover {
+  background: #4dcd7d;
+  color: #ffffff;
+}
+
 .daily-planning-panel__btn--success i,
 .daily-planning-panel__btn--success svg {
   width: 16px;
   height: 16px;
+}
+
+.daily-planning-panel__btn--text {
+  border-color: transparent;
+  background: transparent;
+  color: #787878;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 8px;
+  opacity: 1;
+}
+
+.daily-planning-panel__btn--text:hover {
+  color: #413f39;
 }
 
 .daily-planning-panel__actions {

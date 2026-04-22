@@ -544,6 +544,8 @@ const dailyPlanningState = {
   showPriorShutdownReview: false,
   showingPriorShutdownReview: false,
   priorShutdownReviewDateISO: null,
+  calendarEventsMode: null,
+  calendarEventPickerSelectedIds: [],
   deferPolicy: {
     nextWeekMode: DAILY_PLANNING_DEFER_MODES.NEXT_MONDAY
   },
@@ -6032,6 +6034,7 @@ function resetDailyPlanningModeState() {
   dailyPlanningState.showPriorShutdownReview = false;
   dailyPlanningState.showingPriorShutdownReview = false;
   dailyPlanningState.priorShutdownReviewDateISO = null;
+  resetDailyPlanningCalendarEventsBranch();
 }
 
 function resetDailyShutdownModeState() {
@@ -6126,6 +6129,153 @@ function renderDailyPlanningTaskPreviewHtml(isoDate) {
   }).join('');
 }
 
+function resetDailyPlanningCalendarEventsBranch() {
+  dailyPlanningState.calendarEventsMode = null;
+  dailyPlanningState.calendarEventPickerSelectedIds = [];
+}
+
+function getDailyPlanningEligibleCalendarEvents(isoDate) {
+  if (!isoDate) return [];
+  return state.calendarEvents
+    .filter(event => {
+      if (!event || !canCalendarEventBeAddedToTasks(event)) return false;
+      if (!doesCalendarEventOccurOnDate(event, isoDate)) return false;
+      if (event.allDay) return false;
+      if (!Number.isFinite(event.offset)) return false;
+      if (!(Number(event.duration) > 0)) return false;
+      return !getLinkedTaskForCalendarEvent(event);
+    })
+    .sort((a, b) => {
+      const offsetDiff = (Number(a.offset) || 0) - (Number(b.offset) || 0);
+      if (offsetDiff !== 0) return offsetDiff;
+      return String(a.title || '').localeCompare(String(b.title || ''))
+        || String(a.id || '').localeCompare(String(b.id || ''));
+    });
+}
+
+function formatDailyPlanningCalendarEventAddLabel(count) {
+  return `Add ${count} ${count === 1 ? 'event' : 'events'}`;
+}
+
+function getDailyPlanningPickerSelectedEventIds(eligibleEvents) {
+  const eligibleIds = new Set(eligibleEvents.map(event => event.id));
+  dailyPlanningState.calendarEventPickerSelectedIds = (dailyPlanningState.calendarEventPickerSelectedIds || [])
+    .filter(eventId => eligibleIds.has(eventId));
+  return dailyPlanningState.calendarEventPickerSelectedIds;
+}
+
+function renderDailyPlanningCalendarEventsCardHtml(eligibleEvents, hasShutdownTask) {
+  const mode = dailyPlanningState.calendarEventsMode === 'picker' ? 'picker' : 'summary';
+  const showCardBack = !hasShutdownTask;
+
+  if (mode === 'picker') {
+    const selectedIds = getDailyPlanningPickerSelectedEventIds(eligibleEvents);
+    const selectedSet = new Set(selectedIds);
+    const selectedCount = selectedIds.length;
+    const rowsHtml = eligibleEvents.map(event => {
+      const isSelected = selectedSet.has(event.id);
+      const selectedClass = isSelected ? '' : ' daily-planning-panel__event-row--unchecked';
+      const iconName = isSelected ? 'square-check' : 'square';
+      return `
+        <div class="daily-planning-panel__event-row${selectedClass}">
+          <button class="daily-planning-panel__event-check" type="button" data-dp-calendar-event-toggle="${escapeHtml(event.id)}" aria-pressed="${isSelected ? 'true' : 'false'}">
+            <i data-lucide="${iconName}"></i>
+            <span>${escapeHtml(event.title || 'Untitled event')}</span>
+          </button>
+          <button class="daily-planning-panel__event-open" type="button" data-dp-calendar-event-open="${escapeHtml(event.id)}" aria-label="Open event">
+            <i data-lucide="external-link"></i>
+          </button>
+        </div>
+      `;
+    }).join('');
+    const addButton = selectedCount > 0
+      ? `<button class="daily-planning-panel__btn daily-planning-panel__btn--success daily-planning-panel__events-add-btn" type="button" data-dp-add-calendar-events>${escapeHtml(formatDailyPlanningCalendarEventAddLabel(selectedCount))}</button>`
+      : '';
+    const backButton = showCardBack
+      ? `<button class="daily-planning-panel__card-back" type="button" data-dp-calendar-events-back aria-label="Back to calendar event summary">
+          <i data-lucide="arrow-left"></i>
+        </button>`
+      : '';
+
+    return `
+      <div class="daily-planning-panel__card daily-planning-panel__card--spaced daily-planning-panel__events-card">
+        <div class="daily-planning-panel__events-header">
+          <h3>Fill in calendar events</h3>
+        </div>
+        <p>Add your meetings to get a full sense of your time commitments.</p>
+        <div class="daily-planning-panel__event-list">
+          ${rowsHtml}
+        </div>
+        ${addButton}
+        ${backButton ? `<div class="daily-planning-panel__events-divider"></div>${backButton}` : ''}
+      </div>
+    `;
+  }
+
+  const backButton = showCardBack
+    ? `<button class="daily-planning-panel__card-back" type="button" data-dp-calendar-events-back aria-label="Back to shutdown time">
+        <i data-lucide="arrow-left"></i>
+      </button>`
+    : '';
+
+  return `
+    <div class="daily-planning-panel__card daily-planning-panel__card--spaced daily-planning-panel__events-card">
+      <div class="daily-planning-panel__events-header">
+        <h3>Fill in calendar events</h3>
+      </div>
+      <p>Add your meetings to get a full sense of your time commitments.</p>
+      <div class="daily-planning-panel__events-choice-row">
+        <button class="daily-planning-panel__btn daily-planning-panel__btn--success daily-planning-panel__events-add-btn" type="button" data-dp-add-calendar-events>${escapeHtml(formatDailyPlanningCalendarEventAddLabel(eligibleEvents.length))}</button>
+        <button class="daily-planning-panel__btn daily-planning-panel__btn--text" type="button" data-dp-pick-calendar-events>Pick events</button>
+      </div>
+      ${backButton ? `<div class="daily-planning-panel__events-divider"></div>${backButton}` : ''}
+    </div>
+  `;
+}
+
+function setDailyPlanningCalendarEventsMode(nextMode) {
+  if (!dailyPlanningState.isActive) return;
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  const eligibleEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
+  if (!eligibleEvents.length) {
+    resetDailyPlanningCalendarEventsBranch();
+    renderDailyPlanningPanel();
+    return;
+  }
+  dailyPlanningState.calendarEventsMode = nextMode === 'picker' ? 'picker' : 'summary';
+  if (dailyPlanningState.calendarEventsMode === 'picker') {
+    dailyPlanningState.calendarEventPickerSelectedIds = eligibleEvents.map(event => event.id);
+  }
+  renderDailyPlanningPanel();
+}
+
+function toggleDailyPlanningCalendarEventSelection(eventId, isSelected) {
+  if (!eventId) return;
+  const selected = new Set(dailyPlanningState.calendarEventPickerSelectedIds || []);
+  if (isSelected) {
+    selected.add(eventId);
+  } else {
+    selected.delete(eventId);
+  }
+  dailyPlanningState.calendarEventPickerSelectedIds = Array.from(selected);
+  renderDailyPlanningPanel();
+}
+
+function addDailyPlanningCalendarEventsToTasks() {
+  if (!dailyPlanningState.isActive) return;
+  const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+  const eligibleEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
+  const idsToAdd = dailyPlanningState.calendarEventsMode === 'picker'
+    ? new Set(getDailyPlanningPickerSelectedEventIds(eligibleEvents))
+    : new Set(eligibleEvents.map(event => event.id));
+  const eventsToAdd = eligibleEvents.filter(event => idsToAdd.has(event.id));
+  if (!eventsToAdd.length) return;
+
+  eventsToAdd.forEach(event => addCalendarEventToTasks(event));
+  resetDailyPlanningCalendarEventsBranch();
+  renderDailyPlanningMode();
+}
+
 function renderDailyPlanningPanelHtml() {
   if (!dailyPlanningState.isActive) return '';
   syncDailyPlanningDraftShutdownTime();
@@ -6147,6 +6297,12 @@ function renderDailyPlanningPanelHtml() {
     const sentenceLabel = getDailyPlanningDateLabelForSentence(selectedDate);
     const shutdownValue = draft.shutdownTime || DAILY_PLANNING_DEFAULT_SHUTDOWN_TIME;
     const shutdownDisplay = formatTime24AsDisplay(shutdownValue);
+    const eligibleCalendarEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
+    if (!eligibleCalendarEvents.length) {
+      resetDailyPlanningCalendarEventsBranch();
+    }
+    const showCalendarEventsCard = eligibleCalendarEvents.length > 0
+      && (hasShutdownTask || !!dailyPlanningState.calendarEventsMode);
     const shutdownOptions = getShutdownTimeOptions().map(timeValue => {
       const isSelected = timeValue === shutdownValue;
       return `
@@ -6174,8 +6330,18 @@ function renderDailyPlanningPanelHtml() {
             <span>Add to calendar</span>
           </button>
         </div>
+        ${eligibleCalendarEvents.length ? `
+        <div class="daily-planning-panel__events-divider"></div>
+        <button class="daily-planning-panel__add-meetings" type="button" data-dp-show-calendar-events>
+          <span>Add meetings</span>
+          <i data-lucide="arrow-right"></i>
+        </button>
+        ` : ''}
       </div>
     `;
+    const calendarEventsCard = showCalendarEventsCard
+      ? renderDailyPlanningCalendarEventsCardHtml(eligibleCalendarEvents, hasShutdownTask)
+      : '';
 
     const actionHtml = showBackToPriorShutdownReview ? `
         <div class="daily-planning-panel__actions daily-planning-panel__actions--spaced">
@@ -6195,7 +6361,7 @@ function renderDailyPlanningPanelHtml() {
         <h2 class="daily-planning-panel__title">What do you want to get done ${escapeHtml(sentenceLabel)}?</h2>
         <p class="daily-planning-panel__subtitle">Add tasks you want to work on ${escapeHtml(sentenceLabel)}.</p>
         <div class="daily-planning-panel__metric${workloadClass}">${escapeHtml(workloadSummary)}</div>
-        ${shutdownCard}
+        ${showCalendarEventsCard ? calendarEventsCard : shutdownCard}
         ${actionHtml}
         <div class="daily-planning-panel__prompt">
           <p class="daily-planning-panel__prompt-text">What are the most high-impact things you could do ${escapeHtml(sentenceLabel)}?</p>
@@ -6918,6 +7084,11 @@ function renderDailyPlanningMode() {
   }
 
   const showingPriorShutdownReview = isDailyPlanningPriorShutdownReviewActive();
+  ensureDateDataLoaded(
+    showingPriorShutdownReview
+      ? dailyPlanningState.priorShutdownReviewDateISO
+      : (dailyPlanningState.selectedDate || getTodayISO())
+  );
   board.classList.add('board--daily-planning');
   board.setAttribute('data-dp-step', String(dailyPlanningState.step));
   container.classList.add('board__columns--ready');
@@ -7075,6 +7246,7 @@ function setDailyPlanningSelectedDate(nextIsoDate, options = {}) {
   if (resetStep) dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(clampedDate);
   dailyPlanningState.runDraft.shareText = '';
+  resetDailyPlanningCalendarEventsBranch();
   configureDailyPlanningPriorShutdownReview(clampedDate, { activate: resetStep });
   applyWorkdayBoundsForDate(clampedDate);
   markDailyPlanningVisited(clampedDate);
@@ -7140,6 +7312,7 @@ function enterDailyPlanningMode(targetDate) {
   dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
   dailyPlanningState.runDraft = createDailyPlanningRunDraft(selectedDate);
   dailyPlanningState.runDraft.shareText = '';
+  resetDailyPlanningCalendarEventsBranch();
   configureDailyPlanningPriorShutdownReview(selectedDate, { activate: true });
   topbarTaskFilterState.dailyPlanning = 'all';
   applyWorkdayBoundsForDate(selectedDate);
@@ -15726,6 +15899,7 @@ function scrollToDateColumn(isoDate, options = {}) {
     dailyPlanningState.selectedDate = isoDate;
     dailyPlanningState.step = DAILY_PLANNING_STEPS.ADD_TASKS;
     dailyPlanningState.runDraft = createDailyPlanningRunDraft(isoDate);
+    resetDailyPlanningCalendarEventsBranch();
     renderDailyPlanningMode();
     return;
   }
@@ -20244,6 +20418,52 @@ function attachDailyPlanningEvents() {
       return;
     }
 
+    if (e.target.closest('[data-dp-show-calendar-events]')) {
+      e.preventDefault();
+      setDailyPlanningCalendarEventsMode('summary');
+      return;
+    }
+
+    if (e.target.closest('[data-dp-pick-calendar-events]')) {
+      e.preventDefault();
+      setDailyPlanningCalendarEventsMode('picker');
+      return;
+    }
+
+    if (e.target.closest('[data-dp-calendar-events-back]')) {
+      e.preventDefault();
+      if (dailyPlanningState.calendarEventsMode === 'picker') {
+        setDailyPlanningCalendarEventsMode('summary');
+      } else {
+        resetDailyPlanningCalendarEventsBranch();
+        renderDailyPlanningPanel();
+      }
+      return;
+    }
+
+    const calendarEventOpenBtn = e.target.closest('[data-dp-calendar-event-open]');
+    if (calendarEventOpenBtn) {
+      e.preventDefault();
+      const eventId = calendarEventOpenBtn.getAttribute('data-dp-calendar-event-open');
+      if (eventId) openScheduledEventFullModalForEvent(eventId);
+      return;
+    }
+
+    const calendarEventToggleBtn = e.target.closest('[data-dp-calendar-event-toggle]');
+    if (calendarEventToggleBtn) {
+      e.preventDefault();
+      const eventId = calendarEventToggleBtn.getAttribute('data-dp-calendar-event-toggle');
+      const isSelected = calendarEventToggleBtn.getAttribute('aria-pressed') === 'true';
+      toggleDailyPlanningCalendarEventSelection(eventId, !isSelected);
+      return;
+    }
+
+    if (e.target.closest('[data-dp-add-calendar-events]')) {
+      e.preventDefault();
+      addDailyPlanningCalendarEventsToTasks();
+      return;
+    }
+
     if (e.target.closest('[data-dp-prev]')) {
       e.preventDefault();
       goToPrevDailyPlanningStep();
@@ -20298,6 +20518,7 @@ function attachDailyPlanningEvents() {
       draft.shutdownTimeManuallySelected = true;
       draft.updatedAt = new Date().toISOString();
       upsertDailyShutdownForDate(dailyPlanningState.selectedDate || getTodayISO(), draft.shutdownTime);
+      renderDailyPlanningMode();
     }
   });
 
