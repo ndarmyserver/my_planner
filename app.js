@@ -337,6 +337,7 @@ const settings = {
   calendarAccounts: createDefaultCalendarAccounts(),
   dailyPlanningEventExclusions: { ...DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS },
   autoCompleteImportedCalendarEvents: true,
+  autoCompleteImportedCalendarEventsResumeAfter: null,
   // Search
   searchFilters: { ...DEFAULT_SEARCH_FILTERS },
   searchDateRange: 'anytime',
@@ -1947,6 +1948,16 @@ function normalizeDailyPlanningEventExclusions() {
 
 function normalizeAutoCompleteImportedCalendarEventsSetting() {
   settings.autoCompleteImportedCalendarEvents = settings.autoCompleteImportedCalendarEvents !== false;
+  settings.autoCompleteImportedCalendarEventsResumeAfter = typeof settings.autoCompleteImportedCalendarEventsResumeAfter === 'string'
+    && settings.autoCompleteImportedCalendarEventsResumeAfter
+    ? settings.autoCompleteImportedCalendarEventsResumeAfter
+    : null;
+}
+
+function getAutoCompleteImportedCalendarEventsResumeAfterMs() {
+  if (!settings.autoCompleteImportedCalendarEventsResumeAfter) return null;
+  const timestamp = Date.parse(settings.autoCompleteImportedCalendarEventsResumeAfter);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function getCalendarAccounts() {
@@ -2340,9 +2351,11 @@ function uncompleteCalendarEventTaskByUser(task) {
 
 function syncCalendarEventTaskCompletionState(task, event) {
   if (!task || !event) return task;
-  if (!settings.autoCompleteImportedCalendarEvents) return task;
   const endDateTime = getCalendarEventEndDateTime(event);
   if (!endDateTime) return task;
+  if (!settings.autoCompleteImportedCalendarEvents) return task;
+  const resumeAfterMs = getAutoCompleteImportedCalendarEventsResumeAfterMs();
+  if (resumeAfterMs !== null && endDateTime.getTime() <= resumeAfterMs) return task;
   const isPastEnd = endDateTime.getTime() <= Date.now();
   if (isPastEnd && !task.complete) {
     const hadActualBefore = !!task.actualTimeSeconds;
@@ -23865,6 +23878,9 @@ function attachSettingsEvents() {
         return;
       } else {
         settings[key] = !isOn;
+        if (key === 'autoCompleteImportedCalendarEvents' && !isOn) {
+          settings.autoCompleteImportedCalendarEventsResumeAfter = new Date().toISOString();
+        }
       }
       persistSettings();
 
@@ -23880,9 +23896,6 @@ function attachSettingsEvents() {
       }
 
       if (key === 'autoCompleteImportedCalendarEvents') {
-        if (!isOn) {
-          runCalendarEventTaskAutoCompletionSweep();
-        }
         return;
       }
 
