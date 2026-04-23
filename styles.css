@@ -8819,6 +8819,18 @@ body.modal-open {
   gap: 36px;
 }
 
+.settings-view__section--calendars > .settings-view__row {
+  width: 100%;
+  max-width: 640px;
+}
+
+.settings-calendars__accounts + .settings-view__row {
+  width: 100%;
+  margin-top: 16px;
+  padding-top: 24px;
+  border-top: 1px solid var(--color-border);
+}
+
 .settings-calendars__account {
   display: flex;
   flex-direction: column;
@@ -9367,6 +9379,36 @@ body.modal-open {
 
 .settings-calendars__picker-anchor {
   flex-shrink: 0;
+}
+
+.settings-calendars__exclusions-anchor {
+  flex-shrink: 0;
+}
+
+.settings-calendars__exclusions-select {
+  min-width: 176px;
+  justify-content: space-between;
+}
+
+.settings-calendars__exclusions-dropdown {
+  width: 420px;
+  max-width: min(420px, calc(100vw - 48px));
+  border-radius: 6px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+  z-index: 7000;
+}
+
+.settings-calendars__exclusions-item {
+  align-items: flex-start;
+  gap: 16px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  line-height: 1.45;
+}
+
+.settings-calendars__exclusions-item span:first-child {
+  white-space: normal;
 }
 
 .settings-calendars__picker-btn {

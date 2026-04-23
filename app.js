@@ -276,6 +276,22 @@ const DEFAULT_SEARCH_FILTERS = {
   hidePlanningTasks: true,
   hideRepeatingTasks: false
 };
+const DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS = {
+  excludeWithoutOtherAttendees: false,
+  excludeNonBlockingEvents: true,
+  excludeOooOrHoldTitles: true,
+  excludeUnconfirmedAttendance: false,
+  excludeMultiDayAllDayEvents: true,
+  excludeSingleDayAllDayEvents: false
+};
+const DAILY_PLANNING_EVENT_EXCLUSION_OPTIONS = [
+  { id: 'excludeWithoutOtherAttendees', label: 'Exclude events without other attendees' },
+  { id: 'excludeNonBlockingEvents', label: 'Exclude non-blocking events' },
+  { id: 'excludeOooOrHoldTitles', label: 'Exclude events with "OOO" or "HOLD" in the title' },
+  { id: 'excludeUnconfirmedAttendance', label: 'Exclude events where attendance it not confirmed' },
+  { id: 'excludeMultiDayAllDayEvents', label: 'Exclude multi-day, all-day events' },
+  { id: 'excludeSingleDayAllDayEvents', label: 'Exclude single-day, all-day events' }
+];
 const SETTINGS_SUNSAMA_ACCOUNT_ID = 'calendar-account-sunsama';
 const SETTINGS_SUNSAMA_CALENDAR_ID = 'calendar-sunsama-primary';
 const DEFAULT_SUNSAMA_CALENDAR_COLOR = '#ffb74d';
@@ -319,6 +335,8 @@ const settings = {
   defaultChannelId: null,
   // Calendars
   calendarAccounts: createDefaultCalendarAccounts(),
+  dailyPlanningEventExclusions: { ...DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS },
+  autoCompleteImportedCalendarEvents: true,
   // Search
   searchFilters: { ...DEFAULT_SEARCH_FILTERS },
   searchDateRange: 'anytime',
@@ -341,7 +359,7 @@ function createDefaultSunsamaCalendar() {
     color: DEFAULT_SUNSAMA_CALENDAR_COLOR,
     importChannelId: null,
     timeboxChannelId: null,
-    importEvents: false,
+    importEvents: true,
     enabled: true,
     defaultForTaskScheduling: true,
     defaultForEventScheduling: true
@@ -1826,7 +1844,7 @@ function normalizeCalendarSettings() {
       color: DEFAULT_SUNSAMA_CALENDAR_COLOR,
       importChannelId: null,
       timeboxChannelId: null,
-      importEvents: false,
+      importEvents: true,
       enabled: true,
       defaultForTaskScheduling: false,
       defaultForEventScheduling: false
@@ -1848,7 +1866,7 @@ function normalizeCalendarSettings() {
           color: calendar && calendar.color ? calendar.color : DEFAULT_SUNSAMA_CALENDAR_COLOR,
           importChannelId: getChannelById(calendar && calendar.importChannelId) ? calendar.importChannelId : null,
           timeboxChannelId: getChannelById(calendar && calendar.timeboxChannelId) ? calendar.timeboxChannelId : null,
-          importEvents: !!(calendar && calendar.importEvents),
+          importEvents: calendar && calendar.importEvents !== undefined ? !!calendar.importEvents : true,
           enabled: calendar && calendar.enabled !== false,
           defaultForTaskScheduling: !!(calendar && calendar.defaultForTaskScheduling),
           defaultForEventScheduling: !!(calendar && calendar.defaultForEventScheduling)
@@ -1913,6 +1931,22 @@ function normalizeRitualSettings() {
   settings.ritualTaskChannelId = getChannelById(settings.ritualTaskChannelId)
     ? settings.ritualTaskChannelId
     : null;
+}
+
+function normalizeDailyPlanningEventExclusions() {
+  const raw = settings.dailyPlanningEventExclusions && typeof settings.dailyPlanningEventExclusions === 'object'
+    ? settings.dailyPlanningEventExclusions
+    : {};
+  settings.dailyPlanningEventExclusions = {};
+  Object.keys(DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS).forEach(key => {
+    settings.dailyPlanningEventExclusions[key] = raw[key] !== undefined
+      ? !!raw[key]
+      : DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS[key];
+  });
+}
+
+function normalizeAutoCompleteImportedCalendarEventsSetting() {
+  settings.autoCompleteImportedCalendarEvents = settings.autoCompleteImportedCalendarEvents !== false;
 }
 
 function getCalendarAccounts() {
@@ -2005,7 +2039,7 @@ function getCalendarEventSourceProvider(event) {
 
 function doesCalendarEventOccurOnDate(event, isoDate) {
   if (!event || !isoDate) return false;
-  if (isManualScheduledEvent(event) && event.allDay && event.endDate) {
+  if (event.allDay && event.endDate) {
     return event.date <= isoDate && event.endDate >= isoDate;
   }
   return event.date === isoDate;
@@ -2306,6 +2340,7 @@ function uncompleteCalendarEventTaskByUser(task) {
 
 function syncCalendarEventTaskCompletionState(task, event) {
   if (!task || !event) return task;
+  if (!settings.autoCompleteImportedCalendarEvents) return task;
   const endDateTime = getCalendarEventEndDateTime(event);
   if (!endDateTime) return task;
   const isPastEnd = endDateTime.getTime() <= Date.now();
@@ -6160,12 +6195,15 @@ function getDailyPlanningEligibleCalendarEvents(isoDate) {
     .filter(event => {
       if (!event || !canCalendarEventBeAddedToTasks(event)) return false;
       if (!doesCalendarEventOccurOnDate(event, isoDate)) return false;
-      if (event.allDay) return false;
-      if (!Number.isFinite(event.offset)) return false;
-      if (!(Number(event.duration) > 0)) return false;
+      if (!event.allDay) {
+        if (!Number.isFinite(event.offset)) return false;
+        if (!(Number(event.duration) > 0)) return false;
+      }
       return !getLinkedTaskForCalendarEvent(event);
     })
     .sort((a, b) => {
+      const allDayDiff = Number(!!b.allDay) - Number(!!a.allDay);
+      if (allDayDiff !== 0) return allDayDiff;
       const offsetDiff = (Number(a.offset) || 0) - (Number(b.offset) || 0);
       if (offsetDiff !== 0) return offsetDiff;
       return String(a.title || '').localeCompare(String(b.title || ''))
@@ -6177,6 +6215,162 @@ function formatDailyPlanningCalendarEventAddLabel(count) {
   return `Add ${count} ${count === 1 ? 'event' : 'events'}`;
 }
 
+function getDailyPlanningEventExclusions() {
+  if (!settings.dailyPlanningEventExclusions || typeof settings.dailyPlanningEventExclusions !== 'object') {
+    settings.dailyPlanningEventExclusions = { ...DEFAULT_DAILY_PLANNING_EVENT_EXCLUSIONS };
+  }
+  return settings.dailyPlanningEventExclusions;
+}
+
+function getDailyPlanningEventExclusionButtonLabel() {
+  const exclusions = getDailyPlanningEventExclusions();
+  const enabledCount = DAILY_PLANNING_EVENT_EXCLUSION_OPTIONS.reduce((count, option) => (
+    exclusions[option.id] ? count + 1 : count
+  ), 0);
+  if (enabledCount === 0) return 'No exclusion rules';
+  if (enabledCount === 1) return '1 exclusion rule';
+  return `${enabledCount} exclusion rules`;
+}
+
+function getCalendarEventAttendees(event) {
+  if (!event || typeof event !== 'object') return null;
+  const candidateLists = [
+    event.attendees,
+    event.attendeeList,
+    event.participants,
+    event.guests,
+    event.invitees,
+    event.googleEvent && event.googleEvent.attendees
+  ];
+  for (const candidate of candidateLists) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return null;
+}
+
+function isCalendarEventSelfAttendee(attendee) {
+  if (!attendee || typeof attendee !== 'object') return false;
+  return attendee.self === true
+    || attendee.isSelf === true
+    || attendee.me === true
+    || attendee.isCurrentUser === true
+    || attendee.currentUser === true;
+}
+
+function eventHasNoOtherAttendees(event) {
+  const attendees = getCalendarEventAttendees(event);
+  if (!Array.isArray(attendees)) return false;
+  if (attendees.length === 0) return true;
+  const normalizedAttendees = attendees.filter(attendee => attendee && typeof attendee === 'object');
+  if (!normalizedAttendees.length) return false;
+  const hasExplicitSelfAttendee = normalizedAttendees.some(isCalendarEventSelfAttendee);
+  if (!hasExplicitSelfAttendee) return false;
+  return !normalizedAttendees.some(attendee => !isCalendarEventSelfAttendee(attendee));
+}
+
+function getCalendarEventOwnAttendanceStatus(event) {
+  if (!event || typeof event !== 'object') return null;
+  const directKeys = [
+    'attendanceStatus',
+    'responseStatus',
+    'selfAttendanceStatus',
+    'selfResponseStatus',
+    'attendeeStatus'
+  ];
+  for (const key of directKeys) {
+    const value = event[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  const attendees = getCalendarEventAttendees(event);
+  if (!Array.isArray(attendees)) return null;
+  const selfAttendee = attendees.find(isCalendarEventSelfAttendee);
+  if (!selfAttendee) return null;
+  for (const key of ['attendanceStatus', 'responseStatus', 'status', 'response', 'attendeeStatus']) {
+    const value = selfAttendee[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function isCalendarEventAttendanceConfirmed(event) {
+  const status = getCalendarEventOwnAttendanceStatus(event);
+  if (!status) return null;
+  const normalizedStatus = String(status)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  return ['accepted', 'accept', 'confirmed', 'yes', 'going', 'owner'].includes(normalizedStatus);
+}
+
+function isMultiDayAllDayCalendarEvent(event) {
+  if (!event || !event.allDay) return false;
+  return !!(event.endDate && event.endDate > event.date);
+}
+
+function isSingleDayAllDayCalendarEvent(event) {
+  if (!event || !event.allDay) return false;
+  return !isMultiDayAllDayCalendarEvent(event);
+}
+
+function doesDailyPlanningEventMatchEnabledExclusionRules(event) {
+  if (!event) return false;
+  const exclusions = getDailyPlanningEventExclusions();
+  if (exclusions.excludeWithoutOtherAttendees && eventHasNoOtherAttendees(event)) {
+    return true;
+  }
+  if (exclusions.excludeNonBlockingEvents && event.transparency === 'non_blocking') {
+    return true;
+  }
+  if (exclusions.excludeOooOrHoldTitles) {
+    const normalizedTitle = String(event.title || '').toUpperCase();
+    if (normalizedTitle.includes('OOO') || normalizedTitle.includes('HOLD')) {
+      return true;
+    }
+  }
+  if (exclusions.excludeUnconfirmedAttendance) {
+    const confirmed = isCalendarEventAttendanceConfirmed(event);
+    if (confirmed === false) {
+      return true;
+    }
+  }
+  if (exclusions.excludeMultiDayAllDayEvents && isMultiDayAllDayCalendarEvent(event)) {
+    return true;
+  }
+  if (exclusions.excludeSingleDayAllDayEvents && isSingleDayAllDayCalendarEvent(event)) {
+    return true;
+  }
+  return false;
+}
+
+function shouldDailyPlanningCalendarEventBeDefaultSelected(event) {
+  if (!event) return true;
+  const entry = event.calendarAccountId && event.calendarId
+    ? getCalendarEntry(event.calendarAccountId, event.calendarId)
+    : null;
+  const importEnabled = !entry || !entry.calendar || entry.calendar.importEvents !== false;
+  if (!importEnabled) return false;
+  return !doesDailyPlanningEventMatchEnabledExclusionRules(event);
+}
+
+function getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents) {
+  return eligibleEvents
+    .filter(event => shouldDailyPlanningCalendarEventBeDefaultSelected(event))
+    .map(event => event.id);
+}
+
+function shouldShowDailyPlanningCalendarEventsSummary(eligibleEvents) {
+  return getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents).length > 0;
+}
+
+function getDailyPlanningCalendarEventsCardMode(eligibleEvents) {
+  if (dailyPlanningState.calendarEventsMode === 'picker') return 'picker';
+  return shouldShowDailyPlanningCalendarEventsSummary(eligibleEvents) ? 'summary' : 'picker';
+}
+
 function getDailyPlanningPickerSelectedEventIds(eligibleEvents) {
   const eligibleIds = new Set(eligibleEvents.map(event => event.id));
   dailyPlanningState.calendarEventPickerSelectedIds = (dailyPlanningState.calendarEventPickerSelectedIds || [])
@@ -6185,7 +6379,9 @@ function getDailyPlanningPickerSelectedEventIds(eligibleEvents) {
 }
 
 function renderDailyPlanningCalendarEventsCardHtml(eligibleEvents, hasShutdownTask) {
-  const mode = dailyPlanningState.calendarEventsMode === 'picker' ? 'picker' : 'summary';
+  const defaultSelectedIds = getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents);
+  const defaultSelectedCount = defaultSelectedIds.length;
+  const mode = getDailyPlanningCalendarEventsCardMode(eligibleEvents);
   const showCardBack = !hasShutdownTask;
 
   if (mode === 'picker') {
@@ -6245,7 +6441,7 @@ function renderDailyPlanningCalendarEventsCardHtml(eligibleEvents, hasShutdownTa
       </div>
       <p>Add your meetings to get a full sense of your time commitments.</p>
       <div class="daily-planning-panel__events-choice-row">
-        <button class="daily-planning-panel__btn daily-planning-panel__btn--success daily-planning-panel__events-add-btn" type="button" data-dp-add-calendar-events>${escapeHtml(formatDailyPlanningCalendarEventAddLabel(eligibleEvents.length))}</button>
+        <button class="daily-planning-panel__btn daily-planning-panel__btn--success daily-planning-panel__events-add-btn" type="button" data-dp-add-calendar-events>${escapeHtml(formatDailyPlanningCalendarEventAddLabel(defaultSelectedCount))}</button>
         <button class="daily-planning-panel__btn daily-planning-panel__btn--text" type="button" data-dp-pick-calendar-events>Pick events</button>
       </div>
       ${backButton ? `<div class="daily-planning-panel__events-divider"></div>${backButton}` : ''}
@@ -6262,9 +6458,10 @@ function setDailyPlanningCalendarEventsMode(nextMode) {
     renderDailyPlanningPanel();
     return;
   }
-  dailyPlanningState.calendarEventsMode = nextMode === 'picker' ? 'picker' : 'summary';
+  const shouldShowSummary = shouldShowDailyPlanningCalendarEventsSummary(eligibleEvents);
+  dailyPlanningState.calendarEventsMode = nextMode === 'picker' || !shouldShowSummary ? 'picker' : 'summary';
   if (dailyPlanningState.calendarEventsMode === 'picker') {
-    dailyPlanningState.calendarEventPickerSelectedIds = eligibleEvents.map(event => event.id);
+    dailyPlanningState.calendarEventPickerSelectedIds = getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents);
   }
   renderDailyPlanningPanel();
 }
@@ -6285,9 +6482,9 @@ function addDailyPlanningCalendarEventsToTasks() {
   if (!dailyPlanningState.isActive) return;
   const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
   const eligibleEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
-  const idsToAdd = dailyPlanningState.calendarEventsMode === 'picker'
+  const idsToAdd = getDailyPlanningCalendarEventsCardMode(eligibleEvents) === 'picker'
     ? new Set(getDailyPlanningPickerSelectedEventIds(eligibleEvents))
-    : new Set(eligibleEvents.map(event => event.id));
+    : new Set(getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents));
   const eventsToAdd = eligibleEvents.filter(event => idsToAdd.has(event.id));
   if (!eventsToAdd.length) return;
 
@@ -20456,7 +20653,10 @@ function attachDailyPlanningEvents() {
 
     if (e.target.closest('[data-dp-calendar-events-back]')) {
       e.preventDefault();
-      if (dailyPlanningState.calendarEventsMode === 'picker') {
+      const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+      const eligibleEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
+      const mode = getDailyPlanningCalendarEventsCardMode(eligibleEvents);
+      if (mode === 'picker' && shouldShowDailyPlanningCalendarEventsSummary(eligibleEvents)) {
         setDailyPlanningCalendarEventsMode('summary');
       } else {
         resetDailyPlanningCalendarEventsBranch();
@@ -22321,6 +22521,9 @@ function renderSettingsChannels() {
 function rerenderSettingsCalendarsSection() {
   const calendarsSection = document.getElementById('settings-section-calendars');
   if (!calendarsSection) return;
+  if (settingsDropdownOpen) {
+    closeSettingsDropdown();
+  }
   calendarsSection.outerHTML = renderSettingsCalendars();
   if (typeof lucide !== 'undefined') lucide.createIcons();
   requestAnimationFrame(syncSettingsCalendarTableWidths);
@@ -22437,6 +22640,63 @@ function renderSettingsCalendarAccount(account) {
   </div>`;
 }
 
+function renderDailyPlanningEventExclusionDropdownHtml() {
+  const exclusions = getDailyPlanningEventExclusions();
+  const itemsHtml = DAILY_PLANNING_EVENT_EXCLUSION_OPTIONS.map(option => `
+    <button class="settings-view__dropdown-item settings-calendars__exclusions-item" type="button" data-settings-exclusion-option="${escapeHtml(option.id)}">
+      <span>${escapeHtml(option.label)}</span>
+      <span class="settings-view__dropdown-check"${exclusions[option.id] ? '' : ' hidden'}>\u2713</span>
+    </button>
+  `).join('');
+  return `<div class="settings-view__dropdown settings-calendars__exclusions-dropdown" data-settings-dropdown="dailyPlanningEventExclusions">
+    <div class="settings-view__dropdown-arrow"></div>
+    <div class="settings-view__dropdown-items">${itemsHtml}</div>
+  </div>`;
+}
+
+function syncDailyPlanningEventExclusionControl() {
+  const trigger = document.querySelector('[data-settings-select="dailyPlanningEventExclusions"]');
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', settingsDropdownOpen && settingsDropdownOpen.key === 'dailyPlanningEventExclusions' ? 'true' : 'false');
+    const labelEl = trigger.querySelector('span');
+    if (labelEl) labelEl.textContent = getDailyPlanningEventExclusionButtonLabel();
+  }
+  const dropdown = settingsDropdownOpen && settingsDropdownOpen.key === 'dailyPlanningEventExclusions'
+    ? settingsDropdownOpen.el
+    : document.querySelector('[data-settings-dropdown="dailyPlanningEventExclusions"]');
+  if (!dropdown) return;
+  const exclusions = getDailyPlanningEventExclusions();
+  DAILY_PLANNING_EVENT_EXCLUSION_OPTIONS.forEach(option => {
+    const item = dropdown.querySelector(`[data-settings-exclusion-option="${option.id}"]`);
+    if (!item) return;
+    const check = item.querySelector('.settings-view__dropdown-check');
+    if (!check) return;
+    check.hidden = !exclusions[option.id];
+  });
+}
+
+function renderSettingsDailyPlanningEventExclusionsRow() {
+  const controlHtml = `<div class="settings-view__dropdown-anchor settings-calendars__exclusions-anchor">
+    <button class="settings-view__select settings-calendars__exclusions-select" type="button" data-settings-select="dailyPlanningEventExclusions" aria-expanded="${settingsDropdownOpen && settingsDropdownOpen.key === 'dailyPlanningEventExclusions' ? 'true' : 'false'}">
+      <span>${escapeHtml(getDailyPlanningEventExclusionButtonLabel())}</span>
+      <i data-lucide="chevron-down" class="settings-view__select-icon"></i>
+    </button>
+  </div>`;
+  return settingsRowHTML(
+    'Exclude certain types of events when planning day',
+    'By default, Sunsama excludes certain types of events from Daily Planning. You can adjust these rules here.',
+    controlHtml
+  );
+}
+
+function renderSettingsAutoCompleteImportedCalendarEventsRow() {
+  return settingsRowHTML(
+    'Auto-complete imported calendar events',
+    'When you import an event from your calendar, it will be automatically completed when the event ends.',
+    settingsToggleHTML('autoCompleteImportedCalendarEvents', settings.autoCompleteImportedCalendarEvents)
+  );
+}
+
 function renderSettingsCalendars() {
   const accountsHtml = getCalendarAccounts().map(account => renderSettingsCalendarAccount(account)).join('');
   return `<section class="settings-view__section settings-view__section--calendars" id="settings-section-calendars">
@@ -22448,6 +22708,8 @@ function renderSettingsCalendars() {
       </button>
     </div>
     <div class="settings-calendars__accounts">${accountsHtml}</div>
+    ${renderSettingsDailyPlanningEventExclusionsRow()}
+    ${renderSettingsAutoCompleteImportedCalendarEventsRow()}
   </section>`;
 }
 
@@ -22946,6 +23208,15 @@ function setSettingsActiveNav(sectionId) {
 function openSettingsDropdown(key, triggerEl) {
   closeSettingsDropdown();
   const anchor = triggerEl.closest('.settings-view__dropdown-anchor') || triggerEl.parentElement;
+  if (key === 'dailyPlanningEventExclusions') {
+    anchor.insertAdjacentHTML('beforeend', renderDailyPlanningEventExclusionDropdownHtml());
+    settingsDropdownOpen = {
+      key,
+      el: anchor.querySelector('[data-settings-dropdown="dailyPlanningEventExclusions"]')
+    };
+    syncDailyPlanningEventExclusionControl();
+    return;
+  }
   const options = getSettingsDropdownOptions(key);
   const currentValue = getSettingsValue(key);
 
@@ -22976,6 +23247,7 @@ function closeSettingsDropdown() {
   }
   // Also remove any stray dropdowns
   document.querySelectorAll('.settings-view__dropdown').forEach(d => d.remove());
+  syncDailyPlanningEventExclusionControl();
 }
 
 function getSettingsValue(key) {
@@ -23066,6 +23338,9 @@ function getSettingsDropdownOptions(key) {
 }
 
 function getSettingsDisplayLabel(key, value) {
+  if (key === 'dailyPlanningEventExclusions') {
+    return getDailyPlanningEventExclusionButtonLabel();
+  }
   const options = getSettingsDropdownOptions(key);
   const opt = options.find(o => String(o.value) === String(value));
   return opt ? opt.label : String(value);
@@ -23479,6 +23754,23 @@ function attachSettingsEvents() {
       return;
     }
 
+    const exclusionOption = e.target.closest('[data-settings-exclusion-option]');
+    if (exclusionOption) {
+      e.preventDefault();
+      const optionId = exclusionOption.getAttribute('data-settings-exclusion-option');
+      if (!optionId || !(optionId in getDailyPlanningEventExclusions())) return;
+      settings.dailyPlanningEventExclusions[optionId] = !settings.dailyPlanningEventExclusions[optionId];
+      persistSettings();
+      syncDailyPlanningEventExclusionControl();
+      if (dailyPlanningState.isActive) {
+        const selectedDate = dailyPlanningState.selectedDate || getTodayISO();
+        const eligibleEvents = getDailyPlanningEligibleCalendarEvents(selectedDate);
+        dailyPlanningState.calendarEventPickerSelectedIds = getDailyPlanningDefaultSelectedCalendarEventIds(eligibleEvents);
+        renderDailyPlanningPanel();
+      }
+      return;
+    }
+
     // Dropdown item selection
     const dropdownItem = e.target.closest('[data-settings-dropdown-item]');
     if (dropdownItem) {
@@ -23584,6 +23876,13 @@ function attachSettingsEvents() {
 
       if (key === 'hideCompletedTasksInCalendar') {
         renderCalendarEvents();
+        return;
+      }
+
+      if (key === 'autoCompleteImportedCalendarEvents') {
+        if (!isOn) {
+          runCalendarEventTaskAutoCompletionSweep();
+        }
         return;
       }
 
@@ -24160,6 +24459,8 @@ async function onAuthReady(userId) {
   normalizeSearchSettings();
   normalizeCalendarSettings();
   normalizeRitualSettings();
+  normalizeDailyPlanningEventExclusions();
+  normalizeAutoCompleteImportedCalendarEventsSetting();
 
   // Initialize day window first so columns exist
   initializeApp();
